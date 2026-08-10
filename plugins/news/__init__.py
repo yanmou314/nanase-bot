@@ -1,19 +1,32 @@
 import json
 import os
 import threading
+import time
 from datetime import date, timedelta
 
 import httpx
 from nonebot import get_bot, on_command
-from nonebot.adapters.onebot.v11 import MessageEvent
+from nonebot.adapters.onebot.v11 import MessageEvent, MessageSegment
 from nonebot_plugin_apscheduler import scheduler
+from PIL import Image, ImageDraw, ImageFont
+
 from common import is_owner
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
+CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 _LOCK = threading.Lock()
 
 NEWS_API = "https://60s.viki.moe/v2/60s"
 BAIDU_API = "https://top.baidu.com/api/board?platform=wise&tab=realtime"
+
+FONT_BOLD = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
+FONT_REG = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+FONT_FUN = "/usr/share/fonts/custom/ZCOOLKuaiLe-Regular.ttf"
+
+DARK = (60, 55, 80)
+GRAY = (150, 145, 165)
+ACCENT = (244, 114, 182)
+BLUE = (64, 120, 220)
 
 news_on_cmd = on_command("新闻开启", priority=5, block=True)
 news_off_cmd = on_command("新闻关闭", priority=5, block=True)
@@ -80,16 +93,96 @@ async def _fetch_baidu() -> list[str]:
         return items[:10]
 
 
-def _build_message(day: date, news: list[str], source: str) -> str:
-    lines = [
-        f"📰 {day.month}月{day.day}日 新闻速览",
-        "━━━━━━━━━━━━━━━━",
-    ]
-    for i, item in enumerate(news[:12], 1):
-        lines.append(f"{i}. {item}")
-    lines.append("━━━━━━━━━━━━━━━━")
-    lines.append(f"来源：{source}")
-    return "\n".join(lines)
+def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> list:
+    lines = []
+    for seg in text.split("\n"):
+        cur = ""
+        for ch in seg:
+            if draw.textlength(cur + ch, font=font) > max_width:
+                lines.append(cur)
+                cur = ch
+            else:
+                cur += ch
+        lines.append(cur)
+    return lines
+
+
+def _render_news_image(day: date, news: list[str], source: str) -> str:
+    W = 880
+    MARGIN = 52
+    top, bottom = (255, 241, 248), (233, 245, 255)
+
+    f_title = ImageFont.truetype(FONT_FUN, 48)
+    f_date = ImageFont.truetype(FONT_REG, 24)
+    f_num = ImageFont.truetype(FONT_BOLD, 26)
+    f_item = ImageFont.truetype(FONT_REG, 26)
+    f_foot = ImageFont.truetype(FONT_REG, 22)
+
+    items = news[:12]
+    preview = Image.new("RGB", (W, 10))
+    pdraw = ImageDraw.Draw(preview)
+    row_h = 44
+    heights = []
+    for i, item in enumerate(items, 1):
+        lines = _wrap_text(pdraw, item, f_item, W - MARGIN * 2 - 64)
+        heights.append(len(lines) * 40 + 8)
+
+    title_h = 120
+    list_h = sum(heights)
+    foot_h = 70
+    H = title_h + list_h + foot_h
+
+    img = Image.new("RGB", (W, H))
+    draw = ImageDraw.Draw(img)
+    for y in range(H):
+        t = y / H
+        draw.line([(0, y), (W, y)],
+                  fill=tuple(int(top[i] + (bottom[i] - top[i]) * t) for i in range(3)))
+
+    import random
+    rnd = random.Random(11)
+    pastel = ["#FFD3E0", "#C9F0FF", "#FFF3C4", "#D8F3DC", "#E7D9FF", "#FFE8D6"]
+    for _ in range(60):
+        x, y, r = rnd.randint(0, W), rnd.randint(0, title_h + 30), rnd.randint(6, 24)
+        draw.ellipse([x - r, y - r, x + r, y + r], fill=pastel[rnd.randint(0, 5)] + f"{rnd.randint(35, 80):02X}")
+
+    draw.text((MARGIN, 40), "今日新闻速览", font=f_title, fill=DARK)
+    draw.text((MARGIN, 100),
+              f"{day.year}年{day.month}月{day.day}日 · {len(items)} 条 · 来源：{source}",
+              font=f_date, fill=GRAY)
+
+    y = title_h + 8
+    palette = ["#F15BB5", "#FCA311", "#4ECDC4", "#45B7D1", "#9B5DE5", "#00BBF9",
+               "#FF6B6B", "#5FD068", "#FF8C42", "#FEE440", "#96CEB4", "#FFC93C"]
+    for i, item in enumerate(items, 1):
+        color = palette[(i - 1) % len(palette)]
+        box_h = heights[i - 1]
+        _round_rect(draw, [MARGIN, y, W - MARGIN, y + box_h], 14, (255, 255, 255, 200))
+        num_w = 30
+        cx = MARGIN + 26
+        cy = y + box_h / 2
+        draw.ellipse([cx - 13, cy - 13, cx + 13, cy + 13], fill=color)
+        draw.text((cx, cy), str(i), font=f_num, fill=(255, 255, 255), anchor="mm")
+        lines = _wrap_text(draw, item, f_item, W - MARGIN * 2 - 64)
+        ty = y + (box_h - len(lines) * 38) / 2 + 8
+        for ln in lines:
+            draw.text((MARGIN + 48, ty), ln, font=f_item, fill=DARK)
+            ty += 38
+        y += box_h + 8
+
+    draw.line([(MARGIN, H - 46), (W - MARGIN, H - 46)], fill=(210, 205, 225), width=2)
+    draw.text((MARGIN, H - 40), f"60秒读懂世界 · {time.strftime('%H:%M')}", font=f_foot, fill=GRAY)
+
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    path = os.path.join(CACHE_DIR, f"news_{int(time.time() * 1000)}.png")
+    img.save(path, "PNG")
+    return path
+
+
+def _round_rect(draw: ImageDraw.ImageDraw, box, radius: int, fill):
+    x0, y0, x1, y1 = box
+    r = min(radius, (x1 - x0) // 2, (y1 - y0) // 2)
+    draw.rounded_rectangle([x0, y0, x1, y1], radius=r, fill=fill)
 
 
 async def _send_news(day: date) -> None:
@@ -107,8 +200,9 @@ async def _send_news(day: date) -> None:
             return
     if not news:
         return
+    path = await __import__("asyncio").to_thread(_render_news_image, day, news, source)
     bot = get_bot()
-    await bot.send_group_msg(group_id=int(group_id), message=_build_message(day, news, source))
+    await bot.send_group_msg(group_id=int(group_id), message=MessageSegment.image("file://" + path))
 
 
 @scheduler.scheduled_job("cron", hour=9, minute=0, id="daily_news", timezone="Asia/Shanghai")
@@ -140,7 +234,7 @@ async def news_test(event: MessageEvent):
         await news_test_cmd.finish("❌ 你没有权限使用此功能")
     if not hasattr(event, "group_id"):
         await news_test_cmd.finish("请在群里使用此命令")
-    await news_test_cmd.send("⏳ 正在生成新闻总结...")
+    await news_test_cmd.send("⏳ 正在生成新闻图片...")
     try:
         news = await _fetch_60s(date.today() - timedelta(days=1))
         source = "60秒读懂世界"
@@ -152,7 +246,8 @@ async def news_test(event: MessageEvent):
             await news_test_cmd.finish("新闻源获取失败，请稍后再试")
     if not news:
         await news_test_cmd.finish("新闻源返回为空，请稍后再试")
-    await news_test_cmd.finish(_build_message(date.today() - timedelta(days=1), news, source))
+    path = await __import__("asyncio").to_thread(_render_news_image, date.today() - timedelta(days=1), news, source)
+    await news_test_cmd.finish(MessageSegment.image("file://" + path))
 
 
 @news_status_cmd.handle()
