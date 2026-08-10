@@ -2,6 +2,7 @@ import random
 from datetime import date
 
 from nonebot import on_command
+from nonebot.adapters.onebot.v11 import Message, MessageEvent, MessageSegment
 
 luck_cmd = on_command(
     "rp",
@@ -21,14 +22,17 @@ TIERS = [
 
 
 @luck_cmd.handle()
-async def luck():
+async def luck(event: MessageEvent):
     today = date.today()
     score = random.randint(1, 100)
     for lo, hi, sign, sign_desc, luck_level, luck_desc in TIERS:
         if lo <= score <= hi:
             break
+    at = Message()
+    if hasattr(event, "group_id"):
+        at = Message(MessageSegment.at(event.user_id))
     await luck_cmd.finish(
-        f"🔮 {today.month}月{today.day}日 运势\n"
+        at + f"🔮 {today.month}月{today.day}日 运势\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"🎯 幸运数字：{score}\n"
         f"🗒 签文：「{sign}」{sign_desc}\n"
