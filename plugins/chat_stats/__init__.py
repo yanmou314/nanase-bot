@@ -1,18 +1,21 @@
 import asyncio
+import json
 import math
 import os
 import random
 import re
 import sqlite3
+import threading
 import time
 from collections import Counter, defaultdict, deque
-from datetime import date
+from datetime import date, timedelta
 
 from PIL import Image, ImageDraw, ImageFont
-from nonebot import on_command, on_message
+from nonebot import get_bot, on_command, on_message
 from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment
 from nonebot.params import CommandArg
+from nonebot_plugin_apscheduler import scheduler
 
 from common import (
     OWNER,
@@ -23,7 +26,9 @@ from common import (
 
 DB = os.path.join(os.path.dirname(__file__), "stats.db")
 WORD_CACHE = os.path.join(os.path.dirname(__file__), "cache")
+WORDS_STATE = os.path.join(os.path.dirname(__file__), "words_state.json")
 _lock = asyncio.Lock()
+_state_lock = threading.Lock()
 _nick_cache: dict = {}
 _nick_ts: dict = {}
 NICK_TTL = 300
@@ -244,6 +249,92 @@ async def mystats(bot: Bot, event: GroupMessageEvent, arg: Message = CommandArg(
     await mystats_cmd.finish("\n".join(lines))
 
 
+def _build_word_image(group_id: int, day: str, n: int) -> str | None:
+    rows = _exec("SELECT text FROM messages WHERE group_id=? AND day=? AND text!='''",
+                 (group_id, day))
+    counter: Counter = Counter()
+    for (text,) in rows:
+        for seg in re.findall(r"[\u4e00-\u9fff]{2,}", text):
+            if seg not in STOPWORDS:
+                counter[seg] += 1
+    if not counter:
+        return None
+    cleanup_cache(WORD_CACHE)
+    return _wordcloud(counter, min(n, len(counter)), len(rows))
+
+
+def _words_group() -> str:
+    with _state_lock:
+        try:
+            with open(WORDS_STATE, "r", encoding="utf-8") as f:
+                return (json.load(f).get("group_id") or "").strip()
+        except Exception:
+            return ""
+
+
+def _set_words_group(gid: str) -> None:
+    with _state_lock:
+        with open(WORDS_STATE, "w", encoding="utf-8") as f:
+            json.dump({"group_id": gid}, f, ensure_ascii=False, indent=2)
+
+
+def _clear_words_group() -> None:
+    with _state_lock:
+        try:
+            os.remove(WORDS_STATE)
+        except OSError:
+            pass
+
+
+words_on_cmd = on_command("词频开启", priority=5, block=True)
+words_off_cmd = on_command("词频关闭", priority=5, block=True)
+words_status_cmd = on_command("词频状态", priority=5, block=True)
+
+
+@words_on_cmd.handle()
+async def words_on(event: GroupMessageEvent):
+    if not is_owner(event):
+        await words_on_cmd.finish("❌ 你没有权限使用此功能")
+    if not hasattr(event, "group_id"):
+        await words_on_cmd.finish("请在有机器人的群里开启此功能")
+    _set_words_group(str(event.group_id))
+    await words_on_cmd.finish(f"✅ 每日词频推送已开启\n每天 8:00 自动发送昨日热词词云到此群（本群 {event.group_id}）")
+
+
+@words_off_cmd.handle()
+async def words_off(event: GroupMessageEvent):
+    if not is_owner(event):
+        await words_off_cmd.finish("❌ 你没有权限使用此功能")
+    _clear_words_group()
+    await words_off_cmd.finish("✅ 每日词频推送已关闭")
+
+
+@words_status_cmd.handle()
+async def words_status(event: GroupMessageEvent):
+    if not is_owner(event):
+        await words_status_cmd.finish("❌ 你没有权限使用此功能")
+    gid = _words_group()
+    if gid:
+        await words_status_cmd.finish(f"📊 每日词频推送：已开启（群 {gid}，每天 8:00 发送）")
+    await words_status_cmd.finish("📊 每日词频推送：未开启")
+
+
+@scheduler.scheduled_job("cron", hour=8, minute=5, id="daily_words", timezone="Asia/Shanghai")
+async def daily_words_job():
+    gid = _words_group()
+    if not gid:
+        return
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    try:
+        path = await asyncio.to_thread(_build_word_image, int(gid), yesterday, 20)
+        if not path:
+            return
+        bot = get_bot()
+        await bot.send_group_msg(group_id=int(gid), message=MessageSegment.image("file://" + path))
+    except Exception:
+        pass
+
+
 @words_cmd.handle()
 async def words(event: GroupMessageEvent, arg: Message = CommandArg()):
     if not is_owner(event):
@@ -252,15 +343,7 @@ async def words(event: GroupMessageEvent, arg: Message = CommandArg()):
         n = max(1, min(int(arg.extract_plain_text().strip() or 20), 30))
     except ValueError:
         n = 20
-    rows = _exec("SELECT text FROM messages WHERE group_id=? AND day=? AND text!='''",
-                 (event.group_id, date.today().isoformat()))
-    counter: Counter = Counter()
-    for (text,) in rows:
-        for seg in re.findall(r"[\u4e00-\u9fff]{2,}", text):
-            if seg not in STOPWORDS:
-                counter[seg] += 1
-    if not counter:
+    path = await asyncio.to_thread(_build_word_image, event.group_id, date.today().isoformat(), n)
+    if not path:
         await words_cmd.finish("今天还没有可统计的文字内容～")
-    cleanup_cache(WORD_CACHE)
-    path = await asyncio.to_thread(_wordcloud, counter, min(n, len(counter)), len(rows))
     await words_cmd.finish(MessageSegment.image("file://" + path))
