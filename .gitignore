@@ -1,16 +1,20 @@
-venv/
-__pycache__/
-*.pyc
+# 敏感配置（密钥/密码）
+**/config.json
+**/db.json
+**/auto_approve.json
+
+# 用户数据/状态
+**/bindings.json
+**/state.json
+**/words_state.json
+**/stats.db
+**/stats.db-*
+
+# 运行时缓存与日志
+**/cache/
+**/__pycache__/
+*.log
+
+# 环境配置（用 .env.example 代替）
 .env
-plugins/auto_chat/config.json
-plugins/chat_stats/stats.db
-plugins/chat_stats/stats.db-shm
-plugins/chat_stats/stats.db-wal
-plugins/owstats/bindings.json
-plugins/news/state.json
-plugins/owstats/cache/
-plugins/chat_stats/cache/
-plugins/server_status/cache/
-plugins/news/cache/
-plugins/chat_stats/words_state.json
-plugins/request_manager/auto_approve.json
+venv/

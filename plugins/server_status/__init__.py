@@ -1,4 +1,5 @@
 import os
+import random
 import shutil
 import socket
 import subprocess
@@ -112,7 +113,6 @@ def _render(data: dict) -> str:
         draw.line([(0, y), (W, y)],
                   fill=tuple(int(top[i] + (bottom[i] - top[i]) * t) for i in range(3)))
 
-    import random
     rnd = random.Random(7)
     pastel = ["#FFD3E0", "#C9F0FF", "#FFF3C4", "#D8F3DC", "#E7D9FF", "#FFE8D6"]
     for _ in range(80):
@@ -226,6 +226,7 @@ async def server_status(event: MessageEvent):
         "services": {
             "机器人服务 (qqbot)": _service_status("qqbot"),
             "NapCat (napcat)": _service_status("napcat"),
+            "守望数据 (overstats)": _service_status("overstats"),
         },
     }
 

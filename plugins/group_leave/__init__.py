@@ -1,6 +1,7 @@
 from nonebot import on_notice
 from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import GroupDecreaseNoticeEvent
+import random
 
 leave_matcher = on_notice(priority=1, block=False)
 
@@ -28,7 +29,6 @@ async def handle(bot: Bot, event: GroupDecreaseNoticeEvent):
     name = await _get_name(bot, uid)
 
     if sub == "leave":
-        import random
         msg = f"👋 {name}（{uid}）退群了\n{random.choice(MESSAGES)}"
     elif sub == "kick":
         op = "群管理员"

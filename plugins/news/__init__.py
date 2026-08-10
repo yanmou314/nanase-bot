@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import threading
@@ -162,7 +163,7 @@ async def _send_news(day: date) -> None:
             return
     if not news:
         return
-    path = await __import__("asyncio").to_thread(_render_news_image, day, news, source)
+    path = await asyncio.to_thread(_render_news_image, day, news, source)
     bot = get_bot()
     await bot.send_group_msg(group_id=int(group_id), message=MessageSegment.image("file://" + path))
 
