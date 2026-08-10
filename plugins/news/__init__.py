@@ -7,7 +7,7 @@ import httpx
 from nonebot import get_bot, on_command
 from nonebot.adapters.onebot.v11 import MessageEvent
 from nonebot_plugin_apscheduler import scheduler
-from common import is_owner as _is_owner
+from common import is_owner
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
 _LOCK = threading.Lock()
