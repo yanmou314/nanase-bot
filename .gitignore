@@ -12,3 +12,4 @@ plugins/owstats/cache/
 plugins/chat_stats/cache/
 plugins/server_status/cache/
 plugins/news/cache/
+plugins/chat_stats/words_state.json
