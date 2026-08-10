@@ -67,6 +67,24 @@ def _write(group_id: int, user_id: int, msg_type: str, text: str) -> None:
     _db().commit()
 
 
+RETENTION_DAYS = 30
+
+
+def _purge_old_records() -> int:
+    cutoff = (date.today() - timedelta(days=RETENTION_DAYS)).isoformat()
+    cur = _db().execute("DELETE FROM messages WHERE day < ?", (cutoff,))
+    _db().commit()
+    return cur.rowcount
+
+
+@scheduler.scheduled_job("cron", hour=3, minute=0, id="purge_old_stats", timezone="Asia/Shanghai")
+async def purge_old_stats():
+    try:
+        await asyncio.to_thread(_purge_old_records)
+    except Exception:
+        pass
+
+
 record_matcher = on_message(priority=1, block=False)
 dragon_cmd = on_command("龙王", priority=5, block=True)
 words_cmd = on_command("词频", aliases={"热词"}, priority=5, block=True)
