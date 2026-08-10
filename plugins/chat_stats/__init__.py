@@ -69,9 +69,6 @@ def _write(group_id: int, user_id: int, msg_type: str, text: str) -> None:
 
 record_matcher = on_message(priority=1, block=False)
 dragon_cmd = on_command("龙王", priority=5, block=True)
-rank_cmd = on_command("排行", aliases={"今日排行", "今日榜单"}, priority=5, block=True)
-total_rank_cmd = on_command("总排行", priority=5, block=True)
-mystats_cmd = on_command("统计", aliases={"我的统计", "查统计"}, priority=5, block=True)
 words_cmd = on_command("词频", aliases={"热词"}, priority=5, block=True)
 
 STOPWORDS = set("的了是在我有和你这不那啊呢吧吗哦嗯就都要也会没很他说她我们他们自己一个没什么可以"
@@ -181,72 +178,6 @@ async def dragon(bot: Bot, event: GroupMessageEvent):
     for i, (uid, cnt) in enumerate(rows):
         lines.append(f"{'👑' if i == 0 else _medal(i)} {names[uid]} · {cnt} 条")
     await dragon_cmd.finish("\n".join(lines))
-
-
-@rank_cmd.handle()
-async def rank(bot: Bot, event: GroupMessageEvent, arg: Message = CommandArg()):
-    if not is_owner(event):
-        await rank_cmd.finish("❌ 你没有权限使用此功能")
-    try:
-        n = max(1, min(int(arg.extract_plain_text().strip() or 10), 20))
-    except ValueError:
-        n = 10
-    rows = _exec("SELECT user_id, COUNT(*) c FROM messages WHERE group_id=? AND day=? GROUP BY user_id ORDER BY c DESC LIMIT ?",
-                 (event.group_id, date.today().isoformat(), n))
-    if not rows:
-        await rank_cmd.finish("今天还没有发言记录～")
-    names = {r[0]: await _get_name(bot, event.group_id, r[0]) for r in rows}
-    lines = [f"📊 今日发言排行 Top {len(rows)} · {date.today().month}月{date.today().day}日"]
-    for i, (uid, cnt) in enumerate(rows):
-        lines.append(f"{_medal(i)} {names[uid]} · {cnt} 条")
-    await rank_cmd.finish("\n".join(lines))
-
-
-@total_rank_cmd.handle()
-async def total_rank(bot: Bot, event: GroupMessageEvent, arg: Message = CommandArg()):
-    if not is_owner(event):
-        await total_rank_cmd.finish("❌ 你没有权限使用此功能")
-    try:
-        n = max(1, min(int(arg.extract_plain_text().strip() or 10), 20))
-    except ValueError:
-        n = 10
-    rows = _exec("SELECT user_id, COUNT(*) c FROM messages WHERE group_id=? GROUP BY user_id ORDER BY c DESC LIMIT ?",
-                 (event.group_id, n))
-    if not rows:
-        await total_rank_cmd.finish("还没有发言记录～")
-    names = {r[0]: await _get_name(bot, event.group_id, r[0]) for r in rows}
-    lines = [f"🏆 历史发言总排行 Top {len(rows)}"]
-    for i, (uid, cnt) in enumerate(rows):
-        lines.append(f"{_medal(i)} {names[uid]} · {cnt} 条")
-    await total_rank_cmd.finish("\n".join(lines))
-
-
-@mystats_cmd.handle()
-async def mystats(bot: Bot, event: GroupMessageEvent, arg: Message = CommandArg()):
-    if not is_owner(event):
-        await mystats_cmd.finish("❌ 你没有权限使用此功能")
-    uid = event.user_id
-    for seg in event.message:
-        if seg.type == "at" and seg.data.get("qq") not in (None, "all"):
-            uid = int(seg.data["qq"])
-            break
-    today = date.today().isoformat()
-    total = _exec("SELECT COUNT(*) FROM messages WHERE group_id=? AND user_id=?", (event.group_id, uid))[0][0]
-    today_cnt = _exec("SELECT COUNT(*) FROM messages WHERE group_id=? AND user_id=? AND day=?", (event.group_id, uid, today))[0][0]
-    active_days = _exec("SELECT COUNT(DISTINCT day) FROM messages WHERE group_id=? AND user_id=?", (event.group_id, uid))[0][0]
-    avg = round(total / active_days, 1) if active_days else 0
-    types = _exec("SELECT msg_type, COUNT(*) FROM messages WHERE group_id=? AND user_id=? GROUP BY msg_type ORDER BY COUNT(*) DESC LIMIT 4",
-                  (event.group_id, uid))
-    name = await _get_name(bot, event.group_id, uid)
-    if total == 0:
-        await mystats_cmd.finish(f"📈 {name} 的群聊统计\n暂无发言记录～")
-    type_label = {"text": "文字", "image": "图片", "face": "表情", "at": "@他人", "record": "语音"}
-    lines = [f"📈 {name} 的群聊统计", "━━━━━━━━━━━━━━━━",
-             f"💬 总发言：{total} 条", f"🔥 今日发言：{today_cnt} 条",
-             f"📅 活跃天数：{active_days} 天（日均 {avg} 条）"]
-    if types:
-        lines.append("📦 消息类型：" + "、".join(f"{type_label.get(t, t)} {c}条" for t, c in types))
-    await mystats_cmd.finish("\n".join(lines))
 
 
 def _build_word_image(group_id: int, day: str, n: int) -> str | None:
