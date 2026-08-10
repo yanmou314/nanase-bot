@@ -24,7 +24,8 @@ TIERS = [
 @luck_cmd.handle()
 async def luck(event: MessageEvent):
     today = date.today()
-    score = random.randint(1, 100)
+    rnd = random.Random(f"{event.user_id}-{today.isoformat()}")
+    score = rnd.randint(1, 100)
     for lo, hi, sign, sign_desc, luck_level, luck_desc in TIERS:
         if lo <= score <= hi:
             break
