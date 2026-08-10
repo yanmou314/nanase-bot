@@ -75,29 +75,44 @@ async def _auto_approve(bot: Bot, event: GroupRequestEvent, comment: str) -> boo
     return False
 
 
-# ---------------- 关键字配置（按群开启） ----------------
+# ---------------- 关键字配置（群内或私聊按群号） ----------------
 @auto_on_cmd.handle()
 async def auto_on(event: MessageEvent, arg=CommandArg()):
     if str(event.user_id) != OWNER:
         await auto_on_cmd.finish("❌ 你没有权限使用此功能")
-    if not hasattr(event, "group_id"):
-        await auto_on_cmd.finish("请在要开启自动通过的群里使用此命令")
     text = arg.extract_plain_text().strip()
     if not text:
-        await auto_on_cmd.finish("用法：.自动通过 关键字\n例如：.自动通过 我是老玩家\n多个关键字用空格分隔：.自动通过 关键字1 关键字2")
-    kws = [k for k in re.split(r"[\s,，、]+", text) if k]
-    _save_keywords(event.group_id, kws)
-    await auto_on_cmd.finish(f"✅ 本群自动通过已开启\n🏘 群号：{event.group_id}\n🔑 关键字：{' / '.join(kws)}\n进群附言包含任一关键字将自动同意")
+        if hasattr(event, "group_id"):
+            await auto_on_cmd.finish("用法：.自动通过 关键字\n例如：.自动通过 我是老玩家\n多个关键字用空格分隔：.自动通过 关键字1 关键字2")
+        await auto_on_cmd.finish("私聊用法：.自动通过 群号 关键字\n例如：.自动通过 <PRIVATE_NUMBER> 我是老玩家")
+    parts = text.split()
+    if hasattr(event, "group_id"):
+        gid = event.group_id
+        kws = [k for k in re.split(r"[\s,，、]+", text) if k]
+    else:
+        if not parts[0].isdigit():
+            await auto_on_cmd.finish("私聊用法：.自动通过 群号 关键字\n例如：.自动通过 <PRIVATE_NUMBER> 我是老玩家")
+        gid = int(parts[0])
+        kws = [k for k in re.split(r"[\s,，、]+", " ".join(parts[1:])) if k]
+    if not kws:
+        await auto_on_cmd.finish("请提供至少一个关键字")
+    _save_keywords(gid, kws)
+    await auto_on_cmd.finish(f"✅ 群 {gid} 自动通过已开启\n🔑 关键字：{' / '.join(kws)}\n进群附言包含任一关键字将自动同意")
 
 
 @auto_off_cmd.handle()
-async def auto_off(event: MessageEvent):
+async def auto_off(event: MessageEvent, arg=CommandArg()):
     if str(event.user_id) != OWNER:
         await auto_off_cmd.finish("❌ 你没有权限使用此功能")
-    if not hasattr(event, "group_id"):
-        await auto_off_cmd.finish("请在要关闭自动通过的群里使用此命令")
-    _save_keywords(event.group_id, [])
-    await auto_off_cmd.finish(f"✅ 本群自动通过已关闭（群 {event.group_id}），进群申请将等待手动处理")
+    text = arg.extract_plain_text().strip()
+    if hasattr(event, "group_id"):
+        gid = event.group_id
+    else:
+        if not text.isdigit():
+            await auto_off_cmd.finish("私聊用法：.自动通过关闭 群号\n例如：.自动通过关闭 <PRIVATE_NUMBER>")
+        gid = int(text)
+    _save_keywords(gid, [])
+    await auto_off_cmd.finish(f"✅ 群 {gid} 自动通过已关闭，进群申请将等待手动处理")
 
 
 @auto_show_cmd.handle()
