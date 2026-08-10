@@ -1,0 +1,8 @@
+[project]
+name = "qq-bot"
+version = "0.1.0"
+description = "QQ Bot based on NoneBot2"
+requires-python = ">=3.9"
+
+[tool.nonebot]
+plugin_dirs = ["plugins"]

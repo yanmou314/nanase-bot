@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+.env
+plugins/auto_chat/config.json
+plugins/chat_stats/stats.db
+plugins/chat_stats/stats.db-shm
+plugins/chat_stats/stats.db-wal
+plugins/owstats/bindings.json
+plugins/news/state.json
+plugins/owstats/cache/
+plugins/chat_stats/cache/
+plugins/server_status/cache/
