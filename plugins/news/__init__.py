@@ -135,6 +135,8 @@ def _render_news_image(day: date, news: list[str], source: str) -> str:
             draw.text((MARGIN + 44, ty), ln, font=font_item, fill=BLACK)
             ty += 40
         y += len(lines) * 40 + 10
+        if i < len(items):
+            draw.line([(MARGIN, y - 5), (W - MARGIN, y - 5)], fill=(220, 220, 220), width=2)
 
     draw.line([(MARGIN, H - 40), (W - MARGIN, H - 40)], fill=(220, 220, 220), width=2)
     draw.text((MARGIN, H - 34), f"来源：{source} · {time.strftime('%H:%M')}", font=font_foot, fill=GRAY)
