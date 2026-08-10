@@ -3,16 +3,16 @@ import json
 import os
 import threading
 import time
-from datetime import datetime
 
 import httpx
 from nonebot import on_command
 from nonebot.adapters.onebot.v11 import Message, MessageEvent, MessageSegment
 from nonebot.params import CommandArg
-from common import cleanup_cache
+from common import at_prefix, cleanup_cache, parse_tag, save_image as save_img
 
 API = "http://<PRIVATE_IP>:18080"
 CACHE = os.path.join(os.path.dirname(__file__), "cache")
+_HTTP = httpx.AsyncClient(timeout=120)
 BIND_FILE = os.path.join(os.path.dirname(__file__), "bindings.json")
 _LOCK = threading.Lock()
 OW_LOCK = asyncio.Lock()
@@ -26,15 +26,23 @@ unbind_cmd = on_command("解绑", aliases={"unbind"}, priority=5, block=True)
 myid_cmd = on_command("我的ID", aliases={"我的绑定", "myid"}, priority=5, block=True)
 
 
+_bind_cache: dict | None = None
+
+
 def _load_bindings() -> dict:
-    try:
-        with open(BIND_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    global _bind_cache
+    if _bind_cache is None:
+        try:
+            with open(BIND_FILE, "r", encoding="utf-8") as f:
+                _bind_cache = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            _bind_cache = {}
+    return _bind_cache
 
 
 def _save_bindings(data: dict) -> None:
+    global _bind_cache
+    _bind_cache = data
     tmp = BIND_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -63,21 +71,11 @@ def _get_bound(uid: str) -> str:
         return _load_bindings().get(uid, "")
 
 
-def _save_image(data: bytes, content_type: str, prefix: str) -> str:
-    ext = ".jpg" if "jpeg" in (content_type or "") else ".png"
-    os.makedirs(CACHE, exist_ok=True)
-    path = os.path.join(CACHE, f"{prefix}_{int(datetime.now().timestamp() * 1000)}{ext}")
-    with open(path, "wb") as f:
-        f.write(data)
-    return path
-
-
 async def _post_json(path: str, payload: dict, timeout: float = 90.0):
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(f"{API}{path}", json=payload)
-        if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
-            return {"_image": True, "bytes": r.content, "content_type": r.headers["content-type"]}
-        return r.json()
+    r = await _HTTP.post(f"{API}{path}", json=payload, timeout=timeout)
+    if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
+        return {"_image": True, "bytes": r.content, "content_type": r.headers["content-type"]}
+    return r.json()
 
 
 async def _post_json_with_notice(matcher, at: Message, notice: str, path: str, payload: dict,
@@ -102,29 +100,18 @@ async def _post_json_with_notice(matcher, at: Message, notice: str, path: str, p
             rem.cancel()
 
 
-def _parse_tag(arg: str) -> str:
-    tag = arg.replace(" ", "").replace("-", "#")
-    return tag if "#" in tag else ""
-
-
 def _resolve_tag(arg: Message, event: MessageEvent) -> str:
     raw = arg.extract_plain_text().strip()
     if raw:
-        tag = _parse_tag(raw.split()[0])
+        tag = parse_tag(raw.split()[0])
         if tag:
             return tag
     return _get_bound(str(event.user_id))
 
 
-def _at(event: MessageEvent) -> Message:
-    if hasattr(event, "group_id"):
-        return Message(MessageSegment.at(event.user_id))
-    return Message()
-
-
 async def _wait_queue(matcher, event: MessageEvent):
     if OW_LOCK.locked():
-        await matcher.send(_at(event) + Message("⏳ 有请求正在处理中，你已进入队列，完成后自动回复，请稍候..."))
+        await matcher.send(at_prefix(event) + Message("⏳ 有请求正在处理中，你已进入队列，完成后自动回复，请稍候..."))
     await OW_LOCK.acquire()
     return OW_LOCK
 
@@ -146,33 +133,33 @@ def _friendly_error(data: dict) -> str:
 # ---------------- 绑定 ----------------
 @bind_cmd.handle()
 async def bind(event: MessageEvent, arg: Message = CommandArg()):
-    tag = _parse_tag(arg.extract_plain_text().strip())
+    tag = parse_tag(arg.extract_plain_text().strip())
     if not tag:
-        await bind_cmd.finish(_at(event) + "用法：.绑定 名字#数字\n例如：.绑定 Yanmou#51293")
+        await bind_cmd.finish(at_prefix(event) + "用法：.绑定 名字#数字\n例如：.绑定 Yanmou#51293")
     _bind(str(event.user_id), tag)
-    await bind_cmd.finish(_at(event) + f"✅ 绑定成功：{tag}\n之后直接发 .战报、.段位、.强度、.总结 即可查询；加 ID 可查别人，如 .战报 其他人#1234")
+    await bind_cmd.finish(at_prefix(event) + f"✅ 绑定成功：{tag}\n之后直接发 .战报、.段位、.强度、.总结 即可查询；加 ID 可查别人，如 .战报 其他人#1234")
 
 
 @unbind_cmd.handle()
 async def unbind(event: MessageEvent):
     if _unbind(str(event.user_id)):
-        await unbind_cmd.finish(_at(event) + "✅ 已解除绑定")
-    await unbind_cmd.finish(_at(event) + "你还没有绑定过 ID")
+        await unbind_cmd.finish(at_prefix(event) + "✅ 已解除绑定")
+    await unbind_cmd.finish(at_prefix(event) + "你还没有绑定过 ID")
 
 
 @myid_cmd.handle()
 async def myid(event: MessageEvent):
     tag = _get_bound(str(event.user_id))
     if tag:
-        await myid_cmd.finish(_at(event) + f"🎮 当前绑定：{tag}\n如需更换请用 .绑定 新ID")
-    await myid_cmd.finish(_at(event) + "你还没有绑定 ID，用 .绑定 名字#数字 绑定")
+        await myid_cmd.finish(at_prefix(event) + f"🎮 当前绑定：{tag}\n如需更换请用 .绑定 新ID")
+    await myid_cmd.finish(at_prefix(event) + "你还没有绑定 ID，用 .绑定 名字#数字 绑定")
 
 
 # ---------------- 战报 ----------------
 @matchrep_cmd.handle()
 async def match_report(event: MessageEvent, arg: Message = CommandArg()):
     t0 = time.monotonic()
-    at = _at(event)
+    at = at_prefix(event)
     tag = _resolve_tag(arg, event)
     if not tag:
         await matchrep_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.战报 名字#数字")
@@ -201,7 +188,7 @@ async def match_report(event: MessageEvent, arg: Message = CommandArg()):
 @rankhist_cmd.handle()
 async def rank_history(event: MessageEvent, arg: Message = CommandArg()):
     t0 = time.monotonic()
-    at = _at(event)
+    at = at_prefix(event)
     tag = _resolve_tag(arg, event)
     if not tag:
         await rankhist_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.段位 名字#数字")
@@ -214,7 +201,7 @@ async def rank_history(event: MessageEvent, arg: Message = CommandArg()):
         except httpx.HTTPError:
             await rankhist_cmd.finish(at + "查询失败：请求超时，请稍后再试")
         if data.get("_image"):
-            path = _save_image(data["bytes"], data["content_type"], "rank")
+            path = save_img(data["bytes"], data["content_type"], "rank")
             await rankhist_cmd.finish(_done(Message(MessageSegment.image("file://" + path)), at, time.monotonic() - t0))
         await rankhist_cmd.finish(at + _friendly_error(data))
     finally:
@@ -225,7 +212,7 @@ async def rank_history(event: MessageEvent, arg: Message = CommandArg()):
 @strength_cmd.handle()
 async def strength(event: MessageEvent, arg: Message = CommandArg()):
     t0 = time.monotonic()
-    at = _at(event)
+    at = at_prefix(event)
     tag = _resolve_tag(arg, event)
     if not tag:
         await strength_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.强度 名字#数字")
@@ -238,7 +225,7 @@ async def strength(event: MessageEvent, arg: Message = CommandArg()):
         except httpx.HTTPError:
             await strength_cmd.finish(at + "查询失败：请求超时，请稍后再试")
         if data.get("_image"):
-            path = _save_image(data["bytes"], data["content_type"], "strength")
+            path = save_img(data["bytes"], data["content_type"], "strength")
             await strength_cmd.finish(_done(Message(MessageSegment.image("file://" + path)), at, time.monotonic() - t0))
         await strength_cmd.finish(at + _friendly_error(data))
     finally:
@@ -249,7 +236,7 @@ async def strength(event: MessageEvent, arg: Message = CommandArg()):
 @summary_cmd.handle()
 async def summary(event: MessageEvent, arg: Message = CommandArg()):
     t0 = time.monotonic()
-    at = _at(event)
+    at = at_prefix(event)
     parts = arg.extract_plain_text().split()
     scope = "today"
     if parts and parts[0] in ("今日", "今天", "昨日", "昨天", "本周"):
@@ -258,7 +245,7 @@ async def summary(event: MessageEvent, arg: Message = CommandArg()):
         parts = parts[1:]
     tag = ""
     if parts:
-        tag = _parse_tag(parts[0])
+        tag = parse_tag(parts[0])
     if not tag:
         tag = _get_bound(str(event.user_id))
     if not tag:
@@ -274,7 +261,7 @@ async def summary(event: MessageEvent, arg: Message = CommandArg()):
         except httpx.HTTPError:
             await summary_cmd.finish(at + "生成失败：超时，请稍后再试")
         if data.get("_image"):
-            path = _save_image(data["bytes"], data["content_type"], "summary")
+            path = save_img(data["bytes"], data["content_type"], "summary")
             await summary_cmd.finish(_done(Message(MessageSegment.image("file://" + path)), at, time.monotonic() - t0))
         await summary_cmd.finish(at + _friendly_error(data))
     finally:

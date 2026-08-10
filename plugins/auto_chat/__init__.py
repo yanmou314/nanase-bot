@@ -34,7 +34,7 @@ SYSTEM = (
 )
 
 _last_chat = 0.0
-_memory: dict = defaultdict(lambda: deque(maxlen=100))
+_memory: dict = defaultdict(lambda: deque(maxlen=20))
 
 POKE_REPLIES = [
     "再戳要长不高了！",
@@ -105,8 +105,6 @@ async def chat(bot: Bot, event: MessageEvent):
 
     msg = _clean_msg(event)
     if not msg:
-        return
-    if msg.startswith(".") or msg.startswith("。"):
         return
 
     key = _load_key()
