@@ -11,3 +11,4 @@ plugins/news/state.json
 plugins/owstats/cache/
 plugins/chat_stats/cache/
 plugins/server_status/cache/
+plugins/news/cache/
