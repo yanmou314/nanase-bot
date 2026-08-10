@@ -133,6 +133,16 @@ def _done(matcher_msg: Message, at: Message, elapsed: float) -> Message:
     return at + matcher_msg + Message(f"\n⏱ 用时 {elapsed:.1f}s")
 
 
+def _friendly_error(data: dict) -> str:
+    code = data.get("error") or ""
+    msg = data.get("message") or ""
+    if code == "summary_empty":
+        return "该玩家在过去 24 小时内没有对局记录，暂时无法生成总结～"
+    if code and not msg:
+        return f"查询失败：{code}"
+    return msg or "未知错误"
+
+
 # ---------------- 绑定 ----------------
 @bind_cmd.handle()
 async def bind(event: MessageEvent, arg: Message = CommandArg()):
@@ -175,7 +185,7 @@ async def match_report(event: MessageEvent, arg: Message = CommandArg()):
         except httpx.HTTPError:
             await matchrep_cmd.finish(at + "查询失败：请求超时，请稍后再试")
         if not data.get("ok"):
-            await matchrep_cmd.finish(at + f"查询失败：{data.get('error') or data.get('message') or '未知错误'}")
+            await matchrep_cmd.finish(at + _friendly_error(data))
         segments = []
         for rep in data.get("replies") or []:
             if rep.get("type") == "image" and rep.get("base64"):
@@ -206,7 +216,7 @@ async def rank_history(event: MessageEvent, arg: Message = CommandArg()):
         if data.get("_image"):
             path = _save_image(data["bytes"], data["content_type"], "rank")
             await rankhist_cmd.finish(_done(Message(MessageSegment.image("file://" + path)), at, time.monotonic() - t0))
-        await rankhist_cmd.finish(at + f"查询失败：{data.get('error') or data.get('message') or '未知错误'}")
+        await rankhist_cmd.finish(at + _friendly_error(data))
     finally:
         OW_LOCK.release()
 
@@ -230,7 +240,7 @@ async def strength(event: MessageEvent, arg: Message = CommandArg()):
         if data.get("_image"):
             path = _save_image(data["bytes"], data["content_type"], "strength")
             await strength_cmd.finish(_done(Message(MessageSegment.image("file://" + path)), at, time.monotonic() - t0))
-        await strength_cmd.finish(at + f"查询失败：{data.get('error') or data.get('message') or '未知错误'}")
+        await strength_cmd.finish(at + _friendly_error(data))
     finally:
         OW_LOCK.release()
 
@@ -266,6 +276,6 @@ async def summary(event: MessageEvent, arg: Message = CommandArg()):
         if data.get("_image"):
             path = _save_image(data["bytes"], data["content_type"], "summary")
             await summary_cmd.finish(_done(Message(MessageSegment.image("file://" + path)), at, time.monotonic() - t0))
-        await summary_cmd.finish(at + f"生成失败：{data.get('error') or data.get('message') or '未知错误'}")
+        await summary_cmd.finish(at + _friendly_error(data))
     finally:
         OW_LOCK.release()
