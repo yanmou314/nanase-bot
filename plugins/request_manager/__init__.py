@@ -31,24 +31,31 @@ def _now() -> str:
     return datetime.now().strftime("%m-%d %H:%M")
 
 
-def _load_keywords() -> list[str]:
+def _load_config() -> dict:
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return [k for k in (json.load(f).get("keywords") or []) if k]
+            return json.load(f)
     except Exception:
-        return []
+        return {}
 
 
-def _save_keywords(kw: list[str]) -> None:
+def _load_keywords(group_id: int) -> list[str]:
+    return [k for k in (_load_config().get(str(group_id)) or []) if k]
+
+
+def _save_keywords(group_id: int, kw: list[str]) -> None:
+    data = _load_config()
+    data[str(group_id)] = [k for k in kw if k]
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump({"keywords": kw}, f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 async def _auto_approve(bot: Bot, event: GroupRequestEvent, comment: str) -> bool:
-    keywords = _load_keywords()
+    keywords = _load_keywords(event.group_id)
     if not keywords:
         return False
-    if any(kw in comment for kw in keywords):
+    hit = [k for k in keywords if k in comment]
+    if hit:
         try:
             await bot.set_group_add_request(flag=event.flag, sub_type=event.sub_type, approve=True)
             await bot.send_private_msg(
@@ -58,7 +65,7 @@ async def _auto_approve(bot: Bot, event: GroupRequestEvent, comment: str) -> boo
                     f"🏘 群号：{event.group_id}\n"
                     f"👤 申请人：{event.user_id}（{_now()}）\n"
                     f"💬 附言：{comment or '无'}\n"
-                    f"🔑 命中关键字：{' / '.join(k for k in keywords if k in comment)}"
+                    f"🔑 命中关键字：{' / '.join(hit)}"
                 ),
             )
             return True
@@ -68,35 +75,48 @@ async def _auto_approve(bot: Bot, event: GroupRequestEvent, comment: str) -> boo
     return False
 
 
-# ---------------- 关键字配置 ----------------
+# ---------------- 关键字配置（按群开启） ----------------
 @auto_on_cmd.handle()
 async def auto_on(event: MessageEvent, arg=CommandArg()):
     if str(event.user_id) != OWNER:
         await auto_on_cmd.finish("❌ 你没有权限使用此功能")
+    if not hasattr(event, "group_id"):
+        await auto_on_cmd.finish("请在要开启自动通过的群里使用此命令")
     text = arg.extract_plain_text().strip()
     if not text:
         await auto_on_cmd.finish("用法：.自动通过 关键字\n例如：.自动通过 我是老玩家\n多个关键字用空格分隔：.自动通过 关键字1 关键字2")
     kws = [k for k in re.split(r"[\s,，、]+", text) if k]
-    _save_keywords(kws)
-    await auto_on_cmd.finish(f"✅ 自动通过已开启\n🔑 关键字：{' / '.join(kws)}\n进群附言包含任一关键字将自动同意")
+    _save_keywords(event.group_id, kws)
+    await auto_on_cmd.finish(f"✅ 本群自动通过已开启\n🏘 群号：{event.group_id}\n🔑 关键字：{' / '.join(kws)}\n进群附言包含任一关键字将自动同意")
 
 
 @auto_off_cmd.handle()
 async def auto_off(event: MessageEvent):
     if str(event.user_id) != OWNER:
         await auto_off_cmd.finish("❌ 你没有权限使用此功能")
-    _save_keywords([])
-    await auto_off_cmd.finish("✅ 自动通过已关闭，所有进群申请将等待手动处理")
+    if not hasattr(event, "group_id"):
+        await auto_off_cmd.finish("请在要关闭自动通过的群里使用此命令")
+    _save_keywords(event.group_id, [])
+    await auto_off_cmd.finish(f"✅ 本群自动通过已关闭（群 {event.group_id}），进群申请将等待手动处理")
 
 
 @auto_show_cmd.handle()
 async def auto_show(event: MessageEvent):
     if str(event.user_id) != OWNER:
         await auto_show_cmd.finish("❌ 你没有权限使用此功能")
-    kws = _load_keywords()
-    if kws:
-        await auto_show_cmd.finish(f"🔑 自动通过已开启\n关键字：{' / '.join(kws)}")
-    await auto_show_cmd.finish("🔑 自动通过未开启")
+    if hasattr(event, "group_id"):
+        kws = _load_keywords(event.group_id)
+        if kws:
+            await auto_show_cmd.finish(f"🔑 本群自动通过已开启\n🏘 群号：{event.group_id}\n关键字：{' / '.join(kws)}")
+        await auto_show_cmd.finish(f"🔑 本群自动通过未开启（群 {event.group_id}）")
+    data = _load_config()
+    if data:
+        lines = ["🔑 已开启自动通过的群："]
+        for gid, kws in data.items():
+            if kws:
+                lines.append(f"群 {gid}：{' / '.join(kws)}")
+        await auto_show_cmd.finish("\n".join(lines))
+    await auto_show_cmd.finish("🔑 没有任何群开启自动通过")
 
 
 # ---------------- 好友申请 / 加群申请 ----------------
