@@ -106,6 +106,8 @@ async def chat(bot: Bot, event: MessageEvent):
     msg = _clean_msg(event)
     if not msg:
         return
+    if msg.startswith(".") or msg.startswith("。"):
+        return
 
     key = _load_key()
     reply = ""
