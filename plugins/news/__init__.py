@@ -167,7 +167,7 @@ async def _send_news(day: date) -> None:
     await bot.send_group_msg(group_id=int(group_id), message=MessageSegment.image("file://" + path))
 
 
-@scheduler.scheduled_job("cron", hour=9, minute=0, id="daily_news", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=8, minute=0, id="daily_news", timezone="Asia/Shanghai")
 async def daily_news_job():
     await _send_news(date.today() - timedelta(days=1))
 
@@ -179,7 +179,7 @@ async def news_on(event: MessageEvent):
     if not hasattr(event, "group_id"):
         await news_on_cmd.finish("请在有机器人的群里开启此功能")
     _set_group(str(event.group_id))
-    await news_on_cmd.finish(f"✅ 每日新闻已开启\n每天 9:00 自动发送前一天新闻总结到此群（本群 {event.group_id}）")
+    await news_on_cmd.finish(f"✅ 每日新闻已开启\n每天 8:00 自动发送前一天新闻总结到此群（本群 {event.group_id}）")
 
 
 @news_off_cmd.handle()
@@ -218,5 +218,5 @@ async def news_status(event: MessageEvent):
         await news_status_cmd.finish("❌ 你没有权限使用此功能")
     gid = _get_group()
     if gid:
-        await news_status_cmd.finish(f"📰 每日新闻：已开启（群 {gid}，每天 9:00 发送）")
+        await news_status_cmd.finish(f"📰 每日新闻：已开启（群 {gid}，每天 8:00 发送）")
     await news_status_cmd.finish("📰 每日新闻：未开启")
