@@ -80,6 +80,28 @@ async def _post_json(path: str, payload: dict, timeout: float = 90.0):
         return r.json()
 
 
+async def _post_json_with_notice(matcher, at: Message, notice: str, path: str, payload: dict,
+                                 timeout: float = 90.0, remind_after: float = 30.0):
+    done = asyncio.Event()
+
+    async def reminder():
+        try:
+            await asyncio.wait_for(done.wait(), timeout=remind_after)
+        except asyncio.TimeoutError:
+            try:
+                await matcher.send(at + Message(f"⏳ {notice}（已等待 {int(remind_after)} 秒，数据量较大请再耐心等待...）"))
+            except Exception:
+                pass
+
+    rem = asyncio.create_task(reminder())
+    try:
+        return await _post_json(path, payload, timeout)
+    finally:
+        done.set()
+        if not rem.done():
+            rem.cancel()
+
+
 def _parse_tag(arg: str) -> str:
     tag = arg.replace(" ", "").replace("-", "#")
     return tag if "#" in tag else ""
@@ -148,7 +170,8 @@ async def match_report(event: MessageEvent, arg: Message = CommandArg()):
     try:
         await matchrep_cmd.send(at + f"⏳ 正在生成 {tag} 的战绩图...")
         try:
-            data = await _post_json("/api/v2/dashen-match/replies", {"bnet_id": tag, "limit": 5}, timeout=90)
+            data = await _post_json_with_notice(matchrep_cmd, at, f"正在生成 {tag} 的战绩图",
+                                                "/api/v2/dashen-match/replies", {"bnet_id": tag, "limit": 5}, timeout=90)
         except httpx.HTTPError:
             await matchrep_cmd.finish(at + "查询失败：请求超时，请稍后再试")
         if not data.get("ok"):
@@ -176,7 +199,8 @@ async def rank_history(event: MessageEvent, arg: Message = CommandArg()):
     try:
         await rankhist_cmd.send(at + f"⏳ 正在查询 {tag} 的段位历史...")
         try:
-            data = await _post_json("/api/v2/dashen-rank-history/image", {"bnet_id": tag}, timeout=120)
+            data = await _post_json_with_notice(rankhist_cmd, at, f"正在查询 {tag} 的段位历史",
+                                                "/api/v2/dashen-rank-history/image", {"bnet_id": tag}, timeout=120)
         except httpx.HTTPError:
             await rankhist_cmd.finish(at + "查询失败：请求超时，请稍后再试")
         if data.get("_image"):
@@ -199,7 +223,8 @@ async def strength(event: MessageEvent, arg: Message = CommandArg()):
     try:
         await strength_cmd.send(at + f"⏳ 正在分析 {tag} 的强度...")
         try:
-            data = await _post_json("/api/v2/dashen-quick-strength/image", {"bnet_id": tag, "limit": 12}, timeout=120)
+            data = await _post_json_with_notice(strength_cmd, at, f"正在分析 {tag} 的强度",
+                                                "/api/v2/dashen-quick-strength/image", {"bnet_id": tag, "limit": 12}, timeout=120)
         except httpx.HTTPError:
             await strength_cmd.finish(at + "查询失败：请求超时，请稍后再试")
         if data.get("_image"):
@@ -234,7 +259,8 @@ async def summary(event: MessageEvent, arg: Message = CommandArg()):
         labels = {"today": "今日", "yesterday": "昨日", "week": "本周"}
         await summary_cmd.send(at + f"⏳ 正在生成 {tag} 的{labels[scope]}总结，数据量大请稍候...")
         try:
-            data = await _post_json(f"/api/v2/dashen-summary/{scope}/image", {"bnet_id": tag}, timeout=timeout)
+            data = await _post_json_with_notice(summary_cmd, at, f"正在生成 {tag} 的{labels[scope]}总结",
+                                                f"/api/v2/dashen-summary/{scope}/image", {"bnet_id": tag}, timeout=timeout)
         except httpx.HTTPError:
             await summary_cmd.finish(at + "生成失败：超时，请稍后再试")
         if data.get("_image"):
