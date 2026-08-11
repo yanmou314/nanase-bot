@@ -1,23 +1,29 @@
 """每日发送下一个周末和法定节假日倒计时。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import threading
+import time as system_time
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from nonebot import get_bot, on_command
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageEvent
+from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageEvent, MessageSegment
 from nonebot_plugin_apscheduler import scheduler
+from PIL import Image, ImageDraw, ImageFont
 
-from common import is_owner
+from common import FONTS, cleanup_cache, is_owner
 
 
 TIMEZONE = ZoneInfo("Asia/Shanghai")
 STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
+CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 STATE_LOCK = threading.RLock()
 WEEKDAYS = ("一", "二", "三", "四", "五", "六", "日")
+CARD_WIDTH = 1080
+CARD_HEIGHT = 700
 
 HOLIDAY_DATES: dict[int, tuple[tuple[str, date], ...]] = {
     2026: (
@@ -182,9 +188,97 @@ def _build_message(now: datetime | None = None) -> str:
     )
 
 
+def _font(size: int, bold: bool = False):
+    key = "noto_bold" if bold else "noto_reg"
+    try:
+        return ImageFont.truetype(FONTS[key], size)
+    except (OSError, TypeError, KeyError):
+        return ImageFont.load_default()
+
+
+def _right_text(draw: ImageDraw.ImageDraw, text: str, y: int, font, fill) -> None:
+    box = draw.textbbox((0, 0), text, font=font)
+    width = box[2] - box[0]
+    draw.text((CARD_WIDTH - 64 - width, y), text, font=font, fill=fill)
+
+
+def _render_card(now: datetime) -> str:
+    weekend_day, weekend_at = _next_weekend(now)
+    holiday_name, holiday_day, holiday_at = _next_holiday(now)
+    image = Image.new("RGB", (CARD_WIDTH, CARD_HEIGHT))
+    draw = ImageDraw.Draw(image, "RGBA")
+    top = (249, 247, 255)
+    bottom = (232, 246, 255)
+    for y in range(CARD_HEIGHT):
+        ratio = y / max(1, CARD_HEIGHT - 1)
+        color = tuple(int(top[i] + (bottom[i] - top[i]) * ratio) for i in range(3))
+        draw.line([(0, y), (CARD_WIDTH, y)], fill=color)
+    draw.ellipse([CARD_WIDTH - 180, -100, CARD_WIDTH + 80, 160], fill=(255, 220, 150, 90))
+    draw.ellipse([-100, CARD_HEIGHT - 150, 180, CARD_HEIGHT + 130], fill=(183, 226, 255, 100))
+
+    title_font = _font(48, bold=True)
+    date_font = _font(24)
+    label_font = _font(23, bold=True)
+    name_font = _font(34, bold=True)
+    detail_font = _font(25)
+    remaining_font = _font(36, bold=True)
+    footer_font = _font(19)
+    dark = (42, 39, 55, 255)
+    gray = (123, 118, 139, 255)
+    weekend_color = (65, 155, 196, 255)
+    holiday_color = (217, 140, 71, 255)
+
+    draw.text((64, 42), "每日倒计时", font=title_font, fill=dark)
+    draw.text((66, 105), f"{now.year}年{now.month}月{now.day}日 {now:%H:%M} · 中国标准时间", font=date_font, fill=gray)
+
+    def draw_panel(top_y: int, label: str, name: str, detail: str, remaining: str, accent) -> None:
+        draw.rounded_rectangle([48, top_y, CARD_WIDTH - 48, top_y + 190], radius=28, fill=(255, 255, 255, 232))
+        draw.rounded_rectangle([48, top_y, 60, top_y + 190], radius=6, fill=accent)
+        draw.text((82, top_y + 24), label, font=label_font, fill=accent)
+        draw.text((82, top_y + 67), name, font=name_font, fill=dark)
+        draw.text((82, top_y + 122), detail, font=detail_font, fill=gray)
+        _right_text(draw, "还剩", top_y + 42, detail_font, gray)
+        _right_text(draw, remaining, top_y + 77, remaining_font, accent)
+
+    draw_panel(
+        155,
+        "WEEKEND",
+        "下一个周末",
+        f"{_format_date(weekend_day)} 00:00",
+        _remaining(weekend_at, now),
+        weekend_color,
+    )
+    draw_panel(
+        375,
+        "HOLIDAY",
+        f"下一个节假日 · {holiday_name}",
+        f"{_format_date(holiday_day)} 00:00",
+        _remaining(holiday_at, now),
+        holiday_color,
+    )
+    footer = "节假日按放假起始日计算 · 每天 17:00 自动发送"
+    footer_box = draw.textbbox((0, 0), footer, font=footer_font)
+    draw.text(((CARD_WIDTH - (footer_box[2] - footer_box[0])) / 2, 625), footer, font=footer_font, fill=gray)
+
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    cleanup_cache(CACHE_DIR, max_age=3 * 24 * 60 * 60)
+    path = os.path.join(CACHE_DIR, f"countdown_{int(system_time.time() * 1000)}.png")
+    image.save(path, "PNG")
+    return path
+
+
+async def _build_image_message() -> MessageSegment | str:
+    now = _now()
+    try:
+        path = await asyncio.to_thread(_render_card, now)
+        return MessageSegment.image("file://" + path)
+    except Exception:
+        return _build_message(now)
+
+
 @countdown_cmd.handle()
 async def countdown(event: MessageEvent):
-    await countdown_cmd.finish(_build_message())
+    await countdown_cmd.finish(await _build_image_message())
 
 
 @enable_cmd.handle()
@@ -228,7 +322,7 @@ async def test(event: MessageEvent):
         await test_cmd.finish("❌ 你没有权限使用此功能")
     if not isinstance(event, GroupMessageEvent):
         await test_cmd.finish("请在群里使用此命令")
-    await test_cmd.finish(_build_message())
+    await test_cmd.finish(await _build_image_message())
 
 
 @scheduler.scheduled_job("cron", hour=17, minute=0, id="daily_holiday_countdown", timezone="Asia/Shanghai")
@@ -236,7 +330,7 @@ async def daily_holiday_countdown_job():
     groups = _enabled_groups()
     if not groups:
         return
-    message = _build_message()
+    message = await _build_image_message()
     bot = get_bot()
     for group_id in groups:
         try:
