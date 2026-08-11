@@ -234,7 +234,7 @@ def _collect_data() -> dict:
     }
 
 
-@scheduler.scheduled_job("cron", hour="*", minute=0, id="hourly_status_push", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour="*", minute=30, id="hourly_status_push", timezone="Asia/Shanghai")
 async def hourly_status_push():
     try:
         path = await __import__("asyncio").to_thread(_render, _collect_data())
