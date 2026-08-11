@@ -33,7 +33,6 @@
 | **repeater** | 自动 | 复读机：同一句话/图连续 3 次自动复读 |
 | **request_manager** | 自动 + 私聊指令 | 好友/加群申请通知与审批（引用消息同意/拒绝）、私聊转发 |
 | **group_leave** | 自动 | 退群/被踢自动提示 |
-| **server_status** | `.服务器` | 服务器状态卡片（CPU/内存/磁盘/服务） |
 | **help** | `.hp` | 指令菜单（管理功能仅群主可见） |
 | **cmd_stats** | 自动 | 每天 00:00 汇总前一天的指令使用情况并发送统计图 |
 | **holiday_countdown** | `.倒计时` `.倒计时开启/关闭/状态/测试` | 每天 17:00 推送下一个周末和节假日倒计时 |
@@ -56,8 +55,7 @@
     ├── news/            # 每日新闻
     ├── owstats/         # 守望先锋战绩
     ├── repeater/        # 复读机
-    ├── request_manager/ # 申请审批
-    └── server_status/   # 服务器状态
+    └── request_manager/ # 申请审批
 ```
 
 ## 部署
@@ -135,8 +133,7 @@ systemctl daemon-reload && systemctl enable --now qqbot
 ## 运行配置
 
 - 在 `.env` 中设置 `QQBOT_OWNER`，填写机器人的管理员 QQ 号；该文件不会提交到仓库
-- 在 `plugins/server_status/push_config.json` 中设置服务器状态推送群号
-- 在 `plugins/cmd_stats/push_config.json` 中设置指令统计推送群号；这两个配置文件均不会提交到仓库
+- 在 `plugins/cmd_stats/push_config.json` 中设置指令统计推送群号；该配置文件不会提交到仓库
 - 在目标群内使用 `.倒计时开启` 开通每日 17:00 倒计时推送；仅管理员可操作，可在多个群分别开启
 
 ## 数据存储

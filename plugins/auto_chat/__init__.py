@@ -16,6 +16,7 @@ from nonebot.adapters.onebot.v11 import (
 from nonebot.rule import to_me
 
 chat_matcher = on_message(rule=to_me(), priority=5, block=True)
+_COMMAND_START = tuple(s for s in get_driver().config.command_start if s)
 poke_matcher = on_notice(priority=5, block=True)
 
 CFG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
@@ -147,7 +148,7 @@ async def chat(bot: Bot, event: MessageEvent):
     _last_chat = now
 
     msg = _clean_msg(event)
-    if not msg:
+    if not msg or (_COMMAND_START and msg.startswith(_COMMAND_START)):
         return
 
     key = _load_key()

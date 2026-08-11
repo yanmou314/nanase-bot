@@ -23,6 +23,7 @@ CONFIG_FILE = os.path.join(os.path.dirname(__file__), "auto_approve.json")
 auto_on_cmd = on_command("自动通过", aliases={"自动同意"}, priority=5, block=True)
 auto_off_cmd = on_command("自动通过关闭", aliases={"自动同意关闭"}, priority=5, block=True)
 auto_show_cmd = on_command("自动通过查看", aliases={"自动同意查看"}, priority=5, block=True)
+auto_count_cmd = on_command("自动通过数量", aliases={"自动同意数量", "自动通过统计", "自动同意统计"}, priority=5, block=True)
 
 _pending = {}
 
@@ -43,11 +44,20 @@ def _load_keywords(group_id: int) -> list[str]:
     return [k for k in (_load_config().get(str(group_id)) or []) if k]
 
 
-def _save_keywords(group_id: int, kw: list[str]) -> None:
+def _save_keywords(group_id: int, kw: list[str], merge: bool = False) -> list[str]:
     data = _load_config()
-    data[str(group_id)] = [k for k in kw if k]
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+    keywords = [k for k in kw if k]
+    if merge:
+        existing = [k for k in (data.get(str(group_id)) or []) if k]
+        keywords = list(dict.fromkeys([*existing, *keywords]))
+    else:
+        keywords = list(dict.fromkeys(keywords))
+    data[str(group_id)] = keywords
+    temporary = CONFIG_FILE + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(temporary, CONFIG_FILE)
+    return keywords
 
 
 async def _auto_approve(bot: Bot, event: GroupRequestEvent, comment: str) -> bool:
@@ -96,8 +106,8 @@ async def auto_on(event: MessageEvent, arg=CommandArg()):
         kws = [k for k in re.split(r"[\s,，、]+", " ".join(parts[1:])) if k]
     if not kws:
         await auto_on_cmd.finish("请提供至少一个关键字")
-    _save_keywords(gid, kws)
-    await auto_on_cmd.finish(f"✅ 群 {gid} 自动通过已开启\n🔑 关键字：{' / '.join(kws)}\n进群附言包含任一关键字将自动同意")
+    merged = _save_keywords(gid, kws, merge=True)
+    await auto_on_cmd.finish(f"✅ 群 {gid} 自动通过已开启\n🔑 关键字：{' / '.join(merged)}\n进群附言包含任一关键字将自动同意")
 
 
 @auto_off_cmd.handle()
@@ -135,6 +145,23 @@ async def auto_show(event: MessageEvent):
 
 
 # ---------------- 好友申请 / 加群申请 ----------------
+@auto_count_cmd.handle()
+async def auto_count(event: MessageEvent, arg=CommandArg()):
+    if str(event.user_id) != OWNER:
+        await auto_count_cmd.finish("❌ 你没有权限使用此功能")
+    text = arg.extract_plain_text().strip()
+    if hasattr(event, "group_id"):
+        gid = event.group_id
+    else:
+        if not text.isdigit():
+            await auto_count_cmd.finish("私聊用法：.自动通过数量 <群号>\n例如：.自动通过数量 <群号>")
+        gid = int(text)
+    kws = _load_keywords(gid)
+    if kws:
+        await auto_count_cmd.finish(f"🔑 群 {gid} 共有 {len(kws)} 个关键字：{' / '.join(kws)}")
+    await auto_count_cmd.finish(f"🔑 群 {gid} 当前没有配置自动通过关键字（共 0 个）")
+
+
 @request_matcher.handle()
 async def handle_request(bot: Bot, event):
     if event.user_id == int(OWNER):
