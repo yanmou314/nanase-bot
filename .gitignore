@@ -18,7 +18,7 @@
 # 环境配置（用 .env.example 代替）
 .env
 venv/
-plugins/server_status/push_config.json
+.deleted/
 plugins/cmd_stats/push_config.json
 **/*.bak-*
 
