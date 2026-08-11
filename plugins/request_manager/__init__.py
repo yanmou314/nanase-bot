@@ -84,14 +84,14 @@ async def auto_on(event: MessageEvent, arg=CommandArg()):
     if not text:
         if hasattr(event, "group_id"):
             await auto_on_cmd.finish("用法：.自动通过 关键字\n例如：.自动通过 我是老玩家\n多个关键字用空格分隔：.自动通过 关键字1 关键字2")
-        await auto_on_cmd.finish("私聊用法：.自动通过 群号 关键字\n例如：.自动通过 <PRIVATE_NUMBER> 我是老玩家")
+        await auto_on_cmd.finish("私聊用法：.自动通过 <群号> 关键字\n例如：.自动通过 <群号> 我是老玩家")
     parts = text.split()
     if hasattr(event, "group_id"):
         gid = event.group_id
         kws = [k for k in re.split(r"[\s,，、]+", text) if k]
     else:
         if not parts[0].isdigit():
-            await auto_on_cmd.finish("私聊用法：.自动通过 群号 关键字\n例如：.自动通过 <PRIVATE_NUMBER> 我是老玩家")
+            await auto_on_cmd.finish("私聊用法：.自动通过 <群号> 关键字\n例如：.自动通过 <群号> 我是老玩家")
         gid = int(parts[0])
         kws = [k for k in re.split(r"[\s,，、]+", " ".join(parts[1:])) if k]
     if not kws:
@@ -109,7 +109,7 @@ async def auto_off(event: MessageEvent, arg=CommandArg()):
         gid = event.group_id
     else:
         if not text.isdigit():
-            await auto_off_cmd.finish("私聊用法：.自动通过关闭 群号\n例如：.自动通过关闭 <PRIVATE_NUMBER>")
+            await auto_off_cmd.finish("私聊用法：.自动通过关闭 <群号>\n例如：.自动通过关闭 <群号>")
         gid = int(text)
     _save_keywords(gid, [])
     await auto_off_cmd.finish(f"✅ 群 {gid} 自动通过已关闭，进群申请将等待手动处理")

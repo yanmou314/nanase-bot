@@ -2,7 +2,7 @@ from nonebot import on_command
 from nonebot.adapters.onebot.v11 import MessageEvent
 from common import is_owner
 
-help_cmd = on_command("帮助", aliases={"help", "菜单"}, priority=1, block=True)
+help_cmd = on_command("hp", aliases={"帮助", "help", "菜单"}, priority=1, block=True)
 
 
 TEXT = """🤖 机器人指令菜单

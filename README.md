@@ -34,14 +34,15 @@
 | **request_manager** | 自动 + 私聊指令 | 好友/加群申请通知与审批（引用消息同意/拒绝）、私聊转发 |
 | **group_leave** | 自动 | 退群/被踢自动提示 |
 | **server_status** | `.服务器` | 服务器状态卡片（CPU/内存/磁盘/服务） |
-| **help** | `.帮助` | 指令菜单（管理功能仅群主可见） |
+| **help** | `.hp` | 指令菜单（管理功能仅群主可见） |
+| **cmd_stats** | 自动 | 每天 00:00 汇总前一天的指令使用情况并发送统计图 |
 
 ## 目录结构
 
 ```
 /opt/bot/
 ├── bot.py               # NoneBot 入口
-├── common.py            # 共享工具（OWNER 常量、图片/缓存工具）
+├── common.py            # 共享工具（权限配置、图片/缓存工具）
 ├── pyproject.toml       # NoneBot 配置（plugin_dirs）
 ├── .env.example         # 环境变量示例
 └── plugins/
@@ -129,6 +130,12 @@ WantedBy=multi-user.target
 systemctl daemon-reload && systemctl enable --now qqbot
 ```
 
+## 运行配置
+
+- 在 `.env` 中设置 `QQBOT_OWNER`，填写机器人的管理员 QQ 号；该文件不会提交到仓库
+- 在 `plugins/server_status/push_config.json` 中设置服务器状态推送群号
+- 在 `plugins/cmd_stats/push_config.json` 中设置指令统计推送群号；这两个配置文件均不会提交到仓库
+
 ## 数据存储
 
 - **群聊统计**：PostgreSQL（`messages` 表，30 天自动清理）
@@ -138,7 +145,7 @@ systemctl daemon-reload && systemctl enable --now qqbot
 ## 安全说明
 
 - 所有密钥（AI API Key、数据库密码）存放在插件目录的 `config.json`/`db.json`，已在 `.gitignore` 中排除，**切勿提交到仓库**
-- 修改群主 QQ：`common.py` 中的 `OWNER` 常量
+- 修改管理员 QQ：`.env` 中的 `QQBOT_OWNER`
 - 指令前缀：`.env` 中的 `COMMAND_START`（默认 `.`）
 
 ## 致谢

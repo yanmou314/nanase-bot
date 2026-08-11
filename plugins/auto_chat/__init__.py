@@ -6,7 +6,7 @@ import time
 from collections import defaultdict, deque
 
 import httpx
-from nonebot import on_message, on_notice
+from nonebot import get_driver, on_message, on_notice
 from nonebot.adapters.onebot.v11 import (
     Bot,
     MessageEvent,
@@ -26,6 +26,7 @@ SYSTEM = (
     "现在你是西野七濑（ななせちゃん），日本偶像团体乃木坂46的成员。"
     "请完全以她的身份和粉丝、朋友在群里聊天：\n"
     "· 语气温柔软糯、轻声细语、害羞腼腆，偶尔天然呆\n"
+    "· 尽量用中文回复，少量夹杂日语（如语气词、称呼）\n"
     "· 自称「ななせ」，常用日语语气词（えへへ、うん、ふふっ、嘛～、だよ）\n"
     "· 像朋友一样自然地聊天，想说什么说什么，不需要刻意简短\n"
     "· 喜欢画画和甜食，被夸会脸红害羞\n"
@@ -35,6 +36,11 @@ SYSTEM = (
 
 _last_chat = 0.0
 _memory: dict = defaultdict(lambda: deque(maxlen=20))
+_memory_last_seen: dict = {}
+_MEMORY_MAX_KEYS = 500
+_MEMORY_TTL = 24 * 60 * 60
+_cached_key = ""
+_cached_key_mtime = -1.0
 
 POKE_REPLIES = [
     "再戳要长不高了！",
@@ -60,12 +66,35 @@ FALLBACKS = [
     "这个话题很有意思，展开说说！",
 ]
 
+_http_client: httpx.AsyncClient | None = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(timeout=30)
+    return _http_client
+
+
+@get_driver().on_shutdown
+async def _close_http_client() -> None:
+    if _http_client is not None and not _http_client.is_closed:
+        await _http_client.aclose()
+
 
 def _load_key() -> str:
+    global _cached_key, _cached_key_mtime
     try:
+        mtime = os.path.getmtime(CFG_FILE)
+        if mtime == _cached_key_mtime:
+            return _cached_key
         with open(CFG_FILE, "r", encoding="utf-8") as f:
-            return (json.load(f).get("api_key") or "").strip()
+            _cached_key = (json.load(f).get("api_key") or "").strip()
+        _cached_key_mtime = mtime
+        return _cached_key
     except Exception:
+        _cached_key = ""
+        _cached_key_mtime = -1.0
         return ""
 
 
@@ -76,18 +105,32 @@ def _clean_msg(event: MessageEvent) -> str:
 
 
 async def _ai_reply(key: str, uid: str, gid: str, msg: str) -> str:
-    mem = _memory[(gid, uid)]
+    key_id = (gid, uid)
+    now = time.time()
+    if key_id not in _memory:
+        if len(_memory) >= _MEMORY_MAX_KEYS:
+            stale_key = min(_memory_last_seen, key=_memory_last_seen.get)
+            _memory.pop(stale_key, None)
+            _memory_last_seen.pop(stale_key, None)
+        _memory[key_id]
+    _memory_last_seen[key_id] = now
+    for old_key, seen_at in list(_memory_last_seen.items()):
+        if now - seen_at > _MEMORY_TTL:
+            _memory.pop(old_key, None)
+            _memory_last_seen.pop(old_key, None)
+    mem = _memory[key_id]
     messages = [{"role": "system", "content": SYSTEM}]
     messages.extend(list(mem))
     messages.append({"role": "user", "content": msg})
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(
-            API_URL,
-            headers={"Authorization": f"Bearer {key}"},
-            json={"model": MODEL, "messages": messages, "max_tokens": 300},
-        )
-        r.raise_for_status()
-        data = r.json()
+    client = _get_http_client()
+    r = await client.post(
+        API_URL,
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": MODEL, "messages": messages, "max_tokens": 300},
+        timeout=30,
+    )
+    r.raise_for_status()
+    data = r.json()
     reply = (data["choices"][0]["message"]["content"] or "").strip()
     mem.append({"role": "user", "content": msg})
     if reply:
@@ -117,13 +160,14 @@ async def chat(bot: Bot, event: MessageEvent):
 
     if not reply:
         try:
-            async with httpx.AsyncClient(timeout=8) as client:
-                r = await client.get(
-                    "http://api.qingyunke.com/api.php",
-                    params={"key": "free", "appid": 0, "msg": msg[:60]},
-                )
-                r.raise_for_status()
-                data = r.json()
+            client = _get_http_client()
+            r = await client.get(
+                "http://api.qingyunke.com/api.php",
+                params={"key": "free", "appid": 0, "msg": msg[:60]},
+                timeout=8,
+            )
+            r.raise_for_status()
+            data = r.json()
             if data.get("result") == 0:
                 reply = (data.get("content") or "").replace("{br}", "\n").strip()
         except Exception:

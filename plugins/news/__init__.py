@@ -6,12 +6,12 @@ import time
 from datetime import date, timedelta
 
 import httpx
-from nonebot import get_bot, on_command
+from nonebot import get_bot, get_driver, on_command
 from nonebot.adapters.onebot.v11 import MessageEvent, MessageSegment
 from nonebot_plugin_apscheduler import scheduler
 from PIL import Image, ImageDraw, ImageFont
 
-from common import is_owner
+from common import cleanup_cache, is_owner
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
@@ -30,6 +30,21 @@ news_on_cmd = on_command("新闻开启", priority=5, block=True)
 news_off_cmd = on_command("新闻关闭", priority=5, block=True)
 news_test_cmd = on_command("新闻测试", priority=5, block=True)
 news_status_cmd = on_command("新闻状态", priority=5, block=True)
+
+_http_client: httpx.AsyncClient | None = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(timeout=20)
+    return _http_client
+
+
+@get_driver().on_shutdown
+async def _close_http_client() -> None:
+    if _http_client is not None and not _http_client.is_closed:
+        await _http_client.aclose()
 
 
 def _load_state() -> dict:
@@ -67,28 +82,28 @@ def _clear_group() -> None:
 
 
 async def _fetch_60s(day: date) -> list[str]:
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.get(NEWS_API, params={"date": day.isoformat()})
-        r.raise_for_status()
-        data = r.json()
-        if data.get("code") != 200:
-            raise RuntimeError(data.get("message", "unknown"))
-        news = (data.get("data") or {}).get("news") or []
-        return [str(x) for x in news]
+    client = _get_http_client()
+    r = await client.get(NEWS_API, params={"date": day.isoformat()}, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("code") != 200:
+        raise RuntimeError(data.get("message", "unknown"))
+    news = (data.get("data") or {}).get("news") or []
+    return [str(x) for x in news]
 
 
 async def _fetch_baidu() -> list[str]:
-    async with httpx.AsyncClient(timeout=20, headers={"User-Agent": "Mozilla/5.0"}) as client:
-        r = await client.get(BAIDU_API)
-        r.raise_for_status()
-        data = r.json()
-        items = []
-        for card in data.get("data", {}).get("cards", []):
-            for content in card.get("content", []):
-                for word in content.get("content", []):
-                    if word.get("query"):
-                        items.append(word["query"])
-        return items[:10]
+    client = _get_http_client()
+    r = await client.get(BAIDU_API, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+    items = []
+    for card in data.get("data", {}).get("cards", []):
+        for content in card.get("content", []):
+            for word in content.get("content", []):
+                if word.get("query"):
+                    items.append(word["query"])
+    return items[:10]
 
 
 def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> list:
@@ -143,6 +158,7 @@ def _render_news_image(day: date, news: list[str], source: str) -> str:
     draw.text((MARGIN, H - 34), f"来源：{source} · {time.strftime('%H:%M')}", font=font_foot, fill=GRAY)
 
     os.makedirs(CACHE_DIR, exist_ok=True)
+    cleanup_cache(CACHE_DIR, max_age=3 * 24 * 60 * 60)
     path = os.path.join(CACHE_DIR, f"news_{int(time.time() * 1000)}.png")
     img.save(path, "PNG")
     return path
@@ -209,7 +225,7 @@ async def news_test(event: MessageEvent):
             await news_test_cmd.finish("新闻源获取失败，请稍后再试")
     if not news:
         await news_test_cmd.finish("新闻源返回为空，请稍后再试")
-    path = await __import__("asyncio").to_thread(_render_news_image, date.today() - timedelta(days=1), news, source)
+    path = await asyncio.to_thread(_render_news_image, date.today() - timedelta(days=1), news, source)
     await news_test_cmd.finish(MessageSegment.image("file://" + path))
 
 
