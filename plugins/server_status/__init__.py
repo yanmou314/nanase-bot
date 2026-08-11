@@ -6,11 +6,12 @@ import subprocess
 import time
 from datetime import datetime
 
-from nonebot import on_command
+from nonebot import get_bot, on_command
 from nonebot.adapters.onebot.v11 import MessageEvent, MessageSegment
+from nonebot_plugin_apscheduler import scheduler
 from PIL import Image, ImageDraw, ImageFont
 
-from common import is_owner
+from common import OWNER, is_owner
 
 server_cmd = on_command("服务器", aliases={"服务器状态", "状态", "服务器信息"}, priority=5, block=True)
 
@@ -24,6 +25,12 @@ ORANGE = (255, 170, 60)
 RED = (255, 90, 90)
 DARK = (60, 55, 80)
 GRAY = (150, 145, 165)
+
+MEM_WARN_PCT = 85
+MEM_CHECK_INTERVAL = 10
+_last_warn_ts = 0.0
+_warn_cooldown = 600
+_warned_high = False
 
 
 def _cpu_usage() -> float:
@@ -181,11 +188,7 @@ def _render(data: dict) -> str:
     return path
 
 
-@server_cmd.handle()
-async def server_status(event: MessageEvent):
-    if not is_owner(event):
-        await server_cmd.finish("❌ 你没有权限使用此功能")
-
+def _collect_data() -> dict:
     cpu = _cpu_usage()
     used_kb, total_kb = _mem_info()
     mem_pct = used_kb / total_kb * 100
@@ -211,7 +214,7 @@ async def server_status(event: MessageEvent):
     except Exception:
         pass
 
-    data = {
+    return {
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "os": os_name,
         "host": host,
@@ -230,5 +233,73 @@ async def server_status(event: MessageEvent):
         },
     }
 
+
+@scheduler.scheduled_job("cron", hour="*", minute=0, id="hourly_status_push", timezone="Asia/Shanghai")
+async def hourly_status_push():
+    try:
+        path = await __import__("asyncio").to_thread(_render, _collect_data())
+        bot = get_bot()
+        await bot.send_group_msg(group_id=<PRIVATE_NUMBER>, message=MessageSegment.image("file://" + path))
+    except Exception:
+        pass
+
+
+@server_cmd.handle()
+async def server_status(event: MessageEvent):
+    if not is_owner(event):
+        await server_cmd.finish("❌ 你没有权限使用此功能")
+
+    data = _collect_data()
     path = _render(data)
     await server_cmd.finish(MessageSegment.image("file://" + path))
+
+
+def _top_mem_processes(n: int = 3) -> list:
+    try:
+        out = subprocess.run(
+            ["ps", "-eo", "rss,comm", "--sort=-rss", "--no-headers"],
+            capture_output=True, text=True, timeout=5,
+        )
+        rows = []
+        for line in out.stdout.strip().split("\n")[:n]:
+            parts = line.strip().split(None, 1)
+            if len(parts) == 2:
+                rows.append(f"{parts[1]} {int(parts[0]) // 1024}M")
+        return rows
+    except Exception:
+        return []
+
+
+@scheduler.scheduled_job("interval", minutes=MEM_CHECK_INTERVAL, id="mem_monitor", timezone="Asia/Shanghai")
+async def mem_monitor():
+    global _last_warn_ts, _warned_high
+    used_kb, total_kb = _mem_info()
+    pct = used_kb / total_kb * 100
+    now = time.time()
+    if pct >= MEM_WARN_PCT:
+        if not _warned_high or now - _last_warn_ts >= _warn_cooldown:
+            _last_warn_ts = now
+            _warned_high = True
+            procs = "\n".join(_top_mem_processes()) or "无"
+            msg = (
+                f"⚠️ 服务器内存告警\n"
+                f"📊 使用率：{pct:.1f}%（{used_kb / 1024 / 1024:.1f}G / {total_kb / 1024 / 1024:.1f}G）\n"
+                f"💣 占用 TOP3：\n{procs}\n"
+                f"建议：清理进程或重启服务，必要时升配内存"
+            )
+            try:
+                bot = get_bot()
+                await bot.send_private_msg(user_id=int(OWNER), message=msg)
+            except Exception:
+                pass
+    else:
+        if _warned_high:
+            _warned_high = False
+            try:
+                bot = get_bot()
+                await bot.send_private_msg(
+                    user_id=int(OWNER),
+                    message=f"✅ 内存已恢复正常（{pct:.1f}%）",
+                )
+            except Exception:
+                pass
