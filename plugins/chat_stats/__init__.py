@@ -6,7 +6,7 @@ import threading
 import time
 from collections import Counter
 from datetime import date, timedelta
-from nonebot import get_bot, on_command, on_message
+from nonebot import get_bot, get_driver, on_command, on_message
 from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment
 from nonebot.params import CommandArg
@@ -30,6 +30,8 @@ words_on_cmd = on_command("词云开启", priority=5, block=True)
 words_off_cmd = on_command("词云关闭", priority=5, block=True)
 words_status_cmd = on_command("词云状态", priority=5, block=True)
 
+_COMMAND_START = tuple(get_driver().config.command_start)
+
 STOPWORDS = set("的了是在我有和你这不那啊呢吧吗哦嗯就都要也会没很他说她我们他们自己一个没什么可以"
                 "真的还是因为所以但是然后现在今天明天昨天知道觉得应该可能如果这样那样这个那个什么为什么怎么")
 
@@ -42,7 +44,8 @@ PALETTE = ["#FF6B6B", "#FCA311", "#FFC93C", "#4ECDC4", "#45B7D1", "#96CEB4",
 
 async def _purge_old_records() -> int:
     cutoff = (date.today() - timedelta(days=RETENTION_DAYS)).isoformat()
-    return len(await exec("DELETE FROM messages WHERE day < %s RETURNING id", (cutoff,)))
+    await exec("DELETE FROM messages WHERE day < %s", (cutoff,))
+    return 0
 
 
 @scheduler.scheduled_job("cron", hour=3, minute=0, id="purge_old_stats", timezone="Asia/Shanghai")
@@ -86,20 +89,17 @@ async def _get_name(bot: Bot, group_id: int, user_id: int) -> str:
 
 
 async def _build_word_image(group_id: int, day: str, n: int, window: bool = False) -> str | None:
-    if window:
-        rows = await exec(
-            "SELECT text FROM messages WHERE group_id=%s AND "
-            "((day=CURRENT_DATE-1 AND hour>=7) OR (day=CURRENT_DATE AND hour<7)) AND text!=''",
-            (group_id,),
-        )
-    else:
-        rows = await exec(
-            "SELECT text FROM messages WHERE group_id=%s AND "
-            "((day=CURRENT_DATE-1 AND hour>=7) OR (day=CURRENT_DATE AND hour<7)) AND text!=''",
-            (group_id,),
-        )
+    rows = await exec(
+        "SELECT text FROM messages WHERE group_id=%s AND "
+        "((day=CURRENT_DATE-1 AND hour>=7) OR (day=CURRENT_DATE AND hour<7)) AND text!=''",
+        (group_id,),
+    )
     counter: Counter = Counter()
+    normal_message_count = 0
     for (text,) in rows:
+        if text.startswith(_COMMAND_START):
+            continue
+        normal_message_count += 1
         for seg in re.findall(r"[\u4e00-\u9fff]{2,}", text):
             if seg not in STOPWORDS:
                 counter[seg] += 1
@@ -107,7 +107,7 @@ async def _build_word_image(group_id: int, day: str, n: int, window: bool = Fals
         return None
     cleanup_cache(WORD_CACHE)
     from .wordcloud_card import _render as render_cloud
-    return await asyncio.to_thread(render_cloud, counter, min(n, len(counter)), len(rows))
+    return await asyncio.to_thread(render_cloud, counter, min(n, len(counter)), normal_message_count)
 
 
 # ---------------- 龙王 ----------------

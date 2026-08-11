@@ -1,3 +1,5 @@
+import asyncio
+import json
 import os
 import random
 import shutil
@@ -11,7 +13,7 @@ from nonebot.adapters.onebot.v11 import MessageEvent, MessageSegment
 from nonebot_plugin_apscheduler import scheduler
 from PIL import Image, ImageDraw, ImageFont
 
-from common import OWNER, is_owner
+from common import OWNER, cleanup_cache, is_owner
 
 server_cmd = on_command("服务器", aliases={"服务器状态", "状态", "服务器信息"}, priority=5, block=True)
 
@@ -183,6 +185,7 @@ def _render(data: dict) -> str:
         y += 46
 
     os.makedirs(CACHE_DIR, exist_ok=True)
+    cleanup_cache(CACHE_DIR, max_age=24 * 60 * 60)
     path = os.path.join(CACHE_DIR, f"status_{int(time.time() * 1000)}.png")
     img.save(path, "PNG")
     return path
@@ -237,11 +240,25 @@ def _collect_data() -> dict:
 @scheduler.scheduled_job("cron", hour="*", minute=30, id="hourly_status_push", timezone="Asia/Shanghai")
 async def hourly_status_push():
     try:
-        path = await __import__("asyncio").to_thread(_render, _collect_data())
+        target = _push_target()
+        if not target:
+            return
+        data = await asyncio.to_thread(_collect_data)
+        path = await asyncio.to_thread(_render, data)
         bot = get_bot()
-        await bot.send_group_msg(group_id=<PRIVATE_NUMBER>, message=MessageSegment.image("file://" + path))
+        await bot.send_group_msg(group_id=target, message=MessageSegment.image("file://" + path))
     except Exception:
         pass
+
+
+def _push_target() -> int:
+    try:
+        cfg_file = os.path.join(os.path.dirname(__file__), "push_config.json")
+        with open(cfg_file, "r", encoding="utf-8") as f:
+            gid = int((json.load(f).get("group_id") or 0))
+        return gid if gid > 0 else 0
+    except Exception:
+        return 0
 
 
 @server_cmd.handle()
@@ -249,8 +266,8 @@ async def server_status(event: MessageEvent):
     if not is_owner(event):
         await server_cmd.finish("❌ 你没有权限使用此功能")
 
-    data = _collect_data()
-    path = _render(data)
+    data = await asyncio.to_thread(_collect_data)
+    path = await asyncio.to_thread(_render, data)
     await server_cmd.finish(MessageSegment.image("file://" + path))
 
 
@@ -280,7 +297,7 @@ async def mem_monitor():
         if not _warned_high or now - _last_warn_ts >= _warn_cooldown:
             _last_warn_ts = now
             _warned_high = True
-            procs = "\n".join(_top_mem_processes()) or "无"
+            procs = "\n".join(await asyncio.to_thread(_top_mem_processes)) or "无"
             msg = (
                 f"⚠️ 服务器内存告警\n"
                 f"📊 使用率：{pct:.1f}%（{used_kb / 1024 / 1024:.1f}G / {total_kb / 1024 / 1024:.1f}G）\n"

@@ -8,21 +8,30 @@ import time
 from datetime import date
 
 import httpx
+from nonebot import get_driver
 from PIL import Image, ImageDraw, ImageFilter
 from weasyprint import HTML
+
+from common import cleanup_cache
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 
 ACCENT = "#D9A94E"
+_AVATAR_HTTP = httpx.AsyncClient(timeout=6, follow_redirects=True)
+
+
+@get_driver().on_shutdown
+async def _close_avatar_http() -> None:
+    if not _AVATAR_HTTP.is_closed:
+        await _AVATAR_HTTP.aclose()
 
 
 async def _fetch_avatar(user_id: int) -> bytes | None:
     url = f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
     try:
-        async with httpx.AsyncClient(timeout=6, follow_redirects=True) as client:
-            r = await client.get(url)
-            if r.status_code == 200 and r.content:
-                return r.content
+        r = await _AVATAR_HTTP.get(url)
+        if r.status_code == 200 and r.content:
+            return r.content
     except Exception:
         pass
     return None
@@ -122,22 +131,23 @@ body {{ width: 900px; height: 800px; font-family: "Noto Sans CJK SC", sans-serif
 </body></html>"""
 
     os.makedirs(CACHE_DIR, exist_ok=True)
+    cleanup_cache(CACHE_DIR, max_age=24 * 60 * 60)
     stamp = int(time.time() * 1000)
     tmp_pdf = os.path.join(CACHE_DIR, f"dragon_{stamp}.pdf")
     path = os.path.join(CACHE_DIR, f"dragon_{stamp}.png")
-    HTML(string=html).write_pdf(tmp_pdf)
-    subprocess.run(
-        ["pdftoppm", "-png", "-r", "192", "-singlefile", tmp_pdf, path[:-4]],
-        check=True, capture_output=True,
-    )
-    os.remove(tmp_pdf)
+    try:
+        HTML(string=html).write_pdf(tmp_pdf)
+        subprocess.run(
+            ["pdftoppm", "-png", "-r", "192", "-singlefile", tmp_pdf, path[:-4]],
+            check=True, capture_output=True,
+        )
+    finally:
+        if os.path.exists(tmp_pdf):
+            os.remove(tmp_pdf)
     return path
 
 
 async def build_card_async(rows: list) -> str:
-    avatars = {}
-    for rank, (uid, name, cnt) in enumerate(rows):
-        data = await _fetch_avatar(uid)
-        if data:
-            avatars[uid] = data
+    results = await asyncio.gather(*(_fetch_avatar(uid) for uid, _, _ in rows))
+    avatars = {uid: data for (uid, _, _), data in zip(rows, results) if data}
     return await asyncio.to_thread(_render, rows, avatars)

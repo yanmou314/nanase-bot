@@ -1,16 +1,58 @@
+import asyncio
+import json
+import os
 import time
 from collections import deque
 
-from nonebot import on_message
+from nonebot import get_driver, on_message
 from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
 
 rep_matcher = on_message(priority=50, block=False)
 
 _track: dict = {}
-_replied: dict = {}
 _replied_ts: dict = {}
-COOLDOWN = 60
+COOLDOWN = 300
+
+STATE_FILE = os.path.join(os.path.dirname(__file__), "repeater_state.json")
+
+
+def _load_state() -> None:
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        for gid, items in data.get("track", {}).items():
+            deq: deque = deque(maxlen=3)
+            for item in items:
+                deq.append(tuple(item) if isinstance(item, list) else item)
+            _track[int(gid)] = deq
+        for gid, ts in data.get("replied_ts", {}).items():
+            _replied_ts[int(gid)] = ts
+    except Exception:
+        pass
+
+
+def _save_state() -> None:
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "track": {str(g): list(d) for g, d in _track.items()},
+                    "replied_ts": {str(g): t for g, t in _replied_ts.items()},
+                },
+                f,
+                ensure_ascii=False,
+            )
+    except Exception:
+        pass
+
+
+_load_state()
+
+
+@get_driver().on_shutdown
+async def _save_on_shutdown():
+    await asyncio.to_thread(_save_state)
 
 
 def _fingerprint(event: GroupMessageEvent):
@@ -37,10 +79,9 @@ async def repeater(bot: Bot, event: GroupMessageEvent):
     if fp is None:
         return
 
-    if _replied.get(gid) == fp and time.time() - _replied_ts.get(gid, 0) < COOLDOWN:
+    if time.time() - _replied_ts.get(gid, 0) < COOLDOWN:
         return
 
-    _replied[gid] = fp
     _replied_ts[gid] = time.time()
     deq.clear()
     try:

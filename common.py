@@ -6,7 +6,7 @@ from datetime import datetime
 
 from nonebot.adapters.onebot.v11 import Message, MessageEvent, MessageSegment
 
-OWNER = "REPLACE_WITH_OWNER_QQ"
+OWNER = os.getenv("QQBOT_OWNER", "REPLACE_WITH_OWNER_QQ")
 
 FONTS = {
     "bold": "/usr/share/fonts/custom/ZCOOLKuaiLe-Regular.ttf",
@@ -27,6 +27,7 @@ def at_prefix(event: MessageEvent) -> Message:
 
 def save_image(data: bytes, content_type: str, prefix: str, cache_dir: str) -> str:
     ext = ".jpg" if "jpeg" in (content_type or "") else ".png"
+    cleanup_cache(cache_dir, max_age=24 * 60 * 60)
     os.makedirs(cache_dir, exist_ok=True)
     path = os.path.join(cache_dir, f"{prefix}_{int(datetime.now().timestamp() * 1000)}{ext}")
     with open(path, "wb") as f:

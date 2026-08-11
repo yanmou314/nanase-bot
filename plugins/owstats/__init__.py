@@ -5,7 +5,7 @@ import threading
 import time
 
 import httpx
-from nonebot import on_command
+from nonebot import get_driver, on_command
 from nonebot.adapters.onebot.v11 import Message, MessageEvent, MessageSegment
 from nonebot.params import CommandArg
 from common import at_prefix, cleanup_cache, parse_tag, save_image as save_img
@@ -27,6 +27,12 @@ myid_cmd = on_command("我的ID", aliases={"我的绑定", "myid"}, priority=5, 
 
 
 _bind_cache: dict | None = None
+
+
+@get_driver().on_shutdown
+async def _close_http() -> None:
+    if not _HTTP.is_closed:
+        await _HTTP.aclose()
 
 
 def _load_bindings() -> dict:
@@ -98,6 +104,10 @@ async def _post_json_with_notice(matcher, at: Message, notice: str, path: str, p
         done.set()
         if not rem.done():
             rem.cancel()
+        try:
+            await rem
+        except asyncio.CancelledError:
+            pass
 
 
 def _resolve_tag(arg: Message, event: MessageEvent) -> str:
