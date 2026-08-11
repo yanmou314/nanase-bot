@@ -36,6 +36,7 @@
 | **server_status** | `.服务器` | 服务器状态卡片（CPU/内存/磁盘/服务） |
 | **help** | `.hp` | 指令菜单（管理功能仅群主可见） |
 | **cmd_stats** | 自动 | 每天 00:00 汇总前一天的指令使用情况并发送统计图 |
+| **holiday_countdown** | `.倒计时` `.倒计时开启/关闭/状态/测试` | 每天 17:00 推送下一个周末和节假日倒计时 |
 
 ## 目录结构
 
@@ -51,6 +52,7 @@
     ├── fun/             # 运势
     ├── group_leave/     # 退群提示
     ├── help/            # 帮助菜单
+    ├── holiday_countdown/ # 周末/节假日倒计时
     ├── news/            # 每日新闻
     ├── owstats/         # 守望先锋战绩
     ├── repeater/        # 复读机
@@ -135,12 +137,14 @@ systemctl daemon-reload && systemctl enable --now qqbot
 - 在 `.env` 中设置 `QQBOT_OWNER`，填写机器人的管理员 QQ 号；该文件不会提交到仓库
 - 在 `plugins/server_status/push_config.json` 中设置服务器状态推送群号
 - 在 `plugins/cmd_stats/push_config.json` 中设置指令统计推送群号；这两个配置文件均不会提交到仓库
+- 在目标群内使用 `.倒计时开启` 开通每日 17:00 倒计时推送；仅管理员可操作，可在多个群分别开启
 
 ## 数据存储
 
 - **群聊统计**：PostgreSQL（`messages` 表，30 天自动清理）
 - **绑定关系**：`plugins/owstats/bindings.json`
 - **推送状态**：`plugins/news/state.json`、`plugins/chat_stats/words_state.json`
+- **倒计时权限**：`plugins/holiday_countdown/state.json`（自动忽略，不提交到仓库）
 
 ## 安全说明
 
