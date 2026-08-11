@@ -183,7 +183,7 @@ async def words_status(event: GroupMessageEvent):
     await words_status_cmd.finish("📊 每日词云推送：未开启")
 
 
-@scheduler.scheduled_job("cron", hour=8, minute=0, id="daily_words", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=8, minute=5, id="daily_words", timezone="Asia/Shanghai")
 async def daily_words_job():
     gid = _words_group()
     if not gid:
