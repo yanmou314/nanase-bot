@@ -23,7 +23,7 @@ CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 STATE_LOCK = threading.RLock()
 WEEKDAYS = ("一", "二", "三", "四", "五", "六", "日")
 CARD_WIDTH = 1080
-CARD_HEIGHT = 700
+CARD_HEIGHT = 920
 
 HOLIDAY_DATES: dict[int, tuple[tuple[str, date], ...]] = {
     2026: (
@@ -173,10 +173,23 @@ def _format_date(value: date) -> str:
     return f"{value.month}月{value.day}日（周{WEEKDAYS[value.weekday()]}）"
 
 
+def _offwork_target(now: datetime) -> tuple[datetime, str]:
+    late_period = date(now.year, 5, 1) <= now.date() <= date(now.year, 10, 1)
+    offwork_time = time(17, 30) if late_period else time(17, 0)
+    return datetime.combine(now.date(), offwork_time, tzinfo=TIMEZONE), offwork_time.strftime("%H:%M")
+
+
+def _remaining_or_done(target: datetime, now: datetime) -> str:
+    if now >= target:
+        return "已下班"
+    return _remaining(target, now)
+
+
 def _build_message(now: datetime | None = None) -> str:
     now = now or _now()
     weekend_day, weekend_at = _next_weekend(now)
     holiday_name, holiday_day, holiday_at = _next_holiday(now)
+    offwork_at, offwork_label = _offwork_target(now)
     return (
         "⏳ 每日倒计时\n"
         f"今天是 {now.year}年{now.month}月{now.day}日 {now:%H:%M}\n\n"
@@ -184,6 +197,8 @@ def _build_message(now: datetime | None = None) -> str:
         f"还剩 {_remaining(weekend_at, now)}\n\n"
         f"🎉 下一个节假日：{holiday_name} · {_format_date(holiday_day)}\n"
         f"还剩 {_remaining(holiday_at, now)}\n\n"
+        f"💼 下班倒计时：今天 {offwork_label} 下班\n"
+        f"还剩 {_remaining_or_done(offwork_at, now)}\n\n"
         "注：节假日按放假起始日计算，日期表会随官方安排更新。"
     )
 
@@ -205,6 +220,7 @@ def _right_text(draw: ImageDraw.ImageDraw, text: str, y: int, font, fill) -> Non
 def _render_card(now: datetime) -> str:
     weekend_day, weekend_at = _next_weekend(now)
     holiday_name, holiday_day, holiday_at = _next_holiday(now)
+    offwork_at, offwork_label = _offwork_target(now)
     image = Image.new("RGB", (CARD_WIDTH, CARD_HEIGHT))
     draw = ImageDraw.Draw(image, "RGBA")
     top = (249, 247, 255)
@@ -227,6 +243,7 @@ def _render_card(now: datetime) -> str:
     gray = (123, 118, 139, 255)
     weekend_color = (65, 155, 196, 255)
     holiday_color = (217, 140, 71, 255)
+    offwork_color = (103, 157, 111, 255)
 
     draw.text((64, 42), "每日倒计时", font=title_font, fill=dark)
     draw.text((66, 105), f"{now.year}年{now.month}月{now.day}日 {now:%H:%M} · 中国标准时间", font=date_font, fill=gray)
@@ -256,9 +273,17 @@ def _render_card(now: datetime) -> str:
         _remaining(holiday_at, now),
         holiday_color,
     )
-    footer = "节假日按放假起始日计算 · 每天 17:00 自动发送"
+    draw_panel(
+        595,
+        "OFF WORK",
+        "下班倒计时",
+        f"今天下班时间 {offwork_label}",
+        _remaining_or_done(offwork_at, now),
+        offwork_color,
+    )
+    footer = "5月1日—10月1日 17:30 下班 · 其余日期 17:00 下班 · 每天 17:00 自动发送"
     footer_box = draw.textbbox((0, 0), footer, font=footer_font)
-    draw.text(((CARD_WIDTH - (footer_box[2] - footer_box[0])) / 2, 625), footer, font=footer_font, fill=gray)
+    draw.text(((CARD_WIDTH - (footer_box[2] - footer_box[0])) / 2, 845), footer, font=footer_font, fill=gray)
 
     os.makedirs(CACHE_DIR, exist_ok=True)
     cleanup_cache(CACHE_DIR, max_age=3 * 24 * 60 * 60)
