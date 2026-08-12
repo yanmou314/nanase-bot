@@ -245,7 +245,7 @@ async def news_on(event: MessageEvent):
     if not hasattr(event, "group_id"):
         await news_on_cmd.finish("请在有机器人的群里开启此功能")
     _add_group(str(event.group_id))
-    await news_on_cmd.finish(f"✅ 本群已开启每日新闻推送\n每天 8:00 自动发送前一天新闻总结到此群")
+    await news_on_cmd.finish(f"✅ 本群已开启每日新闻推送\n每天 5:30 自动发送前一天新闻总结到此群")
 
 
 @news_off_cmd.handle()
@@ -286,5 +286,5 @@ async def news_status(event: MessageEvent):
         await news_status_cmd.finish("❌ 你没有权限使用此功能")
     groups = _get_groups()
     if groups:
-        await news_status_cmd.finish(f"📰 每日新闻推送已开启于 {len(groups)} 个群（每天 8:00 发送）：\n{'、'.join(groups)}")
+        await news_status_cmd.finish(f"📰 每日新闻推送已开启于 {len(groups)} 个群（每天 5:30 发送）：\n{'、'.join(groups)}")
     await news_status_cmd.finish("📰 每日新闻推送：未开启")

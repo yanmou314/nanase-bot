@@ -100,7 +100,7 @@ async def _get_name(bot: Bot, group_id: int, user_id: int) -> str:
 async def _build_word_image(group_id: int, day: str, n: int, window: bool = False) -> str | None:
     rows = await exec(
         "SELECT text FROM messages WHERE group_id=%s AND "
-        "((day=CURRENT_DATE-1 AND hour>=6) OR (day=CURRENT_DATE AND hour<6)) AND text!=''",
+        "((day=CURRENT_DATE-1 AND hour>=4) OR (day=CURRENT_DATE AND hour<4)) AND text!=''",
         (group_id,),
     )
     counter: Counter = Counter()
@@ -210,7 +210,7 @@ async def words_on(event: GroupMessageEvent):
     if not hasattr(event, "group_id"):
         await words_on_cmd.finish("请在有机器人的群里开启此功能")
     _add_words_group(str(event.group_id))
-    await words_on_cmd.finish(f"✅ 本群已开启每日词云推送\n每天 7:00 自动发送 6:00 前 24 小时的热词词云到此群")
+    await words_on_cmd.finish(f"✅ 本群已开启每日词云推送\n每天 4:30 自动发送 4:00 前 24 小时的热词词云到此群")
 
 
 @words_off_cmd.handle()
@@ -229,7 +229,7 @@ async def words_status(event: GroupMessageEvent):
         await words_status_cmd.finish("❌ 你没有权限使用此功能")
     groups = _words_groups()
     if groups:
-        await words_status_cmd.finish(f"📊 每日词云推送已开启于 {len(groups)} 个群（每天 7:00 发送）：\n{'、'.join(groups)}")
+        await words_status_cmd.finish(f"📊 每日词云推送已开启于 {len(groups)} 个群（每天 4:30 发送）：\n{'、'.join(groups)}")
     await words_status_cmd.finish("📊 每日词云推送：未开启")
 
 
@@ -265,5 +265,5 @@ async def words(event: GroupMessageEvent, arg: Message = CommandArg()):
         n = 20
     path = await _build_word_image(event.group_id, date.today().isoformat(), n)
     if not path:
-        await words_cmd.finish("近 24 小时（今晨 6:00 前）还没有可统计的文字内容～")
+        await words_cmd.finish("近 24 小时（凌晨 4:00 前）还没有可统计的文字内容～")
     await words_cmd.finish(MessageSegment.image("file://" + path))
