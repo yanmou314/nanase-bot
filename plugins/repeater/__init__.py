@@ -32,11 +32,11 @@ def _load_state() -> None:
         pass
 
 
-def _save_state() -> None:
+def _save_state(snapshot: dict | None = None) -> None:
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(
-                {
+                snapshot or {
                     "track": {str(g): list(d) for g, d in _track.items()},
                     "replied_ts": {str(g): t for g, t in _replied_ts.items()},
                 },
@@ -52,7 +52,21 @@ _load_state()
 
 @get_driver().on_shutdown
 async def _save_on_shutdown():
-    await asyncio.to_thread(_save_state)
+    # 先在事件循环内做快照，再交给线程写盘，避免线程内迭代时字典被修改
+    snapshot = {
+        "track": {str(g): list(d) for g, d in _track.items()},
+        "replied_ts": {str(g): t for g, t in _replied_ts.items()},
+    }
+    await asyncio.to_thread(_save_state, snapshot)
+
+
+def _prune() -> None:
+    """清理 7 天以上无活动的群记录，防止字典无限增长。"""
+    cutoff = time.time() - 7 * 86400
+    for gid in list(_track):
+        if _replied_ts.get(gid, 0) < cutoff:
+            _track.pop(gid, None)
+            _replied_ts.pop(gid, None)
 
 
 def _fingerprint(event: GroupMessageEvent):
@@ -69,6 +83,8 @@ def _fingerprint(event: GroupMessageEvent):
 
 @rep_matcher.handle()
 async def repeater(bot: Bot, event: GroupMessageEvent):
+    if len(_track) > 2000:
+        _prune()
     gid = event.group_id
     fp = _fingerprint(event)
 

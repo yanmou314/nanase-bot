@@ -1,26 +1,30 @@
-# 敏感配置（密钥/密码）
-**/config.json
-**/db.json
-**/auto_approve.json
+# ===== 敏感配置（禁止上传） =====
+.env
+.env.*
+!.env.example
 
-# 用户数据/状态
-**/bindings.json
-**/state.json
-**/words_state.json
+# 运行时状态与配置（含 QQ 号/群号/密钥）
+plugins/**/state.json
+plugins/**/db.json
+plugins/**/words_state.json
+plugins/**/push_config.json
+plugins/**/bindings.json
+plugins/**/auto_approve.json
+plugins/**/config.json
+plugins/**/repeater_state.json
 **/stats.db
 **/stats.db-*
 
-# 运行时缓存与日志
-**/cache/
-**/__pycache__/
+# 备份与临时文件
+*.bak*
 *.log
-
-# 环境配置（用 .env.example 代替）
-.env
-venv/
 .deleted/
-plugins/cmd_stats/push_config.json
-**/*.bak-*
 
-# 复读机运行状态
-**/repeater_state.json
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# 图片缓存
+plugins/**/cache/

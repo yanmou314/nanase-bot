@@ -1,9 +1,11 @@
 import asyncio
 import json
+import logging
 import os
 import threading
 import time
 from datetime import date, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
 from nonebot import get_bot, get_driver, on_command
@@ -13,9 +15,13 @@ from PIL import Image, ImageDraw, ImageFont
 
 from common import cleanup_cache, is_owner
 
+_logger = logging.getLogger(__name__)
+_SH = ZoneInfo("Asia/Shanghai")
+
 STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 _LOCK = threading.Lock()
+_client_lock = threading.Lock()
 
 NEWS_API = "https://60s.viki.moe/v2/60s"
 BAIDU_API = "https://top.baidu.com/api/board?platform=wise&tab=realtime"
@@ -37,7 +43,9 @@ _http_client: httpx.AsyncClient | None = None
 def _get_http_client() -> httpx.AsyncClient:
     global _http_client
     if _http_client is None or _http_client.is_closed:
-        _http_client = httpx.AsyncClient(timeout=20)
+        with _client_lock:
+            if _http_client is None or _http_client.is_closed:
+                _http_client = httpx.AsyncClient(timeout=20)
     return _http_client
 
 
@@ -50,8 +58,9 @@ async def _close_http_client() -> None:
 def _load_state() -> dict:
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
 
 
@@ -93,16 +102,19 @@ async def _fetch_60s(day: date) -> list[str]:
 
 
 async def _fetch_baidu() -> list[str]:
+    """百度热搜实时榜：条目位于 cards[].content[] 直接层级，字段名为 word。"""
     client = _get_http_client()
     r = await client.get(BAIDU_API, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
     r.raise_for_status()
     data = r.json()
     items = []
     for card in data.get("data", {}).get("cards", []):
-        for content in card.get("content", []):
-            for word in content.get("content", []):
-                if word.get("query"):
-                    items.append(word["query"])
+        for item in card.get("content", []):
+            if not isinstance(item, dict):
+                continue
+            word = item.get("word") or item.get("query")
+            if word:
+                items.append(str(word))
     return items[:10]
 
 
@@ -123,16 +135,23 @@ def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> li
 def _render_news_image(day: date, news: list[str], source: str) -> str:
     W = 880
     MARGIN = 40
-    font_title = ImageFont.truetype(FONT_REG, 40)
-    font_item = ImageFont.truetype(FONT_REG, 28)
-    font_foot = ImageFont.truetype(FONT_REG, 22)
+    try:
+        font_title = ImageFont.truetype(FONT_REG, 40)
+        font_item = ImageFont.truetype(FONT_REG, 28)
+        font_foot = ImageFont.truetype(FONT_REG, 22)
+    except OSError:
+        # 字体缺失时用默认字体，避免整个任务崩溃
+        font_title = ImageFont.load_default()
+        font_item = ImageFont.load_default()
+        font_foot = ImageFont.load_default()
 
     items = news[:12]
     preview = Image.new("RGB", (W, 10))
     pdraw = ImageDraw.Draw(preview)
     heights = []
+    content_max = W - MARGIN - 44 - 20  # 与正文实际绘制起点 (MARGIN+44) 对齐
     for item in items:
-        lines = _wrap_text(pdraw, item, font_item, W - MARGIN * 2 - 20)
+        lines = _wrap_text(pdraw, item, font_item, content_max)
         heights.append(len(lines) * 40 + 10)
 
     H = 110 + sum(heights) + 50
@@ -144,7 +163,7 @@ def _render_news_image(day: date, news: list[str], source: str) -> str:
 
     y = 104
     for i, item in enumerate(items, 1):
-        lines = _wrap_text(draw, item, font_item, W - MARGIN * 2 - 20)
+        lines = _wrap_text(draw, item, font_item, content_max)
         draw.text((MARGIN, y + 5), f"{i}.", font=font_item, fill=BLACK)
         ty = y
         for ln in lines:
@@ -155,7 +174,7 @@ def _render_news_image(day: date, news: list[str], source: str) -> str:
             draw.line([(MARGIN, y - 5), (W - MARGIN, y - 5)], fill=(220, 220, 220), width=2)
 
     draw.line([(MARGIN, H - 40), (W - MARGIN, H - 40)], fill=(220, 220, 220), width=2)
-    draw.text((MARGIN, H - 34), f"来源：{source} · {time.strftime('%H:%M')}", font=font_foot, fill=GRAY)
+    draw.text((MARGIN, H - 34), f"来源：{source} · {time.strftime('%H:%M', time.localtime())}", font=font_foot, fill=GRAY)
 
     os.makedirs(CACHE_DIR, exist_ok=True)
     cleanup_cache(CACHE_DIR, max_age=3 * 24 * 60 * 60)
@@ -171,17 +190,28 @@ async def _send_news(day: date) -> None:
     try:
         news = await _fetch_60s(day)
         source = "60秒读懂世界"
+        if not news:
+            raise RuntimeError("60s 返回空列表")
     except Exception:
         try:
             news = await _fetch_baidu()
             source = "百度热搜"
         except Exception:
+            _logger.exception("新闻源全部获取失败")
             return
     if not news:
+        _logger.warning("新闻源返回为空")
         return
-    path = await asyncio.to_thread(_render_news_image, day, news, source)
-    bot = get_bot()
-    await bot.send_group_msg(group_id=int(group_id), message=MessageSegment.image("file://" + path))
+    try:
+        path = await asyncio.to_thread(_render_news_image, day, news, source)
+    except Exception:
+        _logger.exception("新闻图片渲染失败")
+        return
+    try:
+        bot = get_bot()
+        await bot.send_group_msg(group_id=int(group_id), message=MessageSegment.image("file://" + path))
+    except Exception:
+        _logger.exception("新闻发送失败")
 
 
 @scheduler.scheduled_job("cron", hour=8, minute=0, id="daily_news", timezone="Asia/Shanghai")

@@ -3,6 +3,7 @@ import json
 import os
 import threading
 import time
+from pathlib import Path
 
 import httpx
 from nonebot import get_driver, on_command
@@ -10,7 +11,7 @@ from nonebot.adapters.onebot.v11 import Message, MessageEvent, MessageSegment
 from nonebot.params import CommandArg
 from common import at_prefix, cleanup_cache, parse_tag, save_image as save_img
 
-API = "http://<PRIVATE_IP>:18080"
+API = "http://127.0.0.1:18080"
 CACHE = os.path.join(os.path.dirname(__file__), "cache")
 _HTTP = httpx.AsyncClient(timeout=120)
 BIND_FILE = os.path.join(os.path.dirname(__file__), "bindings.json")
@@ -40,8 +41,16 @@ def _load_bindings() -> dict:
     if _bind_cache is None:
         try:
             with open(BIND_FILE, "r", encoding="utf-8") as f:
-                _bind_cache = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
+                data = json.load(f)
+            _bind_cache = data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            # 文件损坏：备份现场后重置，避免后续覆盖丢失全部绑定
+            try:
+                os.replace(BIND_FILE, BIND_FILE + f".corrupt-{int(time.time())}")
+            except OSError:
+                pass
+            _bind_cache = {}
+        except (FileNotFoundError, OSError):
             _bind_cache = {}
     return _bind_cache
 
@@ -81,7 +90,11 @@ async def _post_json(path: str, payload: dict, timeout: float = 90.0):
     r = await _HTTP.post(f"{API}{path}", json=payload, timeout=timeout)
     if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
         return {"_image": True, "bytes": r.content, "content_type": r.headers["content-type"]}
-    return r.json()
+    try:
+        data = r.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return {"ok": False, "message": f"上游服务异常（HTTP {r.status_code}）"}
+    return data if isinstance(data, dict) else {"ok": False, "message": "上游返回格式异常"}
 
 
 async def _post_json_with_notice(matcher, at: Message, notice: str, path: str, payload: dict,
@@ -211,8 +224,8 @@ async def rank_history(event: MessageEvent, arg: Message = CommandArg()):
         except httpx.HTTPError:
             await rankhist_cmd.finish(at + "查询失败：请求超时，请稍后再试")
         if data.get("_image"):
-            path = save_img(data["bytes"], data["content_type"], "rank")
-            await rankhist_cmd.finish(_done(Message(MessageSegment.image("file://" + path)), at, time.monotonic() - t0))
+            path = save_img(data["bytes"], data["content_type"], "rank", CACHE)
+            await rankhist_cmd.finish(_done(Message(MessageSegment.image(Path(path).as_uri())), at, time.monotonic() - t0))
         await rankhist_cmd.finish(at + _friendly_error(data))
     finally:
         OW_LOCK.release()
@@ -235,8 +248,8 @@ async def strength(event: MessageEvent, arg: Message = CommandArg()):
         except httpx.HTTPError:
             await strength_cmd.finish(at + "查询失败：请求超时，请稍后再试")
         if data.get("_image"):
-            path = save_img(data["bytes"], data["content_type"], "strength")
-            await strength_cmd.finish(_done(Message(MessageSegment.image("file://" + path)), at, time.monotonic() - t0))
+            path = save_img(data["bytes"], data["content_type"], "strength", CACHE)
+            await strength_cmd.finish(_done(Message(MessageSegment.image(Path(path).as_uri())), at, time.monotonic() - t0))
         await strength_cmd.finish(at + _friendly_error(data))
     finally:
         OW_LOCK.release()
@@ -271,8 +284,8 @@ async def summary(event: MessageEvent, arg: Message = CommandArg()):
         except httpx.HTTPError:
             await summary_cmd.finish(at + "生成失败：超时，请稍后再试")
         if data.get("_image"):
-            path = save_img(data["bytes"], data["content_type"], "summary")
-            await summary_cmd.finish(_done(Message(MessageSegment.image("file://" + path)), at, time.monotonic() - t0))
+            path = save_img(data["bytes"], data["content_type"], "summary", CACHE)
+            await summary_cmd.finish(_done(Message(MessageSegment.image(Path(path).as_uri())), at, time.monotonic() - t0))
         await summary_cmd.finish(at + _friendly_error(data))
     finally:
         OW_LOCK.release()
