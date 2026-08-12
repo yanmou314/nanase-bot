@@ -1,4 +1,4 @@
-"""指令使用统计：每天 00:00 汇总前一天指令使用情况并发送图片到指定群。"""
+"""指令使用统计：每天 00:00 汇总前一天指令使用情况并发送图片到所有已开启的群。"""
 import asyncio
 import base64
 import html as html_mod
@@ -7,16 +7,17 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
 from datetime import date, timedelta
 
-from nonebot import get_bot
-from nonebot.adapters.onebot.v11 import MessageSegment
+from nonebot import get_bot, on_command
+from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
 from nonebot_plugin_apscheduler import scheduler
 from PIL import Image, ImageDraw
 from weasyprint import HTML
 
-from common import cleanup_cache
+from common import cleanup_cache, is_owner
 from plugins.chat_stats.db_pg import exec
 
 _logger = logging.getLogger(__name__)
@@ -28,18 +29,62 @@ CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "push_config.json")
 ACCENT = "#D9A94E"
 GREEN = "#4ECDC4"
+_config_lock = threading.Lock()
+
+stats_on_cmd = on_command("统计开启", priority=5, block=True)
+stats_off_cmd = on_command("统计关闭", priority=5, block=True)
+stats_status_cmd = on_command("统计状态", priority=5, block=True)
 
 _name_cache: dict = {}
 _name_ts: dict = {}
 
 
-def _target_group() -> int:
+def _load_config() -> dict:
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            group_id = int((json.load(f).get("group_id") or 0))
-        return group_id if group_id > 0 else 0
-    except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
-        return 0
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        # 旧格式 {"group_id": 123} 自动迁移到多群格式
+        if "groups" not in data and data.get("group_id"):
+            data["groups"] = [int(data["group_id"])]
+            data.pop("group_id", None)
+            _save_config(data)
+        if not isinstance(data.get("groups"), list):
+            data["groups"] = []
+        return data
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_config(data: dict) -> None:
+    with _config_lock:
+        tmp = CONFIG_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, CONFIG_FILE)
+
+
+def _target_groups() -> list[int]:
+    return [int(g) for g in _load_config().get("groups", []) if int(g) > 0]
+
+
+def _add_group(gid: int) -> None:
+    with _config_lock:
+        data = _load_config()
+        groups = {int(g) for g in data.get("groups", [])}
+        groups.add(gid)
+        data["groups"] = sorted(groups)
+        _save_config(data)
+
+
+def _remove_group(gid: int) -> None:
+    with _config_lock:
+        data = _load_config()
+        groups = {int(g) for g in data.get("groups", [])}
+        groups.discard(gid)
+        data["groups"] = sorted(groups)
+        _save_config(data)
 
 
 def _prev_day() -> str:
@@ -246,12 +291,44 @@ async def _run_daily() -> str:
 
 @scheduler.scheduled_job("cron", hour=0, minute=0, id="daily_cmd_stats", timezone="Asia/Shanghai")
 async def daily_cmd_stats_job():
+    groups = _target_groups()
+    if not groups:
+        return
     try:
-        target = _target_group()
-        if not target:
-            return
         path = await _run_daily()
         bot = get_bot()
-        await bot.send_group_msg(group_id=target, message=MessageSegment.image("file://" + path))
     except Exception:
-        _logger.exception("每日指令统计推送失败")
+        _logger.exception("每日指令统计生成失败")
+        return
+    for group_id in groups:
+        try:
+            await bot.send_group_msg(group_id=group_id, message=MessageSegment.image("file://" + path))
+        except Exception:
+            _logger.exception("指令统计推送到群 %s 失败", group_id)
+
+
+# ---------------- 多群开关命令 ----------------
+@stats_on_cmd.handle()
+async def stats_on(event: GroupMessageEvent):
+    if not is_owner(event):
+        await stats_on_cmd.finish("❌ 你没有权限使用此功能")
+    _add_group(event.group_id)
+    await stats_on_cmd.finish("✅ 本群已开启每日指令统计推送（每天 00:00 发送）")
+
+
+@stats_off_cmd.handle()
+async def stats_off(event: GroupMessageEvent):
+    if not is_owner(event):
+        await stats_off_cmd.finish("❌ 你没有权限使用此功能")
+    _remove_group(event.group_id)
+    await stats_off_cmd.finish("✅ 本群已关闭每日指令统计推送")
+
+
+@stats_status_cmd.handle()
+async def stats_status(event: GroupMessageEvent):
+    if not is_owner(event):
+        await stats_status_cmd.finish("❌ 你没有权限使用此功能")
+    groups = _target_groups()
+    if groups:
+        await stats_status_cmd.finish(f"📈 每日指令统计已开启于 {len(groups)} 个群（每天 00:00 发送）：\n{'、'.join(map(str, groups))}")
+    await stats_status_cmd.finish("📈 每日指令统计：未开启")
