@@ -28,3 +28,7 @@ venv/
 
 # 图片缓存
 plugins/**/cache/
+
+# 关键词触发 + 群成员时长状态（含 QQ 号/群号）
+plugins/keyword_reply/keyword_config.json
+plugins/group_leave/join_state.json
