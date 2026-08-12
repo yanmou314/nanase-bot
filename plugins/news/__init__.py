@@ -214,7 +214,7 @@ async def _send_news(day: date) -> None:
         _logger.exception("新闻发送失败")
 
 
-@scheduler.scheduled_job("cron", hour=8, minute=0, id="daily_news", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=5, minute=30, id="daily_news", timezone="Asia/Shanghai")
 async def daily_news_job():
     await _send_news(date.today() - timedelta(days=1))
 
