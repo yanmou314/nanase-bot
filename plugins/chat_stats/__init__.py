@@ -147,27 +147,60 @@ async def dragon(bot: Bot, event: GroupMessageEvent):
 
 # ---------------- 词频推送状态 ----------------
 
-def _words_group() -> str:
+def _words_groups() -> list[str]:
     with _state_lock:
         try:
             with open(WORDS_STATE, "r", encoding="utf-8") as f:
-                return (json.load(f).get("group_id") or "").strip()
-        except Exception:
-            return ""
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return []
+        if not isinstance(data, dict):
+            return []
+        # 旧格式 {"group_id": "xxx"} 自动迁移到多群格式
+        if "groups" not in data and data.get("group_id"):
+            data["groups"] = [str(data["group_id"])]
+            data.pop("group_id", None)
+            _save_words_state(data)
+        return [str(g) for g in (data.get("groups") or []) if str(g)]
 
 
-def _set_words_group(gid: str) -> None:
+def _save_words_state(data: dict) -> None:
     with _state_lock:
         with open(WORDS_STATE, "w", encoding="utf-8") as f:
-            json.dump({"group_id": gid}, f, ensure_ascii=False, indent=2)
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def _clear_words_group() -> None:
+def _add_words_group(gid: str) -> None:
     with _state_lock:
         try:
-            os.remove(WORDS_STATE)
-        except OSError:
-            pass
+            with open(WORDS_STATE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                data = {}
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            data = {}
+        if data.get("group_id") and "groups" not in data:  # 旧格式迁移
+            data["groups"] = [str(data["group_id"])]
+            data.pop("group_id", None)
+        groups = {str(g) for g in (data.get("groups") or [])}
+        groups.add(gid)
+        data["groups"] = sorted(groups)
+        _save_words_state(data)
+
+
+def _remove_words_group(gid: str) -> None:
+    with _state_lock:
+        try:
+            with open(WORDS_STATE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return
+        groups = {str(g) for g in (data.get("groups") or [])}
+        groups.discard(gid)
+        data["groups"] = sorted(groups)
+        _save_words_state(data)
 
 
 @words_on_cmd.handle()
@@ -176,41 +209,48 @@ async def words_on(event: GroupMessageEvent):
         await words_on_cmd.finish("❌ 你没有权限使用此功能")
     if not hasattr(event, "group_id"):
         await words_on_cmd.finish("请在有机器人的群里开启此功能")
-    _set_words_group(str(event.group_id))
-    await words_on_cmd.finish(f"✅ 每日词云推送已开启\n每天 7:00 自动发送 6:00 前 24 小时的热词词云到此群（本群 {event.group_id}）")
+    _add_words_group(str(event.group_id))
+    await words_on_cmd.finish(f"✅ 本群已开启每日词云推送\n每天 7:00 自动发送 6:00 前 24 小时的热词词云到此群")
 
 
 @words_off_cmd.handle()
 async def words_off(event: GroupMessageEvent):
     if not is_owner(event):
         await words_off_cmd.finish("❌ 你没有权限使用此功能")
-    _clear_words_group()
-    await words_off_cmd.finish("✅ 每日词云推送已关闭")
+    if not hasattr(event, "group_id"):
+        await words_off_cmd.finish("请在有机器人的群里关闭此功能")
+    _remove_words_group(str(event.group_id))
+    await words_off_cmd.finish("✅ 本群已关闭每日词云推送")
 
 
 @words_status_cmd.handle()
 async def words_status(event: GroupMessageEvent):
     if not is_owner(event):
         await words_status_cmd.finish("❌ 你没有权限使用此功能")
-    gid = _words_group()
-    if gid:
-        await words_status_cmd.finish(f"📊 每日词云推送：已开启（群 {gid}，每天 7:00 发送 6:00 前 24 小时热词）")
+    groups = _words_groups()
+    if groups:
+        await words_status_cmd.finish(f"📊 每日词云推送已开启于 {len(groups)} 个群（每天 7:00 发送）：\n{'、'.join(groups)}")
     await words_status_cmd.finish("📊 每日词云推送：未开启")
 
 
 @scheduler.scheduled_job("cron", hour=7, minute=0, id="daily_words", timezone="Asia/Shanghai")
 async def daily_words_job():
-    gid = _words_group()
-    if not gid:
+    groups = _words_groups()
+    if not groups:
         return
     try:
-        path = await _build_word_image(int(gid), "", 40, window=True)
-        if not path:
-            return
         bot = get_bot()
-        await bot.send_group_msg(group_id=int(gid), message=MessageSegment.image("file://" + path))
     except Exception:
-        _logger.exception("每日词云推送失败")
+        _logger.exception("获取 bot 失败")
+        return
+    for gid in groups:
+        try:
+            path = await _build_word_image(int(gid), "", 40, window=True)
+            if not path:
+                continue
+            await bot.send_group_msg(group_id=int(gid), message=MessageSegment.image("file://" + path))
+        except Exception:
+            _logger.exception("每日词云推送到群 %s 失败", gid)
 
 
 # ---------------- 词频 ----------------
