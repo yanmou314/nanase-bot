@@ -86,6 +86,7 @@ async def exec(sql: str, params: tuple = ()) -> list:
             try:
                 return await cur.fetchall()
             except Exception:
+                _logger.exception("查询失败: %s", sql)
                 return []
 
 
@@ -112,35 +113,45 @@ async def _write_batch(batch: list[tuple[int, int, str, str]]) -> None:
 
 
 async def _write_loop() -> None:
-    queue = _write_queue
-    if queue is None:
-        return
     while True:
-        first = await queue.get()
-        batch = [first]
-        deadline = asyncio.get_running_loop().time() + _FLUSH_INTERVAL
-        while len(batch) < _BATCH_SIZE:
-            timeout = deadline - asyncio.get_running_loop().time()
-            if timeout <= 0:
-                break
-            try:
-                batch.append(await asyncio.wait_for(queue.get(), timeout))
-            except asyncio.TimeoutError:
-                break
         try:
-            await _write_batch(batch)
+            queue = _write_queue
+            if queue is None:
+                await asyncio.sleep(1)
+                continue
+            first = await queue.get()
+            batch = [first]
+            deadline = asyncio.get_running_loop().time() + _FLUSH_INTERVAL
+            while len(batch) < _BATCH_SIZE:
+                timeout = deadline - asyncio.get_running_loop().time()
+                if timeout <= 0:
+                    break
+                try:
+                    batch.append(await asyncio.wait_for(queue.get(), timeout))
+                except asyncio.TimeoutError:
+                    break
+            try:
+                await _write_batch(batch)
+            except Exception:
+                _logger.exception("批量写入消息失败，将在稍后重试")
+                for _ in batch:
+                    queue.task_done()
+                for item in batch:
+                    await queue.put(item)
+                await asyncio.sleep(1)
+            else:
+                for _ in batch:
+                    queue.task_done()
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            _logger.exception("批量写入消息失败，将在稍后重试")
-            for _ in batch:
-                queue.task_done()
-            for item in batch:
-                await queue.put(item)
+            _logger.exception("消息写入循环异常，1 秒后重启")
             await asyncio.sleep(1)
-        else:
-            for _ in batch:
-                queue.task_done()
 
 
 async def write(group_id: int, user_id: int, msg_type: str, text: str) -> None:
     queue = await _ensure_writer()
-    await queue.put((group_id, user_id, msg_type, text))
+    try:
+        queue.put_nowait((group_id, user_id, msg_type, text))
+    except asyncio.QueueFull:
+        _logger.warning("消息队列已满，丢弃该条消息 (group=%s user=%s)", group_id, user_id)

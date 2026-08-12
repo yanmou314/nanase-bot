@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw, ImageFont
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 
 FONT = "/usr/share/fonts/custom/ZCOOLQingKeHuangYou-Regular.ttf"
-PALETTE = ["#<PRIVATE_NUMBER>", "#6868C8", "#8898C8", "#88A050", "#C83838", "#A84848",
+PALETTE = ["#5858B8", "#6868C8", "#8898C8", "#88A050", "#C83838", "#A84848",
            "#B89838", "#E0B850", "#C8D898", "#E09098"]
 
 

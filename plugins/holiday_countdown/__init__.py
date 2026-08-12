@@ -90,7 +90,7 @@ def _load_groups() -> set[int]:
             data = json.load(file)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return set()
-    groups = data.get("groups", []) if isinstance(data, dict) else []
+    groups = data.get("groups", []) if isinstance(data, dict) and isinstance(data.get("groups"), list) else []
     result = set()
     for group_id in groups:
         try:
@@ -355,8 +355,14 @@ async def daily_holiday_countdown_job():
     groups = _enabled_groups()
     if not groups:
         return
-    message = await _build_image_message()
-    bot = get_bot()
+    try:
+        message = await _build_image_message()
+    except Exception:
+        return
+    try:
+        bot = get_bot()
+    except Exception:
+        return
     for group_id in groups:
         try:
             await bot.send_group_msg(group_id=group_id, message=message)

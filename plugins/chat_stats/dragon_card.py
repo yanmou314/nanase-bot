@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import html as html_mod
 import io
 import os
 import random
@@ -53,6 +54,7 @@ def _background() -> str:
 def _row_html(rank: int, name: str, cnt: int, max_cnt: int, total: int, av_b64: str | None) -> str:
     ratio = max(cnt / max_cnt, 0.02) if max_cnt else 0
     share = cnt / total * 100 if total else 0
+    name_esc = html_mod.escape(name, quote=True)  # 防止昵称注入 HTML
     if av_b64:
         avatar = (
             f'<div class="avatar" style="background-image:url(data:image/jpeg;base64,{av_b64});">'
@@ -65,7 +67,7 @@ def _row_html(rank: int, name: str, cnt: int, max_cnt: int, total: int, av_b64: 
       <div class="rank">{rank + 1:02d}</div>
       {avatar}
       <div class="mid">
-        <div class="name">{'<span class="c1">👑</span>' if rank == 0 else ''}{name}</div>
+        <div class="name">{'<span class="c1">👑</span>' if rank == 0 else ''}{name_esc}</div>
         <div class="bar"><div class="bf" style="width:{ratio * 100:.1f}%"></div></div>
       </div>
       <div class="num"><b>{cnt}</b><span>条</span></div>
@@ -136,7 +138,7 @@ body {{ width: 900px; height: 800px; font-family: "Noto Sans CJK SC", sans-serif
     tmp_pdf = os.path.join(CACHE_DIR, f"dragon_{stamp}.pdf")
     path = os.path.join(CACHE_DIR, f"dragon_{stamp}.png")
     try:
-        HTML(string=html).write_pdf(tmp_pdf)
+        HTML(string=html, url_fetcher=_local_only_fetcher).write_pdf(tmp_pdf)
         subprocess.run(
             ["pdftoppm", "-png", "-r", "192", "-singlefile", tmp_pdf, path[:-4]],
             check=True, capture_output=True,
@@ -145,6 +147,13 @@ body {{ width: 900px; height: 800px; font-family: "Noto Sans CJK SC", sans-serif
         if os.path.exists(tmp_pdf):
             os.remove(tmp_pdf)
     return path
+
+
+def _local_only_fetcher(url, timeout=10, *args, **kwargs):
+    """weasyprint 资源加载器：仅允许 data: URL，阻止外部资源请求（防 SSRF）。"""
+    if url.startswith("data:"):
+        return weasyprint.default_url_fetcher(url, timeout, *args, **kwargs)
+    raise ValueError(f"blocked external url: {url}")
 
 
 async def build_card_async(rows: list) -> str:

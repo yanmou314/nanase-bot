@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import threading
 import time
 from datetime import datetime
 
@@ -25,17 +26,28 @@ auto_off_cmd = on_command("自动通过关闭", aliases={"自动同意关闭"}, 
 auto_show_cmd = on_command("自动通过查看", aliases={"自动同意查看"}, priority=5, block=True)
 auto_count_cmd = on_command("自动通过数量", aliases={"自动同意数量", "自动通过统计", "自动同意统计"}, priority=5, block=True)
 
-_pending = {}
+_pending: dict[str, dict] = {}
+_save_lock = threading.Lock()
+_PENDING_TTL = 48 * 3600  # 与 QQ 侧 flag 有效期一致
 
 
 def _now() -> str:
     return datetime.now().strftime("%m-%d %H:%M")
 
 
+def _purge_pending() -> None:
+    """清理超过 TTL 的待处理申请，防止内存无限增长。"""
+    now = time.time()
+    for key in list(_pending):
+        if now - _pending[key].get("ts", 0) > _PENDING_TTL:
+            _pending.pop(key, None)
+
+
 def _load_config() -> dict:
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
@@ -45,19 +57,20 @@ def _load_keywords(group_id: int) -> list[str]:
 
 
 def _save_keywords(group_id: int, kw: list[str], merge: bool = False) -> list[str]:
-    data = _load_config()
-    keywords = [k for k in kw if k]
-    if merge:
-        existing = [k for k in (data.get(str(group_id)) or []) if k]
-        keywords = list(dict.fromkeys([*existing, *keywords]))
-    else:
-        keywords = list(dict.fromkeys(keywords))
-    data[str(group_id)] = keywords
-    temporary = CONFIG_FILE + ".tmp"
-    with open(temporary, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(temporary, CONFIG_FILE)
-    return keywords
+    with _save_lock:
+        data = _load_config()
+        keywords = [k for k in kw if k]
+        if merge:
+            existing = [k for k in (data.get(str(group_id)) or []) if k]
+            keywords = list(dict.fromkeys([*existing, *keywords]))
+        else:
+            keywords = list(dict.fromkeys(keywords))
+        data[str(group_id)] = keywords
+        temporary = CONFIG_FILE + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(temporary, CONFIG_FILE)
+        return keywords
 
 
 async def _auto_approve(bot: Bot, event: GroupRequestEvent, comment: str) -> bool:
@@ -80,7 +93,10 @@ async def _auto_approve(bot: Bot, event: GroupRequestEvent, comment: str) -> boo
             )
             return True
         except Exception as e:
-            await bot.send_private_msg(user_id=int(OWNER), message=f"⚠️ 自动通过失败：{e}")
+            try:
+                await bot.send_private_msg(user_id=int(OWNER), message=f"⚠️ 自动通过失败：{e}")
+            except Exception:
+                pass
             return False
     return False
 
@@ -135,13 +151,13 @@ async def auto_show(event: MessageEvent):
             await auto_show_cmd.finish(f"🔑 本群自动通过已开启\n🏘 群号：{event.group_id}\n关键字：{' / '.join(kws)}")
         await auto_show_cmd.finish(f"🔑 本群自动通过未开启（群 {event.group_id}）")
     data = _load_config()
-    if data:
-        lines = ["🔑 已开启自动通过的群："]
-        for gid, kws in data.items():
-            if kws:
-                lines.append(f"群 {gid}：{' / '.join(kws)}")
-        await auto_show_cmd.finish("\n".join(lines))
-    await auto_show_cmd.finish("🔑 没有任何群开启自动通过")
+    lines = ["🔑 已开启自动通过的群："]
+    for gid, kws in data.items():
+        if kws:
+            lines.append(f"群 {gid}：{' / '.join(kws)}")
+    if len(lines) == 1:
+        await auto_show_cmd.finish("🔑 没有任何群开启自动通过")
+    await auto_show_cmd.finish("\n".join(lines))
 
 
 # ---------------- 好友申请 / 加群申请 ----------------
@@ -166,11 +182,16 @@ async def auto_count(event: MessageEvent, arg=CommandArg()):
 async def handle_request(bot: Bot, event):
     if event.user_id == int(OWNER):
         return
+    _purge_pending()
     ts = _now()
     if isinstance(event, GroupRequestEvent) and event.sub_type in ("add", "apply"):
         if await _auto_approve(bot, event, event.comment or ""):
             return
-        _pending[f"g{event.group_id}"] = ("group", event.flag, event.group_id)
+        _pending[event.flag] = {
+            "kind": "group", "flag": event.flag,
+            "sub_type": event.sub_type, "group_id": event.group_id,
+            "user_id": event.user_id, "ts": time.time(),
+        }
         msg = (
             f"🔔 有人申请进群\n"
             f"🏘 群号：{event.group_id}\n"
@@ -179,7 +200,10 @@ async def handle_request(bot: Bot, event):
             f"回复「同意」或「拒绝」处理"
         )
     elif isinstance(event, FriendRequestEvent):
-        _pending[str(event.user_id)] = ("friend", event.flag)
+        _pending[event.flag] = {
+            "kind": "friend", "flag": event.flag,
+            "user_id": event.user_id, "ts": time.time(),
+        }
         msg = (
             f"🔔 好友申请\n"
             f"👤 申请人：{event.user_id}（{ts}）\n"
@@ -187,7 +211,11 @@ async def handle_request(bot: Bot, event):
             f"回复「同意」或「拒绝」处理"
         )
     elif isinstance(event, GroupRequestEvent) and event.sub_type == "invite":
-        _pending[f"g{event.group_id}"] = ("group", event.flag, event.group_id)
+        _pending[event.flag] = {
+            "kind": "group", "flag": event.flag,
+            "sub_type": event.sub_type, "group_id": event.group_id,
+            "user_id": event.user_id, "ts": time.time(),
+        }
         msg = (
             f"🔔 有人邀请机器人进群\n"
             f"🏘 群号：{event.group_id}\n"
@@ -209,12 +237,13 @@ async def owner_decision(bot: Bot, event: MessageEvent):
     if str(event.user_id) != OWNER or event.message_type != "private":
         return
     text = event.get_plaintext().strip()
-    if text.startswith("同意"):
+    if text in ("同意", "同意 "):
         action = True
-    elif text.startswith("拒绝"):
+    elif text in ("拒绝", "拒绝 "):
         action = False
     else:
         return
+    _purge_pending()
     if not _pending:
         await bot.send_private_msg(user_id=int(OWNER), message="📭 当前没有待处理的申请")
         return
@@ -230,11 +259,20 @@ async def owner_decision(bot: Bot, event: MessageEvent):
             info = await bot.get_msg(message_id=int(reply_id))
             quoted = str(info.get("raw_message") or "")
             m = re.search(r"申请人[:：](\d+)", quoted)
-            if m and m.group(1) in _pending:
-                target_key = m.group(1)
-            m = re.search(r"群号[:：](\d+)", quoted)
-            if m and f"g{m.group(1)}" in _pending:
-                target_key = f"g{m.group(1)}"
+            if m:
+                uid = m.group(1)
+                for k, v in _pending.items():
+                    if v["kind"] == "friend" and str(v.get("user_id")) == uid:
+                        target_key = k
+                        break
+            if target_key is None:
+                m = re.search(r"群号[:：](\d+)", quoted)
+                if m:
+                    gid = int(m.group(1))
+                    for k, v in _pending.items():
+                        if v["kind"] == "group" and v.get("group_id") == gid:
+                            target_key = k
+                            break
         except Exception:
             pass
 
@@ -249,23 +287,23 @@ async def owner_decision(bot: Bot, event: MessageEvent):
             return
 
     val = _pending.pop(target_key)
-    kind, flag = val[0], val[1]
+    kind, flag = val["kind"], val["flag"]
     try:
         if kind == "friend":
             if action:
                 await bot.set_friend_add_request(flag=flag, approve=True, remark="")
-                await bot.send_private_msg(user_id=int(OWNER), message=f"✅ 已同意好友申请（QQ {target_key}）")
+                await bot.send_private_msg(user_id=int(OWNER), message=f"✅ 已同意好友申请（QQ {val.get('user_id')}）")
             else:
                 await bot.set_friend_add_request(flag=flag, approve=False)
-                await bot.send_private_msg(user_id=int(OWNER), message=f"❌ 已拒绝好友申请（QQ {target_key}）")
+                await bot.send_private_msg(user_id=int(OWNER), message=f"❌ 已拒绝好友申请（QQ {val.get('user_id')}）")
         else:
-            sub = "invite"
+            sub = val["sub_type"]  # 使用真实 sub_type，add 申请不再错误地以 invite 处理
             if action:
                 await bot.set_group_add_request(flag=flag, sub_type=sub, approve=True)
-                await bot.send_private_msg(user_id=int(OWNER), message=f"✅ 已同意进群（群 {val[2]}）")
+                await bot.send_private_msg(user_id=int(OWNER), message=f"✅ 已同意进群（群 {val.get('group_id')}）")
             else:
                 await bot.set_group_add_request(flag=flag, sub_type=sub, approve=False)
-                await bot.send_private_msg(user_id=int(OWNER), message=f"❌ 已拒绝进群（群 {val[2]}）")
+                await bot.send_private_msg(user_id=int(OWNER), message=f"❌ 已拒绝进群（群 {val.get('group_id')}）")
     except Exception as e:
         await bot.send_private_msg(user_id=int(OWNER), message=f"⚠️ 处理失败：{e}")
 

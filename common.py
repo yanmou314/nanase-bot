@@ -51,7 +51,13 @@ def cleanup_cache(cache_dir: str, max_age: int = 3600) -> int:
     count = 0
     for name in os.listdir(cache_dir):
         path = os.path.join(cache_dir, name)
-        if os.path.isfile(path) and now - os.path.getmtime(path) > max_age:
+        if not os.path.isfile(path):
+            continue
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:  # 文件可能被并发删除
+            continue
+        if now - mtime > max_age:
             try:
                 os.remove(path)
                 count += 1

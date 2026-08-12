@@ -1,157 +1,75 @@
-# QQ Bot（NoneBot2 + NapCat + Overstats）
+# QQ Bot (NoneBot2)
 
-基于 **NoneBot2** 的 QQ 群机器人，支持娱乐、守望先锋国服战绩、群聊统计、每日新闻/词云推送、AI 聊天（西野七濑人设）等功能。
+基于 [NoneBot2](https://nonebot.dev/) 的 QQ 群聊机器人，通过 OneBot V11 协议连接 [NapCatQQ](https://github.com/NapNeko/NapCatQQ) 等 OneBot 实现。
 
-## 架构
+## 功能
 
+| 插件 | 功能 |
+|------|------|
+| `fun` | 抽签 / 今日运势 |
+| `owstats` | 守望先锋国服战绩查询（战报 / 段位 / 强度 / 总结） |
+| `chat_stats` | 群聊统计（龙王 / 词云）+ 每日词云推送 |
+| `news` | 每日新闻推送（60秒读懂世界 + 百度热搜回退） |
+| `holiday_countdown` | 周末/节假日倒计时 + 每日推送 |
+| `auto_chat` | @机器人 AI 聊天（支持 Poke 戳一戳） |
+| `request_manager` | 好友/进群申请处理、关键字自动通过、私聊转发 |
+| `repeater` | 自动复读 |
+| `cmd_stats` | 每日指令使用统计 |
+| `group_leave` | 退群通知 |
+| `help` | 帮助菜单 |
+
+## 快速开始
+
+### 1. 安装依赖
+
+```bash
+pip install -r requirements.txt   # 见下方依赖清单
 ```
-┌─────────┐  OneBot V11 (WS)  ┌──────────┐
-│  NapCat │ ◄───────────────► │ NoneBot2 │  群消息处理 / 插件系统
-│ (QQ协议)│                    └────┬─────┘
-└─────────┘                         │
-                          ┌─────────┴──────────┐
-                          │   PostgreSQL        │  群聊统计存储
-                          └─────────────────────┘
-                          ┌─────────────────────┐
-                          │  Overstats 服务      │  守望先锋国服数据
-                          │  (18080 端口)        │  (网易大神上游)
-                          └─────────────────────┘
-                          ┌─────────────────────┐
-                          │  OpenCode Go API     │  AI 聊天 (DeepSeek V4)
-                          └─────────────────────┘
+
+依赖：`nonebot2`、`nonebot-adapter-onebot`、`nonebot-plugin-apscheduler`、`httpx`、`PIL`、`psycopg`、`psycopg-pool`、`weasyprint`
+
+### 2. 配置
+
+复制 `.env.example` 为 `.env` 并填写：
+
+```bash
+cp .env.example .env
 ```
 
-## 功能列表
+- `QQBOT_OWNER`：机器人主人的 QQ 号（管理权限）
 
-| 插件 | 命令 | 说明 |
-|------|------|------|
-| **fun** | `.rp` | 抽签 + 今日运势（按 QQ+日期 每日固定） |
-| **owstats** | `.绑定` `.战报` `.段位` `.强度` `.总结` `.我的ID` `.解绑` | 守望先锋国服战绩查询（串行队列、@回复、显示用时） |
-| **chat_stats** | `.龙王` `.词云` `.词云开启/关闭/状态` | 群聊统计（PostgreSQL 存储）、词云图（中心螺旋算法）、每日 8:00 推送 |
-| **news** | `.新闻开启/关闭/测试/状态` | 每日 8:00 推送前一天新闻总结（Pillow 渲染图片） |
-| **auto_chat** | @机器人聊天、戳一戳 | DeepSeek V4 Flash（OpenCode Go 订阅）、西野七濑人设、上下文记忆 |
-| **repeater** | 自动 | 复读机：同一句话/图连续 3 次自动复读 |
-| **request_manager** | 自动 + 私聊指令 | 好友/加群申请通知与审批（引用消息同意/拒绝）、私聊转发 |
-| **group_leave** | 自动 | 退群/被踢自动提示 |
-| **help** | `.hp` | 指令菜单（管理功能仅群主可见） |
-| **cmd_stats** | 自动 | 每天 00:00 汇总前一天的指令使用情况并发送统计图 |
-| **holiday_countdown** | `.倒计时` `.倒计时开启/关闭/状态/测试` | 每天 17:00 推送下一个周末和节假日倒计时 |
+各插件按需创建状态文件（未配置则功能不启用）：
+- `plugins/chat_stats/db.json`：PostgreSQL 连接串，如 `{"dsn": "postgresql://user:pass@127.0.0.1:5432/qqbot"}`
+- `plugins/auto_chat/config.json`：AI 接口密钥，如 `{"api_key": "sk-xxx"}`
+
+### 3. 运行
+
+```bash
+python bot.py
+```
+
+连接 OneBot V11 WebSocket（默认 `127.0.0.1:8080`）。
 
 ## 目录结构
 
 ```
-/opt/bot/
-├── bot.py               # NoneBot 入口
-├── common.py            # 共享工具（权限配置、图片/缓存工具）
-├── pyproject.toml       # NoneBot 配置（plugin_dirs）
-├── .env.example         # 环境变量示例
-└── plugins/
-    ├── auto_chat/       # AI 聊天
-    ├── chat_stats/      # 群聊统计 + 词云
-    ├── fun/             # 运势
-    ├── group_leave/     # 退群提示
-    ├── help/            # 帮助菜单
-    ├── holiday_countdown/ # 周末/节假日倒计时
-    ├── news/            # 每日新闻
-    ├── owstats/         # 守望先锋战绩
-    ├── repeater/        # 复读机
-    └── request_manager/ # 申请审批
+bot.py                入口
+common.py             公共工具（权限检查、图片缓存等）
+plugins/
+  ├── auto_chat/      AI 聊天
+  ├── chat_stats/     群聊统计 + 存储层
+  ├── cmd_stats/      指令统计
+  ├── fun/            抽签运势
+  ├── group_leave/    退群通知
+  ├── help/           帮助菜单
+  ├── holiday_countdown/ 节假日倒计时
+  ├── news/           新闻推送
+  ├── owstats/        守望先锋战绩
+  ├── repeater/       自动复读
+  └── request_manager/ 申请管理
 ```
 
-## 部署
+## 说明
 
-### 环境要求
-
-- Ubuntu 20.04+（本部署基于 Ubuntu 24.04）
-- Python 3.10+
-- Node.js 20+（NapCat Shell 需要）
-- PostgreSQL 14+
-
-### 步骤
-
-1. **安装依赖**：
-   ```bash
-   python3 -m venv venv
-   ./venv/bin/pip install -r requirements.txt
-   ```
-
-2. **安装 NapCat**（QQ 协议端）：
-   ```bash
-   curl -o napcat.sh https://nclatest.znin.net/NapNeko/NapCat-Installer/main/script/install.sh && bash napcat.sh --docker n --cli n --proxy 1
-   ```
-   启动后通过 WebUI（6099 端口）扫码登录 QQ 小号。
-
-3. **配置 Overstats**（守望先锋国服数据服务）：
-   - 部署 [Overstats](https://github.com/AddOneSecondL/Overstats) 到本地 18080 端口
-   - 需要网易大神账号的 role_id + token（见项目 Faststart.md）
-
-4. **配置 AI 聊天**（可选）：
-   - `plugins/auto_chat/config.json` 填入 OpenCode Go API Key：
-     ```json
-     {"api_key": "sk-xxx"}
-     ```
-
-5. **配置数据库**：
-   ```sql
-   CREATE USER qqbot WITH PASSWORD 'your_password';
-   CREATE DATABASE qqbot OWNER qqbot;
-   ```
-   写入 `plugins/chat_stats/db.json`：
-   ```json
-   {"dsn": "postgresql://qqbot:your_password@<PRIVATE_IP>:5432/qqbot"}
-   ```
-
-6. **启动**：
-   ```bash
-   cd /opt/bot
-   ./venv/bin/python bot.py
-   ```
-
-## systemd 服务
-
-```ini
-# /etc/systemd/system/qqbot.service
-[Unit]
-Description=NoneBot2 QQ Bot
-After=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/bot
-ExecStart=/opt/bot/venv/bin/python /opt/bot/bot.py
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-systemctl daemon-reload && systemctl enable --now qqbot
-```
-
-## 运行配置
-
-- 在 `.env` 中设置 `QQBOT_OWNER`，填写机器人的管理员 QQ 号；该文件不会提交到仓库
-- 在 `plugins/cmd_stats/push_config.json` 中设置指令统计推送群号；该配置文件不会提交到仓库
-- 在目标群内使用 `.倒计时开启` 开通每日 17:00 倒计时推送；仅管理员可操作，可在多个群分别开启
-
-## 数据存储
-
-- **群聊统计**：PostgreSQL（`messages` 表，30 天自动清理）
-- **绑定关系**：`plugins/owstats/bindings.json`
-- **推送状态**：`plugins/news/state.json`、`plugins/chat_stats/words_state.json`
-- **倒计时权限**：`plugins/holiday_countdown/state.json`（自动忽略，不提交到仓库）
-
-## 安全说明
-
-- 所有密钥（AI API Key、数据库密码）存放在插件目录的 `config.json`/`db.json`，已在 `.gitignore` 中排除，**切勿提交到仓库**
-- 修改管理员 QQ：`.env` 中的 `QQBOT_OWNER`
-- 指令前缀：`.env` 中的 `COMMAND_START`（默认 `.`）
-
-## 致谢
-
-- [NoneBot2](https://nonebot.dev/) - 聊天机器人框架
-- [NapCatQQ](https://github.com/NapNeko/NapCatQQ) - QQ 协议端
-- [Overstats](https://github.com/AddOneSecondL/Overstats) - 守望先锋国服数据服务
-- [OpenCode](https://opencode.ai/) - AI 模型网关
+- 本仓库仅包含代码，**不含任何运行配置**（QQ 号、群号、数据库密码、API 密钥等均已排除，见 `.gitignore`）
+- 各插件独立运行，删除对应插件目录即可禁用功能

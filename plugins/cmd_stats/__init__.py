@@ -1,8 +1,10 @@
 """指令使用统计：每天 00:00 汇总前一天指令使用情况并发送图片到指定群。"""
 import asyncio
 import base64
+import html as html_mod
 import io
 import json
+import logging
 import os
 import subprocess
 import time
@@ -16,6 +18,8 @@ from weasyprint import HTML
 
 from common import cleanup_cache
 from plugins.chat_stats.db_pg import exec
+
+_logger = logging.getLogger(__name__)
 
 TOP_CMDS = 10
 TOP_USERS = 5
@@ -123,11 +127,12 @@ def _background(w: int, h: int) -> str:
 
 def _row_html(rank: int, name: str, cnt: int, max_cnt: int, color: str) -> str:
     ratio = max(cnt / max_cnt, 0.02) if max_cnt else 0
+    name_esc = html_mod.escape(name, quote=True)  # 防止昵称/指令文本注入 HTML
     return f"""
     <div class="row">
       <div class="rank">{rank + 1:02d}</div>
       <div class="mid">
-        <div class="name">{name}</div>
+        <div class="name">{name_esc}</div>
         <div class="bar"><div class="bf" style="width:{ratio * 100:.1f}%;background:{color}"></div></div>
       </div>
       <div class="num"><b>{cnt}</b><span>次</span></div>
@@ -212,13 +217,23 @@ body {{ width: {w}px; height: {h}px; font-family: "Noto Sans CJK SC", sans-serif
     stamp = int(time.time() * 1000)
     tmp_pdf = os.path.join(CACHE_DIR, f"cmd_{stamp}.pdf")
     path = os.path.join(CACHE_DIR, f"cmd_{stamp}.png")
-    HTML(string=html).write_pdf(tmp_pdf)
-    subprocess.run(
-        ["pdftoppm", "-png", "-r", "192", "-singlefile", tmp_pdf, path[:-4]],
-        check=True, capture_output=True,
-    )
-    os.remove(tmp_pdf)
+    try:
+        HTML(string=html, url_fetcher=_local_only_fetcher).write_pdf(tmp_pdf)
+        subprocess.run(
+            ["pdftoppm", "-png", "-r", "192", "-singlefile", tmp_pdf, path[:-4]],
+            check=True, capture_output=True,
+        )
+    finally:
+        if os.path.exists(tmp_pdf):
+            os.remove(tmp_pdf)
     return path
+
+
+def _local_only_fetcher(url, timeout=10, *args, **kwargs):
+    """weasyprint 资源加载器：仅允许 data: URL，阻止外部资源请求（防 SSRF）。"""
+    if url.startswith("data:"):
+        return weasyprint.default_url_fetcher(url, timeout, *args, **kwargs)
+    raise ValueError(f"blocked external url: {url}")
 
 
 async def _run_daily() -> str:
@@ -239,4 +254,4 @@ async def daily_cmd_stats_job():
         bot = get_bot()
         await bot.send_group_msg(group_id=target, message=MessageSegment.image("file://" + path))
     except Exception:
-        pass
+        _logger.exception("每日指令统计推送失败")

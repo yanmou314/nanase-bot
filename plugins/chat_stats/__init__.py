@@ -1,10 +1,11 @@
 import asyncio
 import json
+import logging
 import os
 import re
 import threading
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from datetime import date, timedelta
 from nonebot import get_bot, get_driver, on_command, on_message
 from nonebot.adapters import Bot
@@ -15,12 +16,15 @@ from nonebot_plugin_apscheduler import scheduler
 from common import cleanup_cache, is_owner
 from .db_pg import exec, write as db_write
 
+_logger = logging.getLogger(__name__)
+
 WORD_CACHE = os.path.join(os.path.dirname(__file__), "cache")
 WORDS_STATE = os.path.join(os.path.dirname(__file__), "words_state.json")
 _state_lock = threading.Lock()
-_nick_cache: dict = {}
+_nick_cache: OrderedDict = OrderedDict()
 _nick_ts: dict = {}
 NICK_TTL = 300
+NICK_CACHE_MAX = 10000
 RETENTION_DAYS = 30
 
 record_matcher = on_message(priority=1, block=False)
@@ -53,7 +57,7 @@ async def purge_old_stats():
     try:
         await _purge_old_records()
     except Exception:
-        pass
+        _logger.exception("清理过期统计记录失败")
 
 
 # ---------------- 消息记录 ----------------
@@ -77,6 +81,7 @@ async def _get_name(bot: Bot, group_id: int, user_id: int) -> str:
     now = time.time()
     cached = _nick_cache.get(key)
     if cached and now - _nick_ts.get(key, 0) < NICK_TTL:
+        _nick_cache.move_to_end(key)
         return cached
     try:
         info = await bot.get_group_member_info(group_id=group_id, user_id=user_id)
@@ -85,13 +90,17 @@ async def _get_name(bot: Bot, group_id: int, user_id: int) -> str:
         name = str(user_id)
     _nick_cache[key] = name
     _nick_ts[key] = now
+    _nick_cache.move_to_end(key)
+    while len(_nick_cache) > NICK_CACHE_MAX:  # 简单 LRU，防止长期运行内存增长
+        old = _nick_cache.popitem(last=False)
+        _nick_ts.pop(old[0], None)
     return name
 
 
 async def _build_word_image(group_id: int, day: str, n: int, window: bool = False) -> str | None:
     rows = await exec(
         "SELECT text FROM messages WHERE group_id=%s AND "
-        "((day=CURRENT_DATE-1 AND hour>=7) OR (day=CURRENT_DATE AND hour<7)) AND text!=''",
+        "((day=CURRENT_DATE-1 AND hour>=6) OR (day=CURRENT_DATE AND hour<6)) AND text!=''",
         (group_id,),
     )
     counter: Counter = Counter()
@@ -101,8 +110,14 @@ async def _build_word_image(group_id: int, day: str, n: int, window: bool = Fals
             continue
         normal_message_count += 1
         for seg in re.findall(r"[\u4e00-\u9fff]{2,}", text):
-            if seg not in STOPWORDS:
-                counter[seg] += 1
+            if len(seg) > 8:
+                # 超长连续文本按 4 字滑动窗口切词，避免整段作为一个"词"无法排版
+                segs = [seg[i:i + 4] for i in range(0, len(seg) - 3, 4)]
+            else:
+                segs = [seg]
+            for s in segs:
+                if s not in STOPWORDS:
+                    counter[s] += 1
     if not counter:
         return None
     cleanup_cache(WORD_CACHE)
@@ -162,7 +177,7 @@ async def words_on(event: GroupMessageEvent):
     if not hasattr(event, "group_id"):
         await words_on_cmd.finish("请在有机器人的群里开启此功能")
     _set_words_group(str(event.group_id))
-    await words_on_cmd.finish(f"✅ 每日词云推送已开启\n每天 8:00 自动发送 7:00 前 24 小时的热词词云到此群（本群 {event.group_id}）")
+    await words_on_cmd.finish(f"✅ 每日词云推送已开启\n每天 7:00 自动发送 6:00 前 24 小时的热词词云到此群（本群 {event.group_id}）")
 
 
 @words_off_cmd.handle()
@@ -179,11 +194,11 @@ async def words_status(event: GroupMessageEvent):
         await words_status_cmd.finish("❌ 你没有权限使用此功能")
     gid = _words_group()
     if gid:
-        await words_status_cmd.finish(f"📊 每日词云推送：已开启（群 {gid}，每天 8:00 发送 7:00 前 24 小时热词）")
+        await words_status_cmd.finish(f"📊 每日词云推送：已开启（群 {gid}，每天 7:00 发送 6:00 前 24 小时热词）")
     await words_status_cmd.finish("📊 每日词云推送：未开启")
 
 
-@scheduler.scheduled_job("cron", hour=8, minute=5, id="daily_words", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=7, minute=0, id="daily_words", timezone="Asia/Shanghai")
 async def daily_words_job():
     gid = _words_group()
     if not gid:
@@ -195,7 +210,7 @@ async def daily_words_job():
         bot = get_bot()
         await bot.send_group_msg(group_id=int(gid), message=MessageSegment.image("file://" + path))
     except Exception:
-        pass
+        _logger.exception("每日词云推送失败")
 
 
 # ---------------- 词频 ----------------
@@ -210,5 +225,5 @@ async def words(event: GroupMessageEvent, arg: Message = CommandArg()):
         n = 20
     path = await _build_word_image(event.group_id, date.today().isoformat(), n)
     if not path:
-        await words_cmd.finish("今天还没有可统计的文字内容～")
+        await words_cmd.finish("近 24 小时（今晨 6:00 前）还没有可统计的文字内容～")
     await words_cmd.finish(MessageSegment.image("file://" + path))

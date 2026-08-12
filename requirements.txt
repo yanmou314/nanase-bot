@@ -1,0 +1,8 @@
+nonebot2==2.5.0
+nonebot-adapter-onebot==2.4.6
+nonebot-plugin-apscheduler==0.5.0
+httpx==0.28.1
+pillow==12.3.0
+psycopg[binary]==3.3.4
+psycopg-pool==3.3.1
+weasyprint==62.3
