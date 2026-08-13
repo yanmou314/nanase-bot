@@ -3,6 +3,8 @@ import asyncio
 import json
 import logging
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from nonebot import get_driver
 from psycopg_pool import AsyncConnectionPool
@@ -17,6 +19,7 @@ _BATCH_SIZE = 100
 _FLUSH_INTERVAL = 0.5
 _QUEUE_MAX_SIZE = 5000
 _logger = logging.getLogger(__name__)
+_SH = ZoneInfo("Asia/Shanghai")
 
 
 def load_dsn() -> str:
@@ -102,12 +105,17 @@ async def _ensure_writer() -> asyncio.Queue:
 
 async def _write_batch(batch: list[tuple[int, int, str, str]]) -> None:
     pool = await get_pool()
+    now = datetime.now(_SH)  # day/hour 在 Python 侧按上海时区计算，不依赖数据库时区
+    params = [
+        (group_id, user_id, msg_type, now.date().isoformat(), now.hour, text[:200] or "")
+        for group_id, user_id, msg_type, text in batch
+    ]
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.executemany(
                 "INSERT INTO messages(group_id, user_id, msg_type, day, hour, text) "
-                "VALUES(%s,%s,%s,CURRENT_DATE,EXTRACT(HOUR FROM NOW())::int,%s)",
-                [(group_id, user_id, msg_type, text[:200] or "") for group_id, user_id, msg_type, text in batch],
+                "VALUES(%s,%s,%s,%s,%s,%s)",
+                params,
             )
         await conn.commit()
 
@@ -134,8 +142,7 @@ async def _write_loop() -> None:
                 await _write_batch(batch)
             except Exception:
                 _logger.exception("批量写入消息失败，将在稍后重试")
-                for _ in batch:
-                    queue.task_done()
+                # 只回队不 task_done：join() 计数与"在途消息"保持一致，关闭时不会丢消息
                 for item in batch:
                     await queue.put(item)
                 await asyncio.sleep(1)

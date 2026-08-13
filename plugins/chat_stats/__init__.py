@@ -1,26 +1,28 @@
 import asyncio
-import json
 import logging
 import os
 import re
 import threading
 import time
 from collections import Counter, OrderedDict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
 from nonebot import get_bot, get_driver, on_command, on_message
 from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment
 from nonebot.params import CommandArg
 from nonebot_plugin_apscheduler import scheduler
 
-from common import cleanup_cache, is_owner
+from common import cleanup_cache, is_owner, load_json_state, save_json_state
 from .db_pg import exec, write as db_write
 
 _logger = logging.getLogger(__name__)
+_SH = ZoneInfo("Asia/Shanghai")
 
 WORD_CACHE = os.path.join(os.path.dirname(__file__), "cache")
 WORDS_STATE = os.path.join(os.path.dirname(__file__), "words_state.json")
-_state_lock = threading.Lock()
+_state_lock = threading.RLock()  # 必须可重入：_words_groups 持锁时内部会再调保存
 _nick_cache: OrderedDict = OrderedDict()
 _nick_ts: dict = {}
 NICK_TTL = 300
@@ -39,17 +41,17 @@ _COMMAND_START = tuple(get_driver().config.command_start)
 STOPWORDS = set("的了是在我有和你这不那啊呢吧吗哦嗯就都要也会没很他说她我们他们自己一个没什么可以"
                 "真的还是因为所以但是然后现在今天明天昨天知道觉得应该可能如果这样那样这个那个什么为什么怎么")
 
-FONT = "/usr/share/fonts/custom/ZCOOLKuaiLe-Regular.ttf"
-PALETTE = ["#FF6B6B", "#FCA311", "#FFC93C", "#4ECDC4", "#45B7D1", "#96CEB4",
-           "#F15BB5", "#9B5DE5", "#00BBF9", "#FEE440", "#FF8C42", "#5FD068"]
+
+def _sh_today() -> date:
+    """上海时区的今天，供统计边界与清理使用（与调度器时区一致，不受数据库时区影响）。"""
+    return datetime.now(_SH).date()
 
 
 # ---------------- 存储（PostgreSQL） ----------------
 
-async def _purge_old_records() -> int:
-    cutoff = (date.today() - timedelta(days=RETENTION_DAYS)).isoformat()
+async def _purge_old_records() -> None:
+    cutoff = (_sh_today() - timedelta(days=RETENTION_DAYS)).isoformat()
     await exec("DELETE FROM messages WHERE day < %s", (cutoff,))
-    return 0
 
 
 @scheduler.scheduled_job("cron", hour=3, minute=0, id="purge_old_stats", timezone="Asia/Shanghai")
@@ -97,11 +99,15 @@ async def _get_name(bot: Bot, group_id: int, user_id: int) -> str:
     return name
 
 
-async def _build_word_image(group_id: int, day: str, n: int, window: bool = False) -> str | None:
+async def _build_word_image(group_id: int, n: int) -> str | None:
+    # 词云窗口：昨天 4:00 至今天 4:00（按上海时区计算，不依赖数据库时区）
+    today = _sh_today()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    today_s = today.isoformat()
     rows = await exec(
         "SELECT text FROM messages WHERE group_id=%s AND "
-        "((day=CURRENT_DATE-1 AND hour>=4) OR (day=CURRENT_DATE AND hour<4)) AND text!=''",
-        (group_id,),
+        "((day=%s AND hour>=4) OR (day=%s AND hour<4)) AND text!=''",
+        (group_id, yesterday, today_s),
     )
     counter: Counter = Counter()
     normal_message_count = 0
@@ -132,9 +138,9 @@ async def dragon(bot: Bot, event: GroupMessageEvent):
     if not is_owner(event):
         await dragon_cmd.finish("❌ 你没有权限使用此功能")
     rows = await exec(
-        "SELECT user_id, COUNT(*) c FROM messages WHERE group_id=%s AND day=CURRENT_DATE "
+        "SELECT user_id, COUNT(*) c FROM messages WHERE group_id=%s AND day=%s "
         "GROUP BY user_id ORDER BY c DESC LIMIT 3",
-        (event.group_id,),
+        (event.group_id, _sh_today().isoformat()),
     )
     if not rows:
         await dragon_cmd.finish("今天还没有人发言哦～")
@@ -148,59 +154,34 @@ async def dragon(bot: Bot, event: GroupMessageEvent):
 # ---------------- 词频推送状态 ----------------
 
 def _words_groups() -> list[str]:
-    with _state_lock:
-        try:
-            with open(WORDS_STATE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return []
-        if not isinstance(data, dict):
-            return []
-        # 旧格式 {"group_id": "xxx"} 自动迁移到多群格式
-        if "groups" not in data and data.get("group_id"):
-            data["groups"] = [str(data["group_id"])]
-            data.pop("group_id", None)
-            _save_words_state(data)
-        return [str(g) for g in (data.get("groups") or []) if str(g)]
-
-
-def _save_words_state(data: dict) -> None:
-    with _state_lock:
-        with open(WORDS_STATE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+    data = load_json_state(WORDS_STATE, _state_lock)
+    # 旧格式 {"group_id": "xxx"} 自动迁移到多群格式
+    if "groups" not in data and data.get("group_id"):
+        data["groups"] = [str(data["group_id"])]
+        data.pop("group_id", None)
+        save_json_state(WORDS_STATE, data, _state_lock)
+    return [str(g) for g in (data.get("groups") or []) if str(g)]
 
 
 def _add_words_group(gid: str) -> None:
-    with _state_lock:
-        try:
-            with open(WORDS_STATE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                data = {}
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            data = {}
-        if data.get("group_id") and "groups" not in data:  # 旧格式迁移
-            data["groups"] = [str(data["group_id"])]
-            data.pop("group_id", None)
-        groups = {str(g) for g in (data.get("groups") or [])}
-        groups.add(gid)
-        data["groups"] = sorted(groups)
-        _save_words_state(data)
+    data = load_json_state(WORDS_STATE, _state_lock)
+    if data.get("group_id") and "groups" not in data:  # 旧格式迁移
+        data["groups"] = [str(data["group_id"])]
+        data.pop("group_id", None)
+    groups = {str(g) for g in (data.get("groups") or [])}
+    groups.add(gid)
+    data["groups"] = sorted(groups)
+    save_json_state(WORDS_STATE, data, _state_lock)
 
 
 def _remove_words_group(gid: str) -> None:
-    with _state_lock:
-        try:
-            with open(WORDS_STATE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                return
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return
-        groups = {str(g) for g in (data.get("groups") or [])}
-        groups.discard(gid)
-        data["groups"] = sorted(groups)
-        _save_words_state(data)
+    data = load_json_state(WORDS_STATE, _state_lock)
+    if not data:
+        return
+    groups = {str(g) for g in (data.get("groups") or [])}
+    groups.discard(gid)
+    data["groups"] = sorted(groups)
+    save_json_state(WORDS_STATE, data, _state_lock)
 
 
 @words_on_cmd.handle()
@@ -245,7 +226,7 @@ async def daily_words_job():
         return
     for gid in groups:
         try:
-            path = await _build_word_image(int(gid), "", 40, window=True)
+            path = await _build_word_image(int(gid), 40)
             if not path:
                 continue
             await bot.send_group_msg(group_id=int(gid), message=MessageSegment.image("file://" + path))
@@ -263,7 +244,7 @@ async def words(event: GroupMessageEvent, arg: Message = CommandArg()):
         n = max(1, min(int(arg.extract_plain_text().strip() or 40), 60))
     except ValueError:
         n = 20
-    path = await _build_word_image(event.group_id, date.today().isoformat(), n)
+    path = await _build_word_image(event.group_id, n)
     if not path:
         await words_cmd.finish("近 24 小时（凌晨 4:00 前）还没有可统计的文字内容～")
     await words_cmd.finish(MessageSegment.image("file://" + path))

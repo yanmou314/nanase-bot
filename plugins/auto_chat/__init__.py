@@ -41,6 +41,8 @@ SYSTEM = (
 
 _last_chat: dict[str, float] = {}
 _RATE_LIMIT = 3  # 每用户 3 秒冷却
+_last_poke: dict[str, float] = {}
+_POKE_RATE_LIMIT = 5  # 每用户 5 秒冷却，防止连戳刷 AI 请求
 _AI_SEM = asyncio.Semaphore(3)  # 最多 3 个并发 AI 请求
 _memory: dict = defaultdict(lambda: deque(maxlen=20))
 _memory_last_seen: dict = {}
@@ -121,8 +123,8 @@ def _clean_msg(event: MessageEvent) -> str:
     return msg.strip()
 
 
-async def _ai_reply(key: str, uid: str, gid: str, msg: str) -> str:
-    key_id = (gid, uid)
+def _get_memory(key_id) -> deque:
+    """取（群, 用户）的对话记忆，自动清理超时与超量条目。"""
     now = time.time()
     if key_id not in _memory:
         if len(_memory) >= _MEMORY_MAX_KEYS:
@@ -135,7 +137,11 @@ async def _ai_reply(key: str, uid: str, gid: str, msg: str) -> str:
         if now - seen_at > _MEMORY_TTL:
             _memory.pop(old_key, None)
             _memory_last_seen.pop(old_key, None)
-    mem = _memory[key_id]
+    return _memory[key_id]
+
+
+async def _ai_reply(key: str, uid: str, gid: str, msg: str) -> str:
+    mem = _get_memory((gid, uid))
     messages = [{"role": "system", "content": SYSTEM}]
     messages.extend(list(mem))
     messages.append({"role": "user", "content": msg})
@@ -143,7 +149,12 @@ async def _ai_reply(key: str, uid: str, gid: str, msg: str) -> str:
     r = await client.post(
         API_URL,
         headers={"Authorization": f"Bearer {key}"},
-        json={"model": MODEL, "messages": messages, "max_tokens": 300},
+        json={
+            "model": MODEL,
+            "messages": messages,
+            "max_tokens": 300,
+            "thinking": {"type": "disabled"},  # 关闭思考：防止 token 被思考过程吃光导致空回复
+        },
         timeout=30,
     )
     r.raise_for_status()
@@ -151,6 +162,33 @@ async def _ai_reply(key: str, uid: str, gid: str, msg: str) -> str:
     reply = (data["choices"][0]["message"]["content"] or "").strip()
     mem.append({"role": "user", "content": msg})
     if reply:
+        mem.append({"role": "assistant", "content": reply})
+    return reply
+
+
+async def _ai_poke_reply(key: str, uid: str, gid: str) -> str:
+    """戳一戳的 AI 回复：结合该用户最近的对话上下文，以人设回应被戳。"""
+    mem = _get_memory((gid, uid))
+    messages = [{"role": "system", "content": SYSTEM}]
+    messages.extend(list(mem))
+    messages.append({"role": "user", "content": "（有人轻轻戳了戳你）"})
+    client = _get_http_client()
+    r = await client.post(
+        API_URL,
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": MODEL,
+            "messages": messages,
+            "max_tokens": 80,
+            "thinking": {"type": "disabled"},
+        },
+        timeout=30,
+    )
+    r.raise_for_status()
+    data = r.json()
+    reply = (data["choices"][0]["message"]["content"] or "").strip()
+    if reply:
+        mem.append({"role": "user", "content": "（有人戳了戳你）"})
         mem.append({"role": "assistant", "content": reply})
     return reply
 
@@ -204,7 +242,23 @@ async def chat(bot: Bot, event: MessageEvent):
 async def poke(bot: Bot, event: PokeNotifyEvent):
     if str(event.target_id) != bot.self_id:
         return
-    reply = random.choice(POKE_REPLIES)
+    uid = str(event.user_id)
+    now = time.time()
+    # 清理过期的戳戳记录，防内存增长
+    if len(_last_poke) > 5000:
+        for k in [k for k, t in _last_poke.items() if now - t > 3600]:
+            _last_poke.pop(k, None)
+    reply = ""
+    key = _load_key()
+    if key and now - _last_poke.get(uid, 0) >= _POKE_RATE_LIMIT:
+        _last_poke[uid] = now
+        try:
+            async with _AI_SEM:
+                reply = await _ai_poke_reply(key, uid, str(getattr(event, "group_id", 0)))
+        except Exception:
+            reply = ""
+    if not reply:
+        reply = random.choice(POKE_REPLIES)
     try:
         if event.group_id:
             await bot.send_group_msg(group_id=event.group_id, message=reply)

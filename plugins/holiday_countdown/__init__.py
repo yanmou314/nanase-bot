@@ -14,7 +14,7 @@ from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageEvent, Message
 from nonebot_plugin_apscheduler import scheduler
 from PIL import Image, ImageDraw, ImageFont
 
-from common import FONTS, cleanup_cache, is_owner
+from common import FONTS, cleanup_cache, is_owner, load_json_state, save_json_state
 
 
 TIMEZONE = ZoneInfo("Asia/Shanghai")
@@ -85,12 +85,8 @@ def _now() -> datetime:
 
 
 def _load_groups() -> set[int]:
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as file:
-            data = json.load(file)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return set()
-    groups = data.get("groups", []) if isinstance(data, dict) and isinstance(data.get("groups"), list) else []
+    data = load_json_state(STATE_FILE, STATE_LOCK)
+    groups = data.get("groups", []) if isinstance(data.get("groups"), list) else []
     result = set()
     for group_id in groups:
         try:
@@ -103,11 +99,7 @@ def _load_groups() -> set[int]:
 
 
 def _save_groups(groups: set[int]) -> None:
-    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-    temporary = STATE_FILE + ".tmp"
-    with open(temporary, "w", encoding="utf-8") as file:
-        json.dump({"groups": sorted(groups)}, file, ensure_ascii=False, indent=2)
-    os.replace(temporary, STATE_FILE)
+    save_json_state(STATE_FILE, {"groups": sorted(groups)}, STATE_LOCK)
 
 
 def _enabled_groups() -> set[int]:
