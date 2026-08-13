@@ -90,7 +90,6 @@ def _prune() -> None:
     for key in list(_join_ts):
         if _join_ts[key] < cutoff:
             _join_ts.pop(key, None)
-    _save_state()
 
 
 def _format_duration(seconds: float) -> str:
@@ -110,7 +109,6 @@ def _format_duration(seconds: float) -> str:
 def _record_join(gid: int, uid: int) -> None:
     _join_ts[(gid, uid)] = time.time()
     _prune()
-    _save_state()
 
 
 def _pop_join(gid: int, uid: int):
@@ -140,7 +138,7 @@ async def _import_group_members(bot: Bot, gid: int) -> None:
             ts = 0.0
         _join_ts[key] = ts if ts > 0 else now
     _prune()
-    _save_state()
+    await asyncio.to_thread(_save_state)
 
 
 @get_driver().on_bot_connect
@@ -167,19 +165,21 @@ async def handle(bot: Bot, event: GroupDecreaseNoticeEvent):
     uid = event.user_id
     gid = event.group_id
     sub = event.sub_type
+    if sub not in ("leave", "kick"):
+        return  # 其他子类型（如机器人自己被移出）不消耗入群记录
     name = await _get_name(bot, uid)
 
     ts = _pop_join(gid, uid)
     if ts is not None:
         dur = _format_duration(time.time() - ts)
-        _save_state()
+        await asyncio.to_thread(_save_state)
 
     if sub == "leave":
         msg = f"👋 {name}（{uid}）退群了"
         if ts is not None:
             msg += f"，在群里待了 {dur}"
         msg += "\n" + random.choice(MESSAGES)
-    elif sub == "kick":
+    else:
         op = "群管理员"
         try:
             info = await bot.get_group_member_info(group_id=gid, user_id=event.operator_id)
@@ -189,8 +189,6 @@ async def handle(bot: Bot, event: GroupDecreaseNoticeEvent):
         msg = f"🔨 {name}（{uid}）被 {op} 移出了群"
         if ts is not None:
             msg += f"，在群里待了 {dur}"
-    else:
-        return
 
     try:
         await bot.send_group_msg(group_id=gid, message=msg)
@@ -207,6 +205,7 @@ async def handle_welcome(bot: Bot, event: GroupIncreaseNoticeEvent):
     name = await _get_name(bot, uid)
     msg = Message(MessageSegment.at(uid)) + f" 欢迎 {name} 加入本群！" + chr(10) + f"{random.choice(WELCOME_MESSAGES)}"
     _record_join(gid, uid)
+    await asyncio.to_thread(_save_state)
     try:
         await bot.send_group_msg(group_id=gid, message=msg)
     except Exception:

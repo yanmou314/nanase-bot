@@ -5,7 +5,7 @@ import time
 
 from nonebot import get_driver, on_command, on_message
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageEvent
-from common import is_owner
+from common import is_owner, save_json_state
 
 trigger = on_message(priority=10, block=False)
 
@@ -37,8 +37,7 @@ def _load_config() -> None:
 
 def _save_config() -> None:
     try:
-        with open(CFG_FILE, "w", encoding="utf-8") as f:
-            json.dump(_config, f, ensure_ascii=False, indent=2)
+        save_json_state(CFG_FILE, _config)
     except Exception:
         pass
 
