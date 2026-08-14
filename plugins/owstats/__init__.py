@@ -5,17 +5,17 @@ import threading
 import time
 from pathlib import Path
 
-import httpx
 from nonebot import get_driver, on_command
 from nonebot.adapters.onebot.v11 import Message, MessageEvent, MessageSegment
 from nonebot.params import CommandArg
-from common import at_prefix, cleanup_cache, parse_tag, save_image as save_img
 
-API = "http://127.0.0.1:18080"
+from common import at_prefix, cleanup_cache, close_http_clients, get_http_client, parse_tag, save_json_state, save_image as save_img
+
+# 上游数据服务（overstats）地址，可用环境变量覆盖
+API = os.getenv("OW_API_BASE", "http://127.0.0.1:18080")
 CACHE = os.path.join(os.path.dirname(__file__), "cache")
-_HTTP = httpx.AsyncClient(timeout=120)
 BIND_FILE = os.path.join(os.path.dirname(__file__), "bindings.json")
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()
 OW_LOCK = asyncio.Lock()
 
 matchrep_cmd = on_command("战报", aliases={"战绩图", "report"}, priority=5, block=True)
@@ -32,8 +32,11 @@ _bind_cache: dict | None = None
 
 @get_driver().on_shutdown
 async def _close_http() -> None:
-    if not _HTTP.is_closed:
-        await _HTTP.aclose()
+    await close_http_clients()
+
+
+def _http():
+    return get_http_client(timeout=120)
 
 
 def _load_bindings() -> dict:
@@ -58,10 +61,7 @@ def _load_bindings() -> dict:
 def _save_bindings(data: dict) -> None:
     global _bind_cache
     _bind_cache = data
-    tmp = BIND_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, BIND_FILE)
+    save_json_state(BIND_FILE, data, _LOCK)
 
 
 def _bind(uid: str, tag: str) -> None:
@@ -87,7 +87,7 @@ def _get_bound(uid: str) -> str:
 
 
 async def _post_json(path: str, payload: dict, timeout: float = 90.0):
-    r = await _HTTP.post(f"{API}{path}", json=payload, timeout=timeout)
+    r = await _http().post(f"{API}{path}", json=payload, timeout=timeout)
     if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
         return {"_image": True, "bytes": r.content, "content_type": r.headers["content-type"]}
     try:

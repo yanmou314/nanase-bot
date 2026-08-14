@@ -12,6 +12,17 @@ FONT = "/usr/share/fonts/custom/ZCOOLQingKeHuangYou-Regular.ttf"
 PALETTE = ["#5858B8", "#6868C8", "#8898C8", "#88A050", "#C83838", "#A84848",
            "#B89838", "#E0B850", "#C8D898", "#E09098"]
 
+_font_cache: dict[int, ImageFont.FreeTypeFont] = {}
+
+
+def _font(size: int) -> ImageFont.FreeTypeFont:
+    """按字号缓存字体对象，避免每个词重复打开字体文件。"""
+    f = _font_cache.get(size)
+    if f is None:
+        f = ImageFont.truetype(FONT, size)
+        _font_cache[size] = f
+    return f
+
 
 def _overlap(a, b) -> bool:
     return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
@@ -43,7 +54,7 @@ def _render(counter: Counter, n: int, msg_count: int) -> str:
     max_r = math.hypot(W, H) / 2
 
     for word, size in entries:
-        font = ImageFont.truetype(FONT, size)
+        font = _font(size)
         bbox = font.getbbox(word)
         ww, hh = bbox[2] - bbox[0], bbox[3] - bbox[1]
         color = rnd.choice(PALETTE)
@@ -58,7 +69,7 @@ def _render(counter: Counter, n: int, msg_count: int) -> str:
             ok = True
             break
         if not ok and size > 30:
-            font = ImageFont.truetype(FONT, 30)
+            font = _font(30)
             bbox = font.getbbox(word)
             ww, hh = bbox[2] - bbox[0], bbox[3] - bbox[1]
             for x, y in _spiral_positions(cx, cy, max_r, step=4.0):
