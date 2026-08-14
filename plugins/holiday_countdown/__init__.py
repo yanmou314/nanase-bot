@@ -195,16 +195,16 @@ def _remaining_or_done(target: datetime, now: datetime) -> str:
 
 def _build_message(now: datetime | None = None) -> str:
     now = now or _now()
-    weekend_day, weekend_start, weekend_at = _next_weekend(now)
-    holiday_name, holiday_day, holiday_start, holiday_at = _next_holiday(now)
+    weekend_day, _, weekend_at = _next_weekend(now)
+    holiday_name, holiday_day, _, holiday_at = _next_holiday(now)
     offwork_at, offwork_label = _offwork_target(now)
     return (
         "⏳ 每日倒计时\n"
         f"今天是 {now.year}年{now.month}月{now.day}日 {now:%H:%M}\n\n"
         f"🏖️ 下一个周末：{_format_date(weekend_day)}\n"
-        f"{_format_date(weekend_start)} {weekend_at:%H:%M} 下班后开始，还剩 {_remaining(weekend_at, now)}\n\n"
+        f"还剩 {_remaining(weekend_at, now)}\n\n"
         f"🎉 下一个节假日：{holiday_name} · {_format_date(holiday_day)}\n"
-        f"{_format_date(holiday_start)} {holiday_at:%H:%M} 下班后开始，还剩 {_remaining(holiday_at, now)}\n\n"
+        f"还剩 {_remaining(holiday_at, now)}\n\n"
         f"💼 下班倒计时：今天 {offwork_label} 下班\n"
         f"还剩 {_remaining_or_done(offwork_at, now)}\n\n"
         "注：周末/节假日按最后一个工作日的下班时间起算，节假日日期表会随官方安排更新。"
@@ -226,8 +226,8 @@ def _right_text(draw: ImageDraw.ImageDraw, text: str, y: int, font, fill) -> Non
 
 
 def _render_card(now: datetime) -> str:
-    weekend_day, weekend_start, weekend_at = _next_weekend(now)
-    holiday_name, holiday_day, holiday_start, holiday_at = _next_holiday(now)
+    weekend_day, _, weekend_at = _next_weekend(now)
+    holiday_name, holiday_day, _, holiday_at = _next_holiday(now)
     offwork_at, offwork_label = _offwork_target(now)
     image = Image.new("RGB", (CARD_WIDTH, CARD_HEIGHT))
     draw = ImageDraw.Draw(image, "RGBA")
@@ -268,7 +268,7 @@ def _render_card(now: datetime) -> str:
         155,
         "WEEKEND",
         "下一个周末",
-        f"{_format_date(weekend_day)} · {_format_date(weekend_start)} {weekend_at:%H:%M} 下班后开始",
+        f"{_format_date(weekend_day)}",
         _remaining(weekend_at, now),
         weekend_color,
     )
@@ -276,7 +276,7 @@ def _render_card(now: datetime) -> str:
         375,
         "HOLIDAY",
         f"下一个节假日 · {holiday_name}",
-        f"{_format_date(holiday_day)} · {_format_date(holiday_start)} {holiday_at:%H:%M} 下班后开始",
+        f"{_format_date(holiday_day)}",
         _remaining(holiday_at, now),
         holiday_color,
     )
