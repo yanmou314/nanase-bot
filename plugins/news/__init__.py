@@ -4,16 +4,16 @@ import logging
 import os
 import threading
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
 from nonebot import get_bot, get_driver, on_command
-from nonebot.adapters.onebot.v11 import MessageEvent, MessageSegment
+from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageEvent, MessageSegment
 from nonebot_plugin_apscheduler import scheduler
 from PIL import Image, ImageDraw, ImageFont
 
-from common import cleanup_cache, is_owner
+from common import cleanup_cache, close_http_clients, get_http_client, is_owner
 
 _logger = logging.getLogger(__name__)
 _SH = ZoneInfo("Asia/Shanghai")
@@ -21,7 +21,11 @@ _SH = ZoneInfo("Asia/Shanghai")
 STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 _LOCK = threading.Lock()
-_client_lock = threading.Lock()
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    # 统一走 common 的按超时缓存单例，由 owstats 注册的 on_shutdown 统一关闭
+    return get_http_client(20)
 
 NEWS_API = "https://60s.viki.moe/v2/60s"
 BAIDU_API = "https://top.baidu.com/api/board?platform=wise&tab=realtime"
@@ -32,36 +36,38 @@ WHITE = (255, 255, 255)
 BLACK = (40, 40, 40)
 GRAY = (120, 120, 120)
 
+@get_driver().on_shutdown
+async def _close_shared_http_clients() -> None:
+    await close_http_clients()
+
+
 news_on_cmd = on_command("新闻开启", priority=5, block=True)
 news_off_cmd = on_command("新闻关闭", priority=5, block=True)
 news_test_cmd = on_command("新闻测试", priority=5, block=True)
 news_status_cmd = on_command("新闻状态", priority=5, block=True)
 
-_http_client: httpx.AsyncClient | None = None
 
-
-def _get_http_client() -> httpx.AsyncClient:
-    global _http_client
-    if _http_client is None or _http_client.is_closed:
-        with _client_lock:
-            if _http_client is None or _http_client.is_closed:
-                _http_client = httpx.AsyncClient(timeout=20)
-    return _http_client
-
-
-@get_driver().on_shutdown
-async def _close_http_client() -> None:
-    if _http_client is not None and not _http_client.is_closed:
-        await _http_client.aclose()
+def _sh_today() -> date:
+    """上海时区的今天：与调度器时区一致，不受部署机时区影响。"""
+    return datetime.now(_SH).date()
 
 
 def _load_state() -> dict:
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
+    if not isinstance(data, dict):
+        return {}
+    # 旧格式 {"group_id": "xxx"} 自动迁移到多群格式
+    if "groups" not in data and data.get("group_id"):
+        data["groups"] = [str(data["group_id"])]
+        data.pop("group_id", None)
+        _save_state(data)
+    if not isinstance(data.get("groups"), list):
+        data["groups"] = []
+    return data
 
 
 def _save_state(data: dict) -> None:
@@ -71,22 +77,27 @@ def _save_state(data: dict) -> None:
     os.replace(tmp, STATE_FILE)
 
 
-def _get_group() -> str:
-    with _LOCK:
-        return _load_state().get("group_id", "")
-
-
-def _set_group(gid: str) -> None:
+def _get_groups() -> list[str]:
     with _LOCK:
         state = _load_state()
-        state["group_id"] = gid
+        return [str(g) for g in (state.get("groups") or []) if str(g)]
+
+
+def _add_group(gid: str) -> None:
+    with _LOCK:
+        state = _load_state()
+        groups = {str(g) for g in (state.get("groups") or [])}
+        groups.add(gid)
+        state["groups"] = sorted(groups)
         _save_state(state)
 
 
-def _clear_group() -> None:
+def _remove_group(gid: str) -> None:
     with _LOCK:
         state = _load_state()
-        state.pop("group_id", None)
+        groups = {str(g) for g in (state.get("groups") or [])}
+        groups.discard(gid)
+        state["groups"] = sorted(groups)
         _save_state(state)
 
 
@@ -184,8 +195,8 @@ def _render_news_image(day: date, news: list[str], source: str) -> str:
 
 
 async def _send_news(day: date) -> None:
-    group_id = _get_group()
-    if not group_id:
+    groups = _get_groups()
+    if not groups:
         return
     try:
         news = await _fetch_60s(day)
@@ -209,43 +220,51 @@ async def _send_news(day: date) -> None:
         return
     try:
         bot = get_bot()
-        await bot.send_group_msg(group_id=int(group_id), message=MessageSegment.image("file://" + path))
     except Exception:
-        _logger.exception("新闻发送失败")
+        _logger.exception("获取 bot 失败")
+        return
+    for gid in groups:
+        try:
+            await bot.send_group_msg(group_id=int(gid), message=MessageSegment.image("file://" + path))
+        except Exception:
+            _logger.exception("新闻发送到群 %s 失败", gid)
 
 
 @scheduler.scheduled_job("cron", hour=5, minute=30, id="daily_news", timezone="Asia/Shanghai")
 async def daily_news_job():
-    await _send_news(date.today() - timedelta(days=1))
+    await _send_news(_sh_today() - timedelta(days=1))
 
 
 @news_on_cmd.handle()
 async def news_on(event: MessageEvent):
     if not is_owner(event):
         await news_on_cmd.finish("❌ 你没有权限使用此功能")
-    if not hasattr(event, "group_id"):
+    if not isinstance(event, GroupMessageEvent):
         await news_on_cmd.finish("请在有机器人的群里开启此功能")
-    _set_group(str(event.group_id))
-    await news_on_cmd.finish(f"✅ 每日新闻已开启\n每天 8:00 自动发送前一天新闻总结到此群（本群 {event.group_id}）")
+    _add_group(str(event.group_id))
+    await news_on_cmd.finish(f"✅ 本群已开启每日新闻推送\n每天 5:30 自动发送前一天新闻总结到此群")
 
 
 @news_off_cmd.handle()
 async def news_off(event: MessageEvent):
     if not is_owner(event):
         await news_off_cmd.finish("❌ 你没有权限使用此功能")
-    _clear_group()
-    await news_off_cmd.finish("✅ 每日新闻已关闭")
+    if not isinstance(event, GroupMessageEvent):
+        await news_off_cmd.finish("请在有机器人的群里关闭此功能")
+    _remove_group(str(event.group_id))
+    await news_off_cmd.finish("✅ 本群已关闭每日新闻推送")
 
 
 @news_test_cmd.handle()
 async def news_test(event: MessageEvent):
     if not is_owner(event):
         await news_test_cmd.finish("❌ 你没有权限使用此功能")
-    if not hasattr(event, "group_id"):
+    if not isinstance(event, GroupMessageEvent):
         await news_test_cmd.finish("请在群里使用此命令")
     await news_test_cmd.send("⏳ 正在生成新闻图片...")
+    day = _sh_today() - timedelta(days=1)
     try:
-        news = await _fetch_60s(date.today() - timedelta(days=1))
+        news = await _fetch_60s(day)
         source = "60秒读懂世界"
     except Exception:
         try:
@@ -255,7 +274,7 @@ async def news_test(event: MessageEvent):
             await news_test_cmd.finish("新闻源获取失败，请稍后再试")
     if not news:
         await news_test_cmd.finish("新闻源返回为空，请稍后再试")
-    path = await asyncio.to_thread(_render_news_image, date.today() - timedelta(days=1), news, source)
+    path = await asyncio.to_thread(_render_news_image, day, news, source)
     await news_test_cmd.finish(MessageSegment.image("file://" + path))
 
 
@@ -263,7 +282,7 @@ async def news_test(event: MessageEvent):
 async def news_status(event: MessageEvent):
     if not is_owner(event):
         await news_status_cmd.finish("❌ 你没有权限使用此功能")
-    gid = _get_group()
-    if gid:
-        await news_status_cmd.finish(f"📰 每日新闻：已开启（群 {gid}，每天 8:00 发送）")
-    await news_status_cmd.finish("📰 每日新闻：未开启")
+    groups = _get_groups()
+    if groups:
+        await news_status_cmd.finish(f"📰 每日新闻推送已开启于 {len(groups)} 个群（每天 5:30 发送）：\n{'、'.join(groups)}")
+    await news_status_cmd.finish("📰 每日新闻推送：未开启")

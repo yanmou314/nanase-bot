@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import random
 import time
@@ -12,6 +11,8 @@ from nonebot.adapters.onebot.v11 import (
     Message,
     MessageSegment,
 )
+
+from common import load_json_state, save_json_state
 
 leave_matcher = on_notice(priority=1, block=False)
 welcome_matcher = on_notice(priority=1, block=False)
@@ -53,24 +54,20 @@ WELCOME_MESSAGES = [
 
 
 def _load_state() -> None:
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        for key, ts in data.items():
+    data = load_json_state(STATE_FILE)
+    for key, ts in data.items():
+        try:
             gid, uid = key.split(":", 1)
-            _join_ts[(int(gid), int(uid))] = float(ts)
-    except Exception:
-        pass
+            gid, uid, ts = int(gid), int(uid), float(ts)
+            if gid > 0 and uid > 0 and ts > 0:
+                _join_ts[(gid, uid)] = ts
+        except (TypeError, ValueError):
+            continue
 
 
 def _save_state() -> None:
     try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(
-                {f"{g}:{u}": t for (g, u), t in _join_ts.items()},
-                f,
-                ensure_ascii=False,
-            )
+        save_json_state(STATE_FILE, {f"{g}:{u}": t for (g, u), t in _join_ts.items()})
     except Exception:
         pass
 
@@ -121,11 +118,11 @@ async def _import_group_members(bot: Bot, gid: int) -> None:
     """拉取群成员列表，用 API 的 join_time 补录老成员的入群时间。"""
     if gid in _imported_groups:
         return
-    _imported_groups.add(gid)
     try:
         members = await bot.get_group_member_list(group_id=gid)
     except Exception:
         return
+    _imported_groups.add(gid)
     now = time.time()
     for m in members:
         uid = m.get("user_id")
