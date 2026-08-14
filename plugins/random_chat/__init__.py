@@ -1,13 +1,14 @@
 """随机插话插件：开启后机器人围观群聊，按概率以人设自然插话。开关仅 owner 可控，按群生效。"""
+import importlib
 import os
 import random
 import time
 from collections import deque
 
-from nonebot import get_driver, on_command, on_message
+from nonebot import get_driver, logger, on_command, on_message
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent
 
-from common import is_owner, load_json_state, save_json_state
+from common import get_http_client, is_owner, load_json_state, save_json_state
 
 watcher = on_message(priority=11, block=False)
 
@@ -49,7 +50,7 @@ FALLBACK_LINES = [
 EXTRA_PROMPT = (
     "\n\n现在你正在围观一个QQ群的聊天，下面是群里最近的聊天记录（格式为「昵称: 内容」）。"
     "请你以人设的身份自然地插一两句话，就像随手参与话题那样，可以回应某个人说的话，也可以顺着话题接梗。"
-    "要求：非常简短（一两句以内），不要@任何人，不要刷屏式提问，不要重复别人刚说过的话。"
+    "要求：非常简短（一两句以内），不要@任何人，不要刷屏式提问，不要重复别人刚说过的话，不要使用任何指令格式。"
     "如果聊天记录里没有合适的话题可以参与，就只回复 [SKIP] 这四个字符，不要回复其他任何内容。"
 )
 
@@ -75,8 +76,8 @@ def _load_state() -> None:
 def _save_state() -> None:
     try:
         save_json_state(STATE_FILE, _state)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"random_chat 状态写入失败：{e!r}")
 
 
 _load_state()
@@ -99,9 +100,7 @@ def _record(gid: int, sender: str, text: str) -> None:
 
 
 def _auto_chat_mod():
-    """延迟导入 auto_chat 插件，复用人设、API key、http 客户端与并发信号量。"""
-    import importlib
-
+    """延迟导入 auto_chat 插件，复用人设、API key 与并发信号量。"""
     for name in ("plugins.auto_chat", "auto_chat"):
         try:
             return importlib.import_module(name)
@@ -111,13 +110,13 @@ def _auto_chat_mod():
 
 
 async def _generate_reply(gid: int) -> str:
-    """基于群聊上下文生成插话内容，失败返回空串由调用方退回语料。"""
+    """基于群聊上下文生成插话内容；返回空串表示 AI 选择沉默。AI 不可用/调用失败向上抛异常。"""
     mod = _auto_chat_mod()
     if mod is None:
-        return ""
+        raise RuntimeError("无法导入 auto_chat 插件")
     key = mod._load_key()
     if not key:
-        return ""
+        raise RuntimeError("auto_chat 未配置 api_key")
     transcript = "\n".join(_buffers.get(gid, ()))
     if not transcript:
         return ""
@@ -125,7 +124,7 @@ async def _generate_reply(gid: int) -> str:
         {"role": "system", "content": mod.SYSTEM + EXTRA_PROMPT},
         {"role": "user", "content": f"最近的群聊记录：\n{transcript}"},
     ]
-    client = mod._get_http_client()
+    client = get_http_client(30)
     async with mod._AI_SEM:
         r = await client.post(
             mod.API_URL,
@@ -159,7 +158,7 @@ async def watch(bot: Bot, event: GroupMessageEvent):
         return
 
     sender = event.sender.card or event.sender.nickname or str(event.user_id)
-    _record(gid, sender, text[:100])
+    _record(gid, sender[:20], text[:100])
 
     buf = _buffers.get(gid)
     if buf is None or len(buf) < MIN_BUFFER:
@@ -170,21 +169,20 @@ async def watch(bot: Bot, event: GroupMessageEvent):
     if random.random() >= _state["probability"]:
         return
 
-    _last_interject[gid] = now
-    reply = ""
+    _last_interject[gid] = now  # 先占位，AI 请求期间的后续消息不再触发
     try:
         reply = await _generate_reply(gid)
-    except Exception:
-        reply = ""
-    if not reply:
-        if random.random() < 0.5:  # AI 不可用时也只按半概率退回语料，保持克制
-            _last_interject[gid] = now - _state["min_interval"]  # 本次不算冷却
-            return
+    except Exception as e:
+        logger.warning(f"random_chat 群 {gid} AI 生成失败（{e!r}），本次改用语料")
         reply = random.choice(FALLBACK_LINES)
+    if not reply:
+        _last_interject.pop(gid, None)  # AI 主动沉默不占用冷却
+        return
     try:
         await bot.send_group_msg(group_id=gid, message=reply)
-    except Exception:
-        pass
+        logger.info(f"random_chat 群 {gid} 插话：{reply[:50]}")
+    except Exception as e:
+        logger.warning(f"random_chat 群 {gid} 发送失败：{e!r}")
 
 
 @on_cmd.handle()
@@ -198,6 +196,7 @@ async def enable(event: GroupMessageEvent):
     if gid not in _state["enabled_groups"]:
         _state["enabled_groups"].append(gid)
     _save_state()
+    logger.info(f"random_chat 主人开启群 {gid}")
     await on_cmd.finish(
         f"已开启本群随机插话：每条消息 {_state['probability']:.0%} 概率插话，"
         f"同群冷却 {_state['min_interval'] // 60} 分钟"
@@ -216,6 +215,7 @@ async def disable(event: GroupMessageEvent):
         _state["enabled_groups"].remove(gid)
     _save_state()
     _buffers.pop(gid, None)
+    logger.info(f"random_chat 主人关闭群 {gid}")
     await off_cmd.finish("已关闭本群随机插话")
 
 
@@ -255,4 +255,5 @@ async def set_prob(event: GroupMessageEvent):
         await prob_cmd.finish("概率需要在 1 ~ 20 之间（百分比）")
     _state["probability"] = pct / 100
     _save_state()
+    logger.info(f"random_chat 主人调整概率为 {_state['probability']:.0%}")
     await prob_cmd.finish(f"已将插话概率调整为 {_state['probability']:.0%}")
