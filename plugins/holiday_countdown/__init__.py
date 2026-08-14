@@ -14,7 +14,7 @@ from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageEvent, Message
 from nonebot_plugin_apscheduler import scheduler
 from PIL import Image, ImageDraw, ImageFont
 
-from common import FONTS, cleanup_cache, is_owner
+from common import FONTS, cleanup_cache, is_owner, load_json_state, save_json_state
 
 
 TIMEZONE = ZoneInfo("Asia/Shanghai")
@@ -85,12 +85,8 @@ def _now() -> datetime:
 
 
 def _load_groups() -> set[int]:
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as file:
-            data = json.load(file)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return set()
-    groups = data.get("groups", []) if isinstance(data, dict) and isinstance(data.get("groups"), list) else []
+    data = load_json_state(STATE_FILE, STATE_LOCK)
+    groups = data.get("groups", []) if isinstance(data.get("groups"), list) else []
     result = set()
     for group_id in groups:
         try:
@@ -103,11 +99,7 @@ def _load_groups() -> set[int]:
 
 
 def _save_groups(groups: set[int]) -> None:
-    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-    temporary = STATE_FILE + ".tmp"
-    with open(temporary, "w", encoding="utf-8") as file:
-        json.dump({"groups": sorted(groups)}, file, ensure_ascii=False, indent=2)
-    os.replace(temporary, STATE_FILE)
+    save_json_state(STATE_FILE, {"groups": sorted(groups)}, STATE_LOCK)
 
 
 def _enabled_groups() -> set[int]:
@@ -128,14 +120,30 @@ def _change_group(group_id: int, enabled: bool) -> bool:
         return changed
 
 
-def _next_weekend(now: datetime) -> tuple[date, datetime]:
+def _last_workday_before(value: date) -> date:
+    if value.weekday() == 0:  # 周一 -> 上周五
+        return value - timedelta(days=3)
+    if value.weekday() == 6:  # 周日 -> 本周五
+        return value - timedelta(days=2)
+    return value - timedelta(days=1)
+
+
+def _offwork_on(day: date) -> datetime:
+    late_period = date(day.year, 5, 1) <= day <= date(day.year, 10, 1)
+    offwork_time = time(17, 30) if late_period else time(17, 0)
+    return datetime.combine(day, offwork_time, tzinfo=TIMEZONE)
+
+
+def _next_weekend(now: datetime) -> tuple[date, date, datetime]:
     days_until_saturday = (5 - now.weekday()) % 7
     weekend_day = now.date() + timedelta(days=days_until_saturday)
-    target = datetime.combine(weekend_day, time.min, tzinfo=TIMEZONE)
+    start_day = _last_workday_before(weekend_day)
+    target = _offwork_on(start_day)
     if target <= now:
         weekend_day += timedelta(days=7)
-        target = datetime.combine(weekend_day, time.min, tzinfo=TIMEZONE)
-    return weekend_day, target
+        start_day = _last_workday_before(weekend_day)
+        target = _offwork_on(start_day)
+    return weekend_day, start_day, target
 
 
 def _holiday_dates(year: int) -> tuple[tuple[str, date], ...]:
@@ -148,12 +156,13 @@ def _holiday_dates(year: int) -> tuple[tuple[str, date], ...]:
     )
 
 
-def _next_holiday(now: datetime) -> tuple[str, date, datetime]:
+def _next_holiday(now: datetime) -> tuple[str, date, date, datetime]:
     for year in range(now.year, now.year + 4):
         for name, holiday_day in sorted(_holiday_dates(year), key=lambda item: item[1]):
-            target = datetime.combine(holiday_day, time.min, tzinfo=TIMEZONE)
+            start_day = _last_workday_before(holiday_day)
+            target = _offwork_on(start_day)
             if target > now:
-                return name, holiday_day, target
+                return name, holiday_day, start_day, target
     raise RuntimeError("holiday calendar has no future date")
 
 
@@ -174,9 +183,8 @@ def _format_date(value: date) -> str:
 
 
 def _offwork_target(now: datetime) -> tuple[datetime, str]:
-    late_period = date(now.year, 5, 1) <= now.date() <= date(now.year, 10, 1)
-    offwork_time = time(17, 30) if late_period else time(17, 0)
-    return datetime.combine(now.date(), offwork_time, tzinfo=TIMEZONE), offwork_time.strftime("%H:%M")
+    offwork_at = _offwork_on(now.date())
+    return offwork_at, offwork_at.strftime("%H:%M")
 
 
 def _remaining_or_done(target: datetime, now: datetime) -> str:
@@ -187,19 +195,19 @@ def _remaining_or_done(target: datetime, now: datetime) -> str:
 
 def _build_message(now: datetime | None = None) -> str:
     now = now or _now()
-    weekend_day, weekend_at = _next_weekend(now)
-    holiday_name, holiday_day, holiday_at = _next_holiday(now)
+    weekend_day, weekend_start, weekend_at = _next_weekend(now)
+    holiday_name, holiday_day, holiday_start, holiday_at = _next_holiday(now)
     offwork_at, offwork_label = _offwork_target(now)
     return (
         "⏳ 每日倒计时\n"
         f"今天是 {now.year}年{now.month}月{now.day}日 {now:%H:%M}\n\n"
-        f"🏖️ 下一个周末：{_format_date(weekend_day)} 00:00\n"
-        f"还剩 {_remaining(weekend_at, now)}\n\n"
+        f"🏖️ 下一个周末：{_format_date(weekend_day)}\n"
+        f"{_format_date(weekend_start)} {weekend_at:%H:%M} 下班后开始，还剩 {_remaining(weekend_at, now)}\n\n"
         f"🎉 下一个节假日：{holiday_name} · {_format_date(holiday_day)}\n"
-        f"还剩 {_remaining(holiday_at, now)}\n\n"
+        f"{_format_date(holiday_start)} {holiday_at:%H:%M} 下班后开始，还剩 {_remaining(holiday_at, now)}\n\n"
         f"💼 下班倒计时：今天 {offwork_label} 下班\n"
         f"还剩 {_remaining_or_done(offwork_at, now)}\n\n"
-        "注：节假日按放假起始日计算，日期表会随官方安排更新。"
+        "注：周末/节假日按最后一个工作日的下班时间起算，节假日日期表会随官方安排更新。"
     )
 
 
@@ -218,8 +226,8 @@ def _right_text(draw: ImageDraw.ImageDraw, text: str, y: int, font, fill) -> Non
 
 
 def _render_card(now: datetime) -> str:
-    weekend_day, weekend_at = _next_weekend(now)
-    holiday_name, holiday_day, holiday_at = _next_holiday(now)
+    weekend_day, weekend_start, weekend_at = _next_weekend(now)
+    holiday_name, holiday_day, holiday_start, holiday_at = _next_holiday(now)
     offwork_at, offwork_label = _offwork_target(now)
     image = Image.new("RGB", (CARD_WIDTH, CARD_HEIGHT))
     draw = ImageDraw.Draw(image, "RGBA")
@@ -261,7 +269,7 @@ def _render_card(now: datetime) -> str:
         155,
         "WEEKEND",
         "下一个周末",
-        f"{_format_date(weekend_day)} 00:00",
+        f"{_format_date(weekend_day)} · {_format_date(weekend_start)} {weekend_at:%H:%M} 下班后开始",
         _remaining(weekend_at, now),
         weekend_color,
     )
@@ -269,7 +277,7 @@ def _render_card(now: datetime) -> str:
         375,
         "HOLIDAY",
         f"下一个节假日 · {holiday_name}",
-        f"{_format_date(holiday_day)} 00:00",
+        f"{_format_date(holiday_day)} · {_format_date(holiday_start)} {holiday_at:%H:%M} 下班后开始",
         _remaining(holiday_at, now),
         holiday_color,
     )
@@ -282,8 +290,11 @@ def _render_card(now: datetime) -> str:
         offwork_color,
     )
     footer = "5月1日—10月1日 17:30 下班 · 其余日期 17:00 下班 · 每天 17:00 自动发送"
+    note = "周末/节假日按最后一个工作日的下班时间起算"
     footer_box = draw.textbbox((0, 0), footer, font=footer_font)
+    note_box = draw.textbbox((0, 0), note, font=footer_font)
     draw.text(((CARD_WIDTH - (footer_box[2] - footer_box[0])) / 2, 845), footer, font=footer_font, fill=gray)
+    draw.text(((CARD_WIDTH - (note_box[2] - note_box[0])) / 2, 872), note, font=footer_font, fill=gray)
 
     os.makedirs(CACHE_DIR, exist_ok=True)
     cleanup_cache(CACHE_DIR, max_age=3 * 24 * 60 * 60)
