@@ -1,54 +1,32 @@
 import asyncio
 import base64
 import html as html_mod
-import io
 import os
-import random
-import subprocess
-import time
 from datetime import date
 
-import httpx
 from nonebot import get_driver
-from PIL import Image, ImageDraw, ImageFilter
-from weasyprint import HTML
 
-from common import cleanup_cache
+from common import close_http_clients, get_http_client, gradient_background, render_html_to_png
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 
 ACCENT = "#D9A94E"
-_AVATAR_HTTP = httpx.AsyncClient(timeout=6, follow_redirects=True)
 
 
 @get_driver().on_shutdown
 async def _close_avatar_http() -> None:
-    if not _AVATAR_HTTP.is_closed:
-        await _AVATAR_HTTP.aclose()
+    await close_http_clients()
 
 
 async def _fetch_avatar(user_id: int) -> bytes | None:
     url = f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
     try:
-        r = await _AVATAR_HTTP.get(url)
+        r = await get_http_client(timeout=6).get(url, follow_redirects=True)
         if r.status_code == 200 and r.content:
             return r.content
     except Exception:
         pass
     return None
-
-
-def _background() -> str:
-    W, H = 900, 800
-    img = Image.new("RGB", (W, H))
-    d = ImageDraw.Draw(img)
-    top, bottom = (249, 248, 250), (243, 241, 246)
-    for y in range(H):
-        t = y / H
-        d.line([(0, y), (W, y)], fill=tuple(int(top[i] + (bottom[i] - top[i]) * t) for i in range(3)))
-    buf = io.BytesIO()
-    img.save(buf, "PNG")
-    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
 def _row_html(rank: int, name: str, cnt: int, max_cnt: int, total: int, av_b64: str | None) -> str:
@@ -75,7 +53,7 @@ def _row_html(rank: int, name: str, cnt: int, max_cnt: int, total: int, av_b64: 
 
 
 def _render(rows: list, avatars: dict) -> str:
-    bg = _background()
+    bg = gradient_background(900, 800)
     total = sum(c for _, _, c in rows)
     max_cnt = max(c for _, _, c in rows) or 1
     body = "".join(
@@ -132,28 +110,7 @@ body {{ width: 900px; height: 800px; font-family: "Noto Sans CJK SC", sans-serif
   </div>
 </body></html>"""
 
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    cleanup_cache(CACHE_DIR, max_age=24 * 60 * 60)
-    stamp = int(time.time() * 1000)
-    tmp_pdf = os.path.join(CACHE_DIR, f"dragon_{stamp}.pdf")
-    path = os.path.join(CACHE_DIR, f"dragon_{stamp}.png")
-    try:
-        HTML(string=html, url_fetcher=_local_only_fetcher).write_pdf(tmp_pdf)
-        subprocess.run(
-            ["pdftoppm", "-png", "-r", "192", "-singlefile", tmp_pdf, path[:-4]],
-            check=True, capture_output=True,
-        )
-    finally:
-        if os.path.exists(tmp_pdf):
-            os.remove(tmp_pdf)
-    return path
-
-
-def _local_only_fetcher(url, timeout=10, *args, **kwargs):
-    """weasyprint 资源加载器：仅允许 data: URL，阻止外部资源请求（防 SSRF）。"""
-    if url.startswith("data:"):
-        return weasyprint.default_url_fetcher(url, timeout, *args, **kwargs)
-    raise ValueError(f"blocked external url: {url}")
+    return render_html_to_png(html, "dragon", CACHE_DIR, max_age=24 * 60 * 60)
 
 
 async def build_card_async(rows: list) -> str:

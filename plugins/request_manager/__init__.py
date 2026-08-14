@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import threading
@@ -15,6 +16,8 @@ from nonebot.adapters.onebot.v11 import (
 from nonebot.params import CommandArg
 
 from common import OWNER
+
+_logger = logging.getLogger(__name__)
 
 request_matcher = on_request(priority=1, block=False)
 private_matcher = on_message(priority=20, block=False)
@@ -77,7 +80,8 @@ async def _auto_approve(bot: Bot, event: GroupRequestEvent, comment: str) -> boo
     keywords = _load_keywords(event.group_id)
     if not keywords:
         return False
-    hit = [k for k in keywords if k in comment]
+    comment_lower = comment.lower()  # 大小写不敏感匹配（中文不受影响）
+    hit = [k for k in keywords if k.lower() in comment_lower]
     if hit:
         try:
             await bot.set_group_add_request(flag=event.flag, sub_type=event.sub_type, approve=True)
@@ -123,7 +127,7 @@ async def auto_on(event: MessageEvent, arg=CommandArg()):
     if not kws:
         await auto_on_cmd.finish("请提供至少一个关键字")
     merged = _save_keywords(gid, kws, merge=True)
-    await auto_on_cmd.finish(f"✅ 群 {gid} 自动通过已开启\n🔑 关键字：{' / '.join(merged)}\n进群附言包含任一关键字将自动同意")
+    await auto_on_cmd.finish(f"✅ 群 {gid} 自动通过已开启\n🔑 关键字：{' / '.join(merged)}\n进群附言包含任一关键字将自动同意（不区分大小写）")
 
 
 @auto_off_cmd.handle()
@@ -187,6 +191,11 @@ async def handle_request(bot: Bot, event):
     if isinstance(event, GroupRequestEvent) and event.sub_type in ("add", "apply"):
         if await _auto_approve(bot, event, event.comment or ""):
             return
+        # 诊断日志：记录未自动通过时的原始附言（验证问答的回答也在这里），便于排查
+        _logger.info(
+            "加群申请未自动通过: group=%s user=%s sub=%s comment=%r",
+            event.group_id, event.user_id, event.sub_type, event.comment,
+        )
         _pending[event.flag] = {
             "kind": "group", "flag": event.flag,
             "sub_type": event.sub_type, "group_id": event.group_id,
