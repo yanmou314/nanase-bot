@@ -23,7 +23,7 @@ CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 STATE_LOCK = threading.RLock()
 WEEKDAYS = ("一", "二", "三", "四", "五", "六", "日")
 CARD_WIDTH = 1080
-CARD_HEIGHT = 920
+CARD_HEIGHT = 840
 
 HOLIDAY_DATES: dict[int, tuple[tuple[str, date], ...]] = {
     2026: (
@@ -246,7 +246,6 @@ def _render_card(now: datetime) -> str:
     name_font = _font(34, bold=True)
     detail_font = _font(25)
     remaining_font = _font(36, bold=True)
-    footer_font = _font(19)
     dark = (42, 39, 55, 255)
     gray = (123, 118, 139, 255)
     weekend_color = (65, 155, 196, 255)
@@ -289,12 +288,6 @@ def _render_card(now: datetime) -> str:
         _remaining_or_done(offwork_at, now),
         offwork_color,
     )
-    footer = "5月1日—10月1日 17:30 下班 · 其余日期 17:00 下班 · 每天 17:00 自动发送"
-    note = "周末/节假日按最后一个工作日的下班时间起算"
-    footer_box = draw.textbbox((0, 0), footer, font=footer_font)
-    note_box = draw.textbbox((0, 0), note, font=footer_font)
-    draw.text(((CARD_WIDTH - (footer_box[2] - footer_box[0])) / 2, 845), footer, font=footer_font, fill=gray)
-    draw.text(((CARD_WIDTH - (note_box[2] - note_box[0])) / 2, 872), note, font=footer_font, fill=gray)
 
     os.makedirs(CACHE_DIR, exist_ok=True)
     cleanup_cache(CACHE_DIR, max_age=3 * 24 * 60 * 60)
