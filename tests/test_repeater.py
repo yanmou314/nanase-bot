@@ -63,3 +63,21 @@ def test_prune_removes_stale_groups():
     assert 1 not in mod._track and 1 not in mod._replied_ts and 1 not in mod._replied_fp
     assert 2 in mod._track
     mod._track.clear(); mod._replied_ts.clear(); mod._replied_fp.clear()
+
+
+def test_save_state_skips_none_fingerprints(monkeypatch, tmp_path):
+    """回归：不可复读消息的指纹为 None，保存时必须跳过而不是崩溃。"""
+    import asyncio
+    import json as _json
+
+    mod = repeater
+    f = tmp_path / "repeater_state.json"
+    monkeypatch.setattr(mod, "STATE_FILE", str(f))
+    mod._track.clear(); mod._replied_ts.clear()
+    mod._track[42] = deque([None, ("t", "a" * 40, "原文"), None], maxlen=3)
+    mod._replied_ts[42] = time.time()
+
+    asyncio.run(mod._save_on_shutdown())  # 不得抛异常
+    data = _json.loads(f.read_text(encoding="utf-8"))
+    assert data["track"] == {"42": [["t", "a" * 40]]}
+    assert mod._replied_ts  # 未被破坏
