@@ -6,9 +6,9 @@ import time
 from collections import deque
 
 from nonebot import get_driver, logger, on_command, on_message
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageSegment
 
-from common import get_http_client, is_owner, load_json_state, save_json_state
+from common import is_owner, load_json_state, save_json_state
 
 watcher = on_message(priority=11, block=False)
 
@@ -95,7 +95,7 @@ def _record(gid: int, sender: str, text: str) -> None:
 
 
 def _auto_chat_mod():
-    """延迟导入 auto_chat 插件，复用人设、API key 与并发信号量。"""
+    """延迟导入 auto_chat 插件，通过其公开接口复用人设与 AI 调用通道。"""
     for name in ("plugins.auto_chat", "auto_chat"):
         try:
             return importlib.import_module(name)
@@ -109,9 +109,6 @@ async def _generate_reply(gid: int) -> str:
     mod = _auto_chat_mod()
     if mod is None:
         raise RuntimeError("无法导入 auto_chat 插件")
-    key = mod._load_key()
-    if not key:
-        raise RuntimeError("auto_chat 未配置 api_key")
     transcript = "\n".join(_buffers.get(gid, ()))
     if not transcript:
         return ""
@@ -119,22 +116,7 @@ async def _generate_reply(gid: int) -> str:
         {"role": "system", "content": mod.SYSTEM + EXTRA_PROMPT},
         {"role": "user", "content": f"最近的群聊记录：\n{transcript}"},
     ]
-    client = get_http_client(30)
-    async with mod._AI_SEM:
-        r = await client.post(
-            mod.API_URL,
-            headers={"Authorization": f"Bearer {key}"},
-            json={
-                "model": mod.MODEL,
-                "messages": messages,
-                "max_tokens": 120,
-                "thinking": {"type": "disabled"},
-            },
-            timeout=30,
-        )
-    r.raise_for_status()
-    data = r.json()
-    reply = (data["choices"][0]["message"]["content"] or "").strip()
+    reply = await mod.chat_completion(messages, max_tokens=120)
     if not reply or "[SKIP]" in reply:
         return ""
     # 去掉 AI 偶尔自带的引号包裹
@@ -175,7 +157,8 @@ async def watch(bot: Bot, event: GroupMessageEvent):
         return
     _last_interject[gid] = time.time()
     try:
-        await bot.send_group_msg(group_id=gid, message=reply)
+        # MessageSegment.text 包裹：AI 返回的文本不会被解析为 CQ 码（防注入）
+        await bot.send_group_msg(group_id=gid, message=MessageSegment.text(reply))
         logger.info(f"random_chat 群 {gid} 插话：{reply[:50]}")
     except Exception as e:
         logger.warning(f"random_chat 群 {gid} 发送失败：{e!r}")
