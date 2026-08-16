@@ -24,6 +24,7 @@ STATE_LOCK = threading.RLock()
 WEEKDAYS = ("一", "二", "三", "四", "五", "六", "日")
 CARD_WIDTH = 1080
 CARD_HEIGHT = 840
+WORK_START = time(8, 0)  # 上班时间（放假/周末时倒计时到此时间）
 
 HOLIDAY_DATES: dict[int, tuple[tuple[str, date], ...]] = {
     2026: (
@@ -182,9 +183,29 @@ def _format_date(value: date) -> str:
     return f"{value.month}月{value.day}日（周{WEEKDAYS[value.weekday()]}）"
 
 
-def _offwork_target(now: datetime) -> tuple[datetime, str]:
-    offwork_at = _offwork_on(now.date())
-    return offwork_at, offwork_at.strftime("%H:%M")
+def _is_workday(day: date) -> bool:
+    if day.weekday() >= 5:  # 周末
+        return False
+    for _, holiday_day in _holiday_dates(day.year):
+        if day == holiday_day:
+            return False
+    return True
+
+
+def _next_workday_start(now: datetime) -> datetime:
+    day = now.date() + timedelta(days=1)
+    while not _is_workday(day):
+        day += timedelta(days=1)
+    return datetime.combine(day, WORK_START, tzinfo=TIMEZONE)
+
+
+def _work_target(now: datetime) -> tuple[datetime, str, str, str]:
+    """返回 (目标时间, 标题, 详情, 剩余文案)；放假/周末显示上班倒计时，工作日显示下班倒计时。"""
+    if _is_workday(now.date()):
+        target = _offwork_on(now.date())
+        return target, "下班倒计时", f"今天 {target:%H:%M} 下班", _remaining_or_done(target, now)
+    target = _next_workday_start(now)
+    return target, "上班倒计时", f"下次上班 {_format_date(target.date())} {target:%H:%M}", _remaining(target, now)
 
 
 def _remaining_or_done(target: datetime, now: datetime) -> str:
@@ -197,7 +218,7 @@ def _build_message(now: datetime | None = None) -> str:
     now = now or _now()
     weekend_day, _, weekend_at = _next_weekend(now)
     holiday_name, holiday_day, _, holiday_at = _next_holiday(now)
-    offwork_at, offwork_label = _offwork_target(now)
+    work_at, work_title, work_detail, work_remaining = _work_target(now)
     return (
         "⏳ 每日倒计时\n"
         f"今天是 {now.year}年{now.month}月{now.day}日 {now:%H:%M}\n\n"
@@ -205,8 +226,8 @@ def _build_message(now: datetime | None = None) -> str:
         f"还剩 {_remaining(weekend_at, now)}\n\n"
         f"🎉 下一个节假日：{holiday_name} · {_format_date(holiday_day)}\n"
         f"还剩 {_remaining(holiday_at, now)}\n\n"
-        f"💼 下班倒计时：今天 {offwork_label} 下班\n"
-        f"还剩 {_remaining_or_done(offwork_at, now)}\n\n"
+        f"💼 {work_title}：{work_detail}\n"
+        f"还剩 {work_remaining}\n\n"
         "注：周末/节假日按最后一个工作日的下班时间起算，节假日日期表会随官方安排更新。"
     )
 
@@ -228,7 +249,7 @@ def _right_text(draw: ImageDraw.ImageDraw, text: str, y: int, font, fill) -> Non
 def _render_card(now: datetime) -> str:
     weekend_day, _, weekend_at = _next_weekend(now)
     holiday_name, holiday_day, _, holiday_at = _next_holiday(now)
-    offwork_at, offwork_label = _offwork_target(now)
+    _, work_title, work_detail, work_remaining = _work_target(now)
     image = Image.new("RGB", (CARD_WIDTH, CARD_HEIGHT))
     draw = ImageDraw.Draw(image, "RGBA")
     top = (249, 247, 255)
@@ -282,10 +303,10 @@ def _render_card(now: datetime) -> str:
     )
     draw_panel(
         595,
-        "OFF WORK",
-        "下班倒计时",
-        f"今天下班时间 {offwork_label}",
-        _remaining_or_done(offwork_at, now),
+        "OFF WORK" if work_title == "下班倒计时" else "TO WORK",
+        work_title,
+        work_detail,
+        work_remaining,
         offwork_color,
     )
 

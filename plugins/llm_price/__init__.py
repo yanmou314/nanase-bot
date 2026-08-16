@@ -1,11 +1,12 @@
 """LLM 价格图插件：主流大模型 API 价格对比图
 
 命令:
-  .ai              实时抓取 OpenRouter（免费 API），失败回退本地缓存
+  .ai              实时抓取 models.dev，失败回退本地缓存
   .ai 更新          强制实时抓取并覆盖缓存（仅主人可用）
   别名: .价格图
 
-数据源: https://openrouter.ai/api/v1/models（无需鉴权）
+数据源: https://models.dev/api.json（无需鉴权）
+价格单位：美元/百万 tokens，按固定汇率换算为人民币。
 """
 import asyncio
 import json
@@ -30,8 +31,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
 CACHE_PATH = os.path.join(CACHE_DIR, "latest.json")
 
-API_URL = "https://openrouter.ai/api/v1/models"
-FETCH_TIMEOUT = 20
+API_URL = "https://models.dev/api.json"
+FETCH_TIMEOUT = 30
+# 服务器直连受限时通过 Clash 访问 models.dev；无代理时自动回退直连。
+HTTP_PROXY = os.getenv("MODELS_DEV_PROXY", "http://127.0.0.1:7890")
 TIMEZONE = ZoneInfo("Asia/Shanghai")
 USD_CNY = 7.2
 M_TOKENS = 1_000_000
@@ -47,8 +50,15 @@ OUTPUT_COLOR = "#FF8B3D"
 INPUT_TEXT = (30, 95, 168)
 OUTPUT_TEXT = (184, 90, 20)
 
+_price_client: httpx.AsyncClient | None = None
+
+
 @get_driver().on_shutdown
 async def _close_shared_http_clients() -> None:
+    global _price_client
+    if _price_client is not None and not _price_client.is_closed:
+        await _price_client.aclose()
+    _price_client = None
     await close_http_clients()
 
 
@@ -90,37 +100,68 @@ MODELS = [
 
 
 def _get_http_client() -> httpx.AsyncClient:
-    # 统一走 common 的按超时缓存单例，由 owstats 注册的 on_shutdown 统一关闭
-    return get_http_client(FETCH_TIMEOUT)
+    global _price_client
+    if _price_client is None or _price_client.is_closed:
+        _price_client = httpx.AsyncClient(timeout=FETCH_TIMEOUT, proxy=HTTP_PROXY)
+    return _price_client
 
 
-async def fetch_openrouter() -> dict:
-    """实时抓取 OpenRouter, 返回 {id: {in_rmb, out_rmb}}"""
+async def fetch_models_dev() -> dict:
+    """实时抓取 models.dev，返回 {provider/model: {in_rmb, out_rmb}}。"""
     client = _get_http_client()
     r = await client.get(API_URL, headers={"User-Agent": "Mozilla/5.0"})
     r.raise_for_status()
     data = r.json()
     out = {}
-    for m in data.get("data", []):
-        pr = m.get("pricing") or {}
 
-        def num(key: str):
-            try:
-                v = float(pr.get(key, -1))
-            except (TypeError, ValueError):
-                return None
-            return v if v >= 0 else None
+    def number(value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) and value >= 0 else None
 
-        prompt, completion = num("prompt"), num("completion")
-        model_id = m.get("id")
-        if not model_id or prompt is None or completion is None:
-            continue
-        if not math.isfinite(prompt) or not math.isfinite(completion):
-            continue
-        out[str(model_id)] = {
-            "in_rmb": prompt * M_TOKENS * USD_CNY,
-            "out_rmb": completion * M_TOKENS * USD_CNY,
+    def parse_model(provider_id, model_id, model):
+        if not isinstance(model, dict) or not model_id:
+            return
+        # models.dev 当前使用 cost；同时兼容可能出现的 pricing/input/output 变体。
+        costs = model.get("cost") or model.get("pricing") or model
+        if not isinstance(costs, dict):
+            return
+        input_cost = number(costs.get("input", costs.get("prompt")))
+        output_cost = number(costs.get("output", costs.get("completion")))
+        if input_cost is None or output_cost is None:
+            return
+        raw_id = str(model_id)
+        full_id = raw_id if "/" in raw_id or not provider_id else f"{provider_id}/{raw_id}"
+        # models.dev 的 cost 为美元/百万 tokens；兼容小数美元/百万和旧式美元/token。
+        unit = str(costs.get("unit", model.get("cost_unit", "usd_per_million_tokens"))).lower()
+        multiplier = 1 if "million" in unit or "1m" in unit else M_TOKENS
+        price = {
+            "in_rmb": input_cost * multiplier * USD_CNY,
+            "out_rmb": output_cost * multiplier * USD_CNY,
         }
+        # 同时保留模型原始 ID 和 provider/model ID，兼容清单两种写法。
+        out[full_id] = price
+        if raw_id != full_id:
+            out.setdefault(raw_id, price)
+
+    if isinstance(data, dict):
+        for provider_id, provider in data.items():
+            if not isinstance(provider, dict):
+                continue
+            models = provider.get("models", provider)
+            if isinstance(models, dict):
+                for model_id, model in models.items():
+                    parse_model(provider_id, model_id, model)
+            elif isinstance(models, list):
+                for model in models:
+                    if isinstance(model, dict):
+                        parse_model(provider_id, model.get("id") or model.get("name"), model)
+    elif isinstance(data, list):
+        for model in data:
+            if isinstance(model, dict):
+                parse_model(model.get("provider"), model.get("id") or model.get("name"), model)
     return out
 
 
@@ -250,10 +291,10 @@ async def gen_chart(force: bool):
     prices = None
     source_desc = ""
     try:
-        prices = await fetch_openrouter()
-        source_desc = f"OpenRouter 实时数据（{datetime.now(TIMEZONE):%m-%d %H:%M}）"
+        prices = await fetch_models_dev()
+        source_desc = f"models.dev 实时数据（{datetime.now(TIMEZONE):%m-%d %H:%M}）"
     except Exception as e:
-        _logger.warning("OpenRouter 抓取失败: %s", e)
+        _logger.warning("models.dev 抓取失败: %s", e)
         if force:
             raise RuntimeError("实时数据获取失败（强制更新模式不降级使用旧数据）")
     cache = None if force else load_cache()
@@ -273,7 +314,7 @@ async def gen_chart(force: bool):
     if force:
         payload = {
             "fetched_at": datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
-            "source": "openrouter",
+            "source": "models.dev",
             "usd_cny": USD_CNY,
             "models": {mid: prices[mid] for mid, *_ in MODELS if mid in prices},
         }
