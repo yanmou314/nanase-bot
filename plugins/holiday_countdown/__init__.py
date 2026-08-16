@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import logging
 import os
 import threading
 import time as system_time
@@ -17,6 +17,7 @@ from PIL import Image, ImageDraw, ImageFont
 from common import FONTS, cleanup_cache, is_owner, load_json_state, save_json_state
 
 
+_logger = logging.getLogger(__name__)
 TIMEZONE = ZoneInfo("Asia/Shanghai")
 STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
@@ -26,51 +27,65 @@ CARD_WIDTH = 1080
 CARD_HEIGHT = 840
 WORK_START = time(8, 0)  # 上班时间（放假/周末时倒计时到此时间）
 
-HOLIDAY_DATES: dict[int, tuple[tuple[str, date], ...]] = {
+# 放假区间表：(名称, 放假首日, 放假末日)。
+# 2026 为国务院办公厅官方安排；2027-2030 为按近年惯例推算的基线
+# （春节=除夕至初七、劳动节 5 天、国庆 7 天、其余 3 天连休），待官方通知发布后更新。
+HOLIDAYS: dict[int, tuple[tuple[str, date, date], ...]] = {
     2026: (
-        ("元旦", date(2026, 1, 1)),
-        ("春节", date(2026, 2, 15)),
-        ("清明节", date(2026, 4, 4)),
-        ("劳动节", date(2026, 5, 1)),
-        ("端午节", date(2026, 6, 19)),
-        ("中秋节", date(2026, 9, 25)),
-        ("国庆节", date(2026, 10, 1)),
+        ("元旦", date(2026, 1, 1), date(2026, 1, 3)),
+        ("春节", date(2026, 2, 15), date(2026, 2, 23)),
+        ("清明节", date(2026, 4, 4), date(2026, 4, 6)),
+        ("劳动节", date(2026, 5, 1), date(2026, 5, 5)),
+        ("端午节", date(2026, 6, 19), date(2026, 6, 21)),
+        ("中秋节", date(2026, 9, 25), date(2026, 9, 27)),
+        ("国庆节", date(2026, 10, 1), date(2026, 10, 7)),
     ),
     2027: (
-        ("元旦", date(2027, 1, 1)),
-        ("春节", date(2027, 2, 5)),
-        ("清明节", date(2027, 4, 3)),
-        ("劳动节", date(2027, 5, 1)),
-        ("端午节", date(2027, 6, 9)),
-        ("中秋节", date(2027, 9, 15)),
-        ("国庆节", date(2027, 10, 1)),
+        ("元旦", date(2027, 1, 1), date(2027, 1, 3)),
+        ("春节", date(2027, 2, 5), date(2027, 2, 12)),
+        ("清明节", date(2027, 4, 3), date(2027, 4, 5)),
+        ("劳动节", date(2027, 5, 1), date(2027, 5, 5)),
+        ("端午节", date(2027, 6, 9), date(2027, 6, 11)),
+        ("中秋节", date(2027, 9, 15), date(2027, 9, 17)),
+        ("国庆节", date(2027, 10, 1), date(2027, 10, 7)),
     ),
     2028: (
-        ("元旦", date(2028, 1, 1)),
-        ("春节", date(2028, 1, 25)),
-        ("清明节", date(2028, 4, 4)),
-        ("劳动节", date(2028, 5, 1)),
-        ("端午节", date(2028, 5, 30)),
-        ("中秋节", date(2028, 10, 3)),
-        ("国庆节", date(2028, 10, 1)),
+        ("元旦", date(2028, 1, 1), date(2028, 1, 3)),
+        ("春节", date(2028, 1, 25), date(2028, 2, 1)),
+        ("清明节", date(2028, 4, 4), date(2028, 4, 6)),
+        ("劳动节", date(2028, 5, 1), date(2028, 5, 5)),
+        ("端午节", date(2028, 5, 30), date(2028, 6, 1)),
+        ("国庆节·中秋", date(2028, 10, 1), date(2028, 10, 7)),  # 中秋(10-3)落在国庆周内，合并连休
     ),
     2029: (
-        ("元旦", date(2029, 1, 1)),
-        ("春节", date(2029, 2, 12)),
-        ("清明节", date(2029, 4, 4)),
-        ("劳动节", date(2029, 5, 1)),
-        ("端午节", date(2029, 6, 19)),
-        ("中秋节", date(2029, 9, 22)),
-        ("国庆节", date(2029, 10, 1)),
+        ("元旦", date(2029, 1, 1), date(2029, 1, 3)),
+        ("春节", date(2029, 2, 12), date(2029, 2, 19)),
+        ("清明节", date(2029, 4, 4), date(2029, 4, 6)),
+        ("劳动节", date(2029, 5, 1), date(2029, 5, 5)),
+        ("端午节", date(2029, 6, 19), date(2029, 6, 21)),
+        ("中秋节", date(2029, 9, 22), date(2029, 9, 24)),
+        ("国庆节", date(2029, 10, 1), date(2029, 10, 7)),
     ),
     2030: (
-        ("元旦", date(2030, 1, 1)),
-        ("春节", date(2030, 2, 2)),
-        ("清明节", date(2030, 4, 4)),
-        ("劳动节", date(2030, 5, 1)),
-        ("端午节", date(2030, 6, 3)),
-        ("中秋节", date(2030, 9, 12)),
-        ("国庆节", date(2030, 10, 1)),
+        ("元旦", date(2030, 1, 1), date(2030, 1, 3)),
+        ("春节", date(2030, 2, 2), date(2030, 2, 9)),
+        ("清明节", date(2030, 4, 4), date(2030, 4, 6)),
+        ("劳动节", date(2030, 5, 1), date(2030, 5, 5)),
+        ("端午节", date(2030, 6, 3), date(2030, 6, 5)),
+        ("中秋节", date(2030, 9, 12), date(2030, 9, 14)),
+        ("国庆节", date(2030, 10, 1), date(2030, 10, 7)),
+    ),
+}
+
+# 调休上班的周末（官方通知中标注“上班”的周六/周日），仅 2026 有官方数据
+WORKDAY_OVERRIDES: dict[int, tuple[date, ...]] = {
+    2026: (
+        date(2026, 1, 4),   # 元旦调休
+        date(2026, 2, 14),  # 春节调休
+        date(2026, 2, 28),  # 春节调休
+        date(2026, 5, 9),   # 劳动节调休
+        date(2026, 9, 20),  # 国庆调休
+        date(2026, 10, 10),  # 国庆调休
     ),
 }
 
@@ -122,11 +137,10 @@ def _change_group(group_id: int, enabled: bool) -> bool:
 
 
 def _last_workday_before(value: date) -> date:
-    if value.weekday() == 0:  # 周一 -> 上周五
-        return value - timedelta(days=3)
-    if value.weekday() == 6:  # 周日 -> 本周五
-        return value - timedelta(days=2)
-    return value - timedelta(days=1)
+    day = value - timedelta(days=1)
+    while not _is_workday(day):
+        day -= timedelta(days=1)
+    return day
 
 
 def _offwork_on(day: date) -> datetime:
@@ -147,23 +161,29 @@ def _next_weekend(now: datetime) -> tuple[date, date, datetime]:
     return weekend_day, start_day, target
 
 
-def _holiday_dates(year: int) -> tuple[tuple[str, date], ...]:
-    if year in HOLIDAY_DATES:
-        return HOLIDAY_DATES[year]
+_holidays_warned: set[int] = set()
+
+
+def _holidays(year: int) -> tuple[tuple[str, date, date], ...]:
+    if year in HOLIDAYS:
+        return HOLIDAYS[year]
+    if year not in _holidays_warned:
+        _holidays_warned.add(year)
+        _logger.warning("节假日表未覆盖 %s 年，降级为元旦/劳动节/国庆基线，请补充官方安排", year)
     return (
-        ("元旦", date(year, 1, 1)),
-        ("劳动节", date(year, 5, 1)),
-        ("国庆节", date(year, 10, 1)),
+        ("元旦", date(year, 1, 1), date(year, 1, 3)),
+        ("劳动节", date(year, 5, 1), date(year, 5, 5)),
+        ("国庆节", date(year, 10, 1), date(year, 10, 7)),
     )
 
 
 def _next_holiday(now: datetime) -> tuple[str, date, date, datetime]:
     for year in range(now.year, now.year + 4):
-        for name, holiday_day in sorted(_holiday_dates(year), key=lambda item: item[1]):
-            start_day = _last_workday_before(holiday_day)
+        for name, start_day_h, _end in sorted(_holidays(year), key=lambda item: item[1]):
+            start_day = _last_workday_before(start_day_h)
             target = _offwork_on(start_day)
             if target > now:
-                return name, holiday_day, start_day, target
+                return name, start_day_h, start_day, target
     raise RuntimeError("holiday calendar has no future date")
 
 
@@ -184,10 +204,12 @@ def _format_date(value: date) -> str:
 
 
 def _is_workday(day: date) -> bool:
+    if day in WORKDAY_OVERRIDES.get(day.year, ()):  # 调休上班的周末
+        return True
     if day.weekday() >= 5:  # 周末
         return False
-    for _, holiday_day in _holiday_dates(day.year):
-        if day == holiday_day:
+    for _, start, end in _holidays(day.year):
+        if start <= day <= end:
             return False
     return True
 
@@ -200,18 +222,13 @@ def _next_workday_start(now: datetime) -> datetime:
 
 
 def _work_target(now: datetime) -> tuple[datetime, str, str, str]:
-    """返回 (目标时间, 标题, 详情, 剩余文案)；放假/周末显示上班倒计时，工作日显示下班倒计时。"""
+    """返回 (目标时间, 标题, 详情, 剩余文案)；放假/周末/下班后显示下一次上班倒计时。"""
     if _is_workday(now.date()):
         target = _offwork_on(now.date())
-        return target, "下班倒计时", f"今天 {target:%H:%M} 下班", _remaining_or_done(target, now)
+        if now < target:
+            return target, "下班倒计时", f"今天 {target:%H:%M} 下班", _remaining(target, now)
     target = _next_workday_start(now)
     return target, "上班倒计时", f"下次上班 {_format_date(target.date())} {target:%H:%M}", _remaining(target, now)
-
-
-def _remaining_or_done(target: datetime, now: datetime) -> str:
-    if now >= target:
-        return "已下班"
-    return _remaining(target, now)
 
 
 def _build_message(now: datetime | None = None) -> str:
@@ -323,6 +340,7 @@ async def _build_image_message() -> MessageSegment | str:
         path = await asyncio.to_thread(_render_card, now)
         return MessageSegment.image("file://" + path)
     except Exception:
+        _logger.warning("倒计时卡片渲染失败，回退文本消息", exc_info=True)
         return _build_message(now)
 
 
@@ -383,13 +401,16 @@ async def daily_holiday_countdown_job():
     try:
         message = await _build_image_message()
     except Exception:
+        _logger.exception("倒计时每日消息构建失败")
         return
     try:
         bot = get_bot()
     except Exception:
+        _logger.warning("倒计时推送时机器人未连接，本次跳过")
         return
     for group_id in groups:
         try:
             await bot.send_group_msg(group_id=group_id, message=message)
         except Exception:
+            _logger.warning("倒计时推送到群 %s 失败", group_id, exc_info=True)
             continue

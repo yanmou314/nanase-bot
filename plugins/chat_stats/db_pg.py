@@ -15,6 +15,7 @@ _pool_lock = asyncio.Lock()
 _writer_task: asyncio.Task | None = None
 _writer_lock = asyncio.Lock()
 _write_queue: asyncio.Queue | None = None
+_closed = False  # 关停后拒绝新建队列/连接池，避免迟到的写入把它们重建出来
 _BATCH_SIZE = 100
 _FLUSH_INTERVAL = 0.5
 _QUEUE_MAX_SIZE = 5000
@@ -36,6 +37,8 @@ def load_dsn() -> str:
 
 async def get_pool() -> AsyncConnectionPool:
     global _pool
+    if _closed:
+        raise RuntimeError("数据库连接池已关闭（进程正在退出）")
     if _pool is None:
         async with _pool_lock:
             if _pool is None:
@@ -62,7 +65,8 @@ async def get_pool() -> AsyncConnectionPool:
 
 @get_driver().on_shutdown
 async def close_pool() -> None:
-    global _pool, _writer_task, _write_queue
+    global _pool, _writer_task, _write_queue, _closed
+    _closed = True
     if _writer_task is not None and _write_queue is not None:
         try:
             await asyncio.wait_for(_write_queue.join(), timeout=10)
@@ -103,12 +107,12 @@ async def _ensure_writer() -> asyncio.Queue:
     return _write_queue
 
 
-async def _write_batch(batch: list[tuple[int, int, str, str]]) -> None:
+async def _write_batch(batch: list[tuple[int, int, str, str, str, int]]) -> None:
     pool = await get_pool()
-    now = datetime.now(_SH)  # day/hour 在 Python 侧按上海时区计算，不依赖数据库时区
+    # day/hour 已在消息接收时（write 调用方）按上海时区算好，重试积压不会把消息记错日期桶
     params = [
-        (group_id, user_id, msg_type, now.date().isoformat(), now.hour, text[:200] or "")
-        for group_id, user_id, msg_type, text in batch
+        (group_id, user_id, msg_type, day, hour, text[:200] or "")
+        for group_id, user_id, msg_type, text, day, hour in batch
     ]
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -146,8 +150,13 @@ async def _write_loop() -> None:
                 # 数据库短暂异常后 shutdown 时 queue.join() 可能永远无法完成。
                 for _ in batch:
                     queue.task_done()
+                # 写循环是队列唯一的消费者：await put() 在队列满时会把自己永久挂死，
+                # 只能用非阻塞回插，插不回去的只能丢弃。
                 for item in batch:
-                    await queue.put(item)
+                    try:
+                        queue.put_nowait(item)
+                    except asyncio.QueueFull:
+                        _logger.warning("消息队列已满，重试消息被丢弃 (group=%s user=%s)", item[0], item[1])
                 await asyncio.sleep(1)
             else:
                 for _ in batch:
@@ -160,8 +169,12 @@ async def _write_loop() -> None:
 
 
 async def write(group_id: int, user_id: int, msg_type: str, text: str) -> None:
+    if _closed:
+        return
     queue = await _ensure_writer()
+    now = datetime.now(_SH)
+    item = (group_id, user_id, msg_type, text, now.date().isoformat(), now.hour)
     try:
-        queue.put_nowait((group_id, user_id, msg_type, text))
+        queue.put_nowait(item)
     except asyncio.QueueFull:
         _logger.warning("消息队列已满，丢弃该条消息 (group=%s user=%s)", group_id, user_id)

@@ -164,6 +164,8 @@ async def handle(bot: Bot, event: GroupDecreaseNoticeEvent):
     uid = event.user_id
     gid = event.group_id
     sub = event.sub_type
+    if sub not in ("leave", "kick"):
+        return  # 未知 sub_type 不弹出记录，避免误丢逗留时长数据
     name = await _get_name(bot, uid)
 
     ts = _pop_join(gid, uid)
@@ -176,7 +178,7 @@ async def handle(bot: Bot, event: GroupDecreaseNoticeEvent):
         if ts is not None:
             msg += f"，在群里待了 {dur}"
         msg += "\n" + random.choice(MESSAGES)
-    elif sub == "kick":
+    else:
         op = "群管理员"
         try:
             info = await bot.get_group_member_info(group_id=gid, user_id=event.operator_id)
@@ -186,11 +188,10 @@ async def handle(bot: Bot, event: GroupDecreaseNoticeEvent):
         msg = f"🔨 {name}（{uid}）被 {op} 移出了群"
         if ts is not None:
             msg += f"，在群里待了 {dur}"
-    else:
-        return
 
     try:
-        await bot.send_group_msg(group_id=gid, message=msg)
+        # MessageSegment.text 包裹：昵称等外部文本不会被解析为 CQ 码（防注入）
+        await bot.send_group_msg(group_id=gid, message=MessageSegment.text(msg))
     except Exception:
         pass
 
@@ -202,7 +203,10 @@ async def handle_welcome(bot: Bot, event: GroupIncreaseNoticeEvent):
     if uid == event.self_id:
         return  # 机器人自己被拉进群，不 @ 自己
     name = await _get_name(bot, uid)
-    msg = Message(MessageSegment.at(uid)) + f" 欢迎 {name} 加入本群！" + chr(10) + f"{random.choice(WELCOME_MESSAGES)}"
+    msg = (
+        Message(MessageSegment.at(uid))
+        + MessageSegment.text(f" 欢迎 {name} 加入本群！\n{random.choice(WELCOME_MESSAGES)}")
+    )
     _record_join(gid, uid)
     try:
         await bot.send_group_msg(group_id=gid, message=msg)

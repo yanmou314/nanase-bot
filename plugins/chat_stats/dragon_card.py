@@ -2,13 +2,15 @@ import asyncio
 import base64
 import html as html_mod
 import os
-from datetime import date
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from nonebot import get_driver
 
-from common import close_http_clients, get_http_client, gradient_background, render_html_to_png
+from common import FONTS, close_http_clients, get_http_client, gradient_background, render_html_to_png
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
+_SH = ZoneInfo("Asia/Shanghai")  # 与数据统计口径保持同一时区，避免海外部署时标题日期错一天
 
 ACCENT = "#D9A94E"
 
@@ -61,7 +63,7 @@ def _render(rows: list, avatars: dict) -> str:
                   base64.b64encode(avatars[uid]).decode() if avatars.get(uid) else None)
         for rank, (uid, name, cnt) in enumerate(rows)
     )
-    today = date.today()
+    today = datetime.now(_SH).date()
     week = "一二三四五六日"[today.weekday()]
 
     html = f"""<!DOCTYPE html>

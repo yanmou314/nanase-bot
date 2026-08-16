@@ -185,7 +185,7 @@ def _render_news_image(day: date, news: list[str], source: str) -> str:
             draw.line([(MARGIN, y - 5), (W - MARGIN, y - 5)], fill=(220, 220, 220), width=2)
 
     draw.line([(MARGIN, H - 40), (W - MARGIN, H - 40)], fill=(220, 220, 220), width=2)
-    draw.text((MARGIN, H - 34), f"来源：{source} · {time.strftime('%H:%M', time.localtime())}", font=font_foot, fill=GRAY)
+    draw.text((MARGIN, H - 34), f"来源：{source} · {datetime.now(_SH):%H:%M}", font=font_foot, fill=GRAY)
 
     os.makedirs(CACHE_DIR, exist_ok=True)
     cleanup_cache(CACHE_DIR, max_age=3 * 24 * 60 * 60)
@@ -274,7 +274,11 @@ async def news_test(event: MessageEvent):
             await news_test_cmd.finish("新闻源获取失败，请稍后再试")
     if not news:
         await news_test_cmd.finish("新闻源返回为空，请稍后再试")
-    path = await asyncio.to_thread(_render_news_image, day, news, source)
+    try:
+        path = await asyncio.to_thread(_render_news_image, day, news, source)
+    except Exception as e:
+        _logger.warning("新闻图片渲染失败: %s", e)
+        await news_test_cmd.finish("新闻图片生成失败，请稍后再试")
     await news_test_cmd.finish(MessageSegment.image("file://" + path))
 
 

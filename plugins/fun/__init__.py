@@ -1,8 +1,11 @@
 import random
-from datetime import date
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from nonebot import on_command
 from nonebot.adapters.onebot.v11 import Message, MessageEvent, MessageSegment
+
+_SH = ZoneInfo("Asia/Shanghai")
 
 luck_cmd = on_command(
     "rp",
@@ -23,7 +26,7 @@ TIERS = [
 
 @luck_cmd.handle()
 async def luck(event: MessageEvent):
-    today = date.today()
+    today = datetime.now(_SH).date()  # 运势按上海时区的日期重置，不受部署机时区影响
     rnd = random.Random(f"{event.user_id}-{today.isoformat()}")
     score = rnd.randint(1, 100)
     for lo, hi, sign, sign_desc, luck_level, luck_desc in TIERS:

@@ -25,7 +25,7 @@ chat_matcher = on_message(rule=to_me(), priority=5, block=True)
 async def _close_shared_http_clients() -> None:
     await close_http_clients()
 _COMMAND_START = tuple(s for s in get_driver().config.command_start if s)
-poke_matcher = on_notice(priority=5, block=True)
+poke_matcher = on_notice(priority=5, block=False)
 
 CFG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 API_URL = "https://opencode.ai/zen/go/v1/chat/completions"
@@ -195,14 +195,15 @@ async def chat(bot: Bot, event: MessageEvent):
     now = time.time()
     if now - _last_chat.get(uid, 0) < _RATE_LIMIT:
         return
-    _last_chat[uid] = now
-    if len(_last_chat) > 5000:  # 防内存增长
-        for k in [k for k, t in _last_chat.items() if now - t > 3600]:
-            _last_chat.pop(k, None)
 
     msg = _clean_msg(event)
     if not msg or (_COMMAND_START and msg.startswith(_COMMAND_START)):
         return
+    # 只有有效消息才消耗冷却窗口，命令/空消息不占用
+    _last_chat[uid] = now
+    if len(_last_chat) > 5000:  # 防内存增长
+        for k in [k for k, t in _last_chat.items() if now - t > 3600]:
+            _last_chat.pop(k, None)
 
     key = _load_key()
     reply = ""
