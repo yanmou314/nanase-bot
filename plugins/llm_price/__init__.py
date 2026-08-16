@@ -33,10 +33,14 @@ CACHE_PATH = os.path.join(CACHE_DIR, "latest.json")
 
 API_URL = "https://models.dev/api.json"
 FETCH_TIMEOUT = 30
-# 服务器直连受限时通过 Clash 访问 models.dev；无代理时自动回退直连。
-HTTP_PROXY = os.getenv("MODELS_DEV_PROXY", "http://127.0.0.1:7890")
+# 服务器直连受限时通过 Clash 访问 models.dev；代理不可用时自动回退直连。
+# 置 MODELS_DEV_PROXY="" 可强制直连。
+HTTP_PROXY = os.getenv("MODELS_DEV_PROXY", "http://127.0.0.1:7890") or None
 TIMEZONE = ZoneInfo("Asia/Shanghai")
-USD_CNY = 7.2
+try:
+    USD_CNY = float(os.getenv("USD_CNY", "7.2"))
+except ValueError:
+    USD_CNY = 7.2
 M_TOKENS = 1_000_000
 
 FONT_REG = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
@@ -106,12 +110,22 @@ def _get_http_client() -> httpx.AsyncClient:
     return _price_client
 
 
+async def _fetch_api_json():
+    """抓取 models.dev api.json；代理不可达时回退直连。"""
+    try:
+        client = _get_http_client()
+        r = await client.get(API_URL, headers={"User-Agent": "Mozilla/5.0"})
+    except (httpx.ProxyError, httpx.ConnectError, httpx.ConnectTimeout) as e:
+        _logger.warning("models.dev 走代理失败（%r），回退直连", e)
+        async with httpx.AsyncClient(timeout=FETCH_TIMEOUT) as direct:
+            r = await direct.get(API_URL, headers={"User-Agent": "Mozilla/5.0"})
+    r.raise_for_status()
+    return r.json()
+
+
 async def fetch_models_dev() -> dict:
     """实时抓取 models.dev，返回 {provider/model: {in_rmb, out_rmb}}。"""
-    client = _get_http_client()
-    r = await client.get(API_URL, headers={"User-Agent": "Mozilla/5.0"})
-    r.raise_for_status()
-    data = r.json()
+    data = await _fetch_api_json()
     out = {}
 
     def number(value):

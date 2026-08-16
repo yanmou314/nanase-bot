@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import json
 import os
 import random
@@ -113,6 +113,34 @@ def _load_key() -> str:
         return ""
 
 
+def get_api_key() -> str:
+    """公开接口：读取当前配置的 api_key（供其他插件复用）。"""
+    return _load_key()
+
+
+async def chat_completion(messages: list, max_tokens: int = 300, timeout: float = 30) -> str:
+    """公开接口：统一 AI 调用入口（自动读 key、受全局并发信号量限制），返回回复文本，失败抛异常。"""
+    key = _load_key()
+    if not key:
+        raise RuntimeError("auto_chat 未配置 api_key")
+    client = _get_http_client()
+    async with _AI_SEM:
+        r = await client.post(
+            API_URL,
+            headers={"Authorization": f"Bearer {key}"},
+            json={
+                "model": MODEL,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "thinking": {"type": "disabled"},  # 关闭思考：防止 token 被思考过程吃光导致空回复
+            },
+            timeout=timeout,
+        )
+    r.raise_for_status()
+    data = r.json()
+    return (data["choices"][0]["message"]["content"] or "").strip()
+
+
 def _clean_msg(event: MessageEvent) -> str:
     msg = event.get_plaintext().strip()
     msg = re.sub(r"\[CQ:at,qq=\d+\]", "", msg)
@@ -141,21 +169,7 @@ async def _ai_reply(key: str, uid: str, gid: str, msg: str) -> str:
     messages = [{"role": "system", "content": SYSTEM}]
     messages.extend(list(mem))
     messages.append({"role": "user", "content": msg})
-    client = _get_http_client()
-    r = await client.post(
-        API_URL,
-        headers={"Authorization": f"Bearer {key}"},
-        json={
-            "model": MODEL,
-            "messages": messages,
-            "max_tokens": 300,
-            "thinking": {"type": "disabled"},  # 关闭思考：防止 token 被思考过程吃光导致空回复
-        },
-        timeout=30,
-    )
-    r.raise_for_status()
-    data = r.json()
-    reply = (data["choices"][0]["message"]["content"] or "").strip()
+    reply = await chat_completion(messages, max_tokens=300)
     mem.append({"role": "user", "content": msg})
     if reply:
         mem.append({"role": "assistant", "content": reply})
@@ -168,21 +182,7 @@ async def _ai_poke_reply(key: str, uid: str, gid: str) -> str:
     messages = [{"role": "system", "content": SYSTEM}]
     messages.extend(list(mem))
     messages.append({"role": "user", "content": "（有人轻轻戳了戳你）"})
-    client = _get_http_client()
-    r = await client.post(
-        API_URL,
-        headers={"Authorization": f"Bearer {key}"},
-        json={
-            "model": MODEL,
-            "messages": messages,
-            "max_tokens": 80,
-            "thinking": {"type": "disabled"},
-        },
-        timeout=30,
-    )
-    r.raise_for_status()
-    data = r.json()
-    reply = (data["choices"][0]["message"]["content"] or "").strip()
+    reply = await chat_completion(messages, max_tokens=80)
     if reply:
         mem.append({"role": "user", "content": "（有人戳了戳你）"})
         mem.append({"role": "assistant", "content": reply})
@@ -208,14 +208,15 @@ async def chat(bot: Bot, event: MessageEvent):
     reply = ""
     if key:
         try:
-            async with _AI_SEM:
-                reply = await _ai_reply(key, uid, str(getattr(event, "group_id", 0)), msg[:200])
+            reply = await _ai_reply(key, uid, str(getattr(event, "group_id", 0)), msg[:200])
         except Exception as e:
             logger.warning(f"auto_chat AI 生成失败（{e!r}），尝试备用源")
             reply = ""
 
     if not reply:
         try:
+            # qingyunke 免费接口不支持 HTTPS（TLS 握手失败），只能明文 HTTP；
+            # 仅发送前 60 字符、严格校验 JSON 结构，回复长度截断。
             client = _get_http_client()
             r = await client.get(
                 "http://api.qingyunke.com/api.php",
@@ -224,15 +225,16 @@ async def chat(bot: Bot, event: MessageEvent):
             )
             r.raise_for_status()
             data = r.json()
-            if data.get("result") == 0:
-                reply = (data.get("content") or "").replace("{br}", "\n").strip()
+            if isinstance(data, dict) and data.get("result") == 0 and isinstance(data.get("content"), str):
+                reply = data["content"].replace("{br}", "\n").strip()[:300]
         except Exception:
             pass
 
     if not reply:
         reply = random.choice(FALLBACKS)
 
-    await chat_matcher.finish(MessageSegment.reply(event.message_id) + reply)
+    # MessageSegment.text 包裹：第三方/AI 返回的文本不会被解析为 CQ 码（防注入）
+    await chat_matcher.finish(MessageSegment.reply(event.message_id) + MessageSegment.text(reply))
 
 
 @poke_matcher.handle()
@@ -250,8 +252,7 @@ async def poke(bot: Bot, event: PokeNotifyEvent):
     if key and now - _last_poke.get(uid, 0) >= _POKE_RATE_LIMIT:
         _last_poke[uid] = now
         try:
-            async with _AI_SEM:
-                reply = await _ai_poke_reply(key, uid, str(getattr(event, "group_id", 0)))
+            reply = await _ai_poke_reply(key, uid, str(getattr(event, "group_id", 0)))
         except Exception as e:
             logger.warning(f"auto_chat 戳一戳 AI 生成失败（{e!r}）")
             reply = ""
@@ -259,8 +260,8 @@ async def poke(bot: Bot, event: PokeNotifyEvent):
         reply = random.choice(POKE_REPLIES)
     try:
         if event.group_id:
-            await bot.send_group_msg(group_id=event.group_id, message=reply)
+            await bot.send_group_msg(group_id=event.group_id, message=MessageSegment.text(reply))
         else:
-            await bot.send_private_msg(user_id=event.user_id, message=reply)
+            await bot.send_private_msg(user_id=event.user_id, message=MessageSegment.text(reply))
     except Exception:
         pass

@@ -314,6 +314,7 @@ async def owner_decision(bot: Bot, event: MessageEvent):
                 await bot.set_group_add_request(flag=flag, sub_type=sub, approve=False)
                 await bot.send_private_msg(user_id=int(OWNER), message=f"❌ 已拒绝进群（群 {val.get('group_id')}）")
     except Exception as e:
+        _pending[target_key] = val  # 处理失败时放回待处理列表，主人可重试
         await bot.send_private_msg(user_id=int(OWNER), message=f"⚠️ 处理失败：{e}")
 
 
