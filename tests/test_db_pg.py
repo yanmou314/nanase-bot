@@ -71,14 +71,57 @@ def _run_writer(db_pg, monkeypatch, items, fail_first=0):
 
 
 def test_write_loop_batches_all_items(monkeypatch):
-    items = [(1, 100, "text", f"m{i}") for i in range(7)]
+    items = [(1, 100, "text", f"m{i}", "2026-08-16", 14) for i in range(7)]
     written = _run_writer(db_pg, monkeypatch, items)
     flat = [m for batch in written for m in batch]
     assert flat == items
 
 
 def test_write_loop_requeues_after_failure(monkeypatch):
-    items = [(1, 100, "text", f"m{i}") for i in range(3)]
+    items = [(1, 100, "text", f"m{i}", "2026-08-16", 14) for i in range(3)]
     written = _run_writer(db_pg, monkeypatch, items, fail_first=1)
     flat = [m for batch in written for m in batch]
     assert flat == items  # 失败批次重试后全部写入，且不丢不重
+
+
+def test_write_loop_requeue_does_not_deadlock_when_full(monkeypatch):
+    """失败批次重入队时队列已满：必须丢弃而不是 await put() 把写循环挂死。"""
+    written = []
+    state = {"fails": 1}
+
+    async def main():
+        q = asyncio.Queue(maxsize=3)
+
+        async def fake_write_batch(batch):
+            if state["fails"] > 0:
+                # 模拟写库期间并发生产者把队列填满，重入队时必然撞上 QueueFull
+                for i in range(3):
+                    q.put_nowait((1, 100, "text", f"extra{i}", "2026-08-16", 14))
+                state["fails"] -= 1
+                raise RuntimeError("db down")
+            written.append(list(batch))
+
+        monkeypatch.setattr(db_pg, "_write_batch", fake_write_batch)
+        monkeypatch.setattr(db_pg, "_FLUSH_INTERVAL", 0.02)
+        db_pg._write_queue = q
+        q.put_nowait((1, 100, "text", "m0", "2026-08-16", 14))
+        task = asyncio.create_task(db_pg._write_loop())
+        try:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 5
+            while sum(len(b) for b in written) < 3:
+                if loop.time() > deadline:
+                    raise TimeoutError("write loop deadlocked on full queue")
+                await asyncio.sleep(0.01)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            db_pg._write_queue = None
+
+    asyncio.run(main())
+    flat = [m for batch in written for m in batch]
+    assert len(flat) == 3  # 队列满时丢弃了 m0，但循环存活并写完后续消息
+    assert "m0" not in [m[3] for m in flat]

@@ -6,9 +6,17 @@ from collections import Counter
 
 from PIL import Image, ImageDraw, ImageFont
 
+from common import FONTS
+
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 
-FONT = "/usr/share/fonts/custom/ZCOOLQingKeHuangYou-Regular.ttf"
+# 字体候选链：首选站酷字体，缺失时依次回退到 common 维护的其他字体，最后用 PIL 默认字体
+FONT_CANDIDATES = (
+    "/usr/share/fonts/custom/ZCOOLQingKeHuangYou-Regular.ttf",
+    FONTS.get("bold"),
+    FONTS.get("noto_reg"),
+    FONTS.get("noto_bold"),
+)
 PALETTE = ["#5858B8", "#6868C8", "#8898C8", "#88A050", "#C83838", "#A84848",
            "#B89838", "#E0B850", "#C8D898", "#E09098"]
 
@@ -16,10 +24,19 @@ _font_cache: dict[int, ImageFont.FreeTypeFont] = {}
 
 
 def _font(size: int) -> ImageFont.FreeTypeFont:
-    """按字号缓存字体对象，避免每个词重复打开字体文件。"""
+    """按字号缓存字体对象，避免每个词重复打开字体文件；全部缺失时回退默认字体。"""
     f = _font_cache.get(size)
     if f is None:
-        f = ImageFont.truetype(FONT, size)
+        for path in FONT_CANDIDATES:
+            if not path:
+                continue
+            try:
+                f = ImageFont.truetype(path, size)
+                break
+            except OSError:
+                continue
+        if f is None:
+            f = ImageFont.load_default()
         _font_cache[size] = f
     return f
 

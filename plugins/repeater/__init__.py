@@ -16,6 +16,8 @@ _track: dict = {}
 _replied_ts: dict = {}
 _replied_fp: dict = {}  # 每个群最近一次已复读的指纹；同一串连续复读只触发一次
 
+_COMMAND_START = tuple(s for s in get_driver().config.command_start if s)
+
 STATE_FILE = os.path.join(os.path.dirname(__file__), "repeater_state.json")
 
 
@@ -99,7 +101,7 @@ def _prune() -> None:
 def _fingerprint(event: GroupMessageEvent):
     segs = list(event.message)
     text = event.get_plaintext().strip()
-    if text and not text.startswith(".") and all(s.type == "text" for s in segs):
+    if text and not (_COMMAND_START and text.startswith(_COMMAND_START)) and all(s.type == "text" for s in segs):
         return ("t", _text_hash(text), text)  # 哈希用于比对，原文仅存内存供复读发送
     if len(segs) == 1 and segs[0].type == "image":
         file_id = segs[0].data.get("file") or segs[0].data.get("url") or ""
@@ -117,7 +119,8 @@ async def repeater(bot: Bot, event: GroupMessageEvent):
 
     deq = _track.setdefault(gid, deque(maxlen=3))
     deq.append(fp)
-    if len(deq) < 3 or not (deq[0] == deq[1] == deq[2]):
+    # 比较只取前两元（类型+哈希），重载后的持久化条目 payload 为空串不影响匹配
+    if len(deq) < 3 or not (deq[0][:2] == deq[1][:2] == deq[2][:2]):
         _replied_fp.pop(gid, None)  # 复读链被打断（出现了不同消息），重置已复读标记
         return
     if fp is None:

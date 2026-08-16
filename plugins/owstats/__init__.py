@@ -5,6 +5,7 @@ import threading
 import time
 from pathlib import Path
 
+import httpx
 from nonebot import get_driver, on_command
 from nonebot.adapters.onebot.v11 import Message, MessageEvent, MessageSegment
 from nonebot.params import CommandArg

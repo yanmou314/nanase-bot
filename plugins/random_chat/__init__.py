@@ -6,7 +6,8 @@ import time
 from collections import deque
 
 from nonebot import get_driver, logger, on_command, on_message
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageSegment
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageSegment
+from nonebot.params import CommandArg
 
 from common import is_owner, load_json_state, save_json_state
 
@@ -117,7 +118,7 @@ async def _generate_reply(gid: int) -> str:
         {"role": "user", "content": f"最近的群聊记录：\n{transcript}"},
     ]
     reply = await mod.chat_completion(messages, max_tokens=120)
-    if not reply or "[SKIP]" in reply:
+    if not reply or reply.strip() == "[SKIP]":
         return ""
     # 去掉 AI 偶尔自带的引号包裹
     if len(reply) >= 2 and reply[0] == reply[-1] and reply[0] in "\"'「」『":
@@ -218,12 +219,12 @@ async def status(event: GroupMessageEvent):
 
 
 @prob_cmd.handle()
-async def set_prob(event: GroupMessageEvent):
+async def set_prob(event: GroupMessageEvent, arg: Message = CommandArg()):
     if not is_owner(event):
         return
-    arg = event.get_plaintext().strip().rstrip("%％")
+    text = arg.extract_plain_text().strip().rstrip("%％")
     try:
-        pct = float(arg)
+        pct = float(text)
     except ValueError:
         await prob_cmd.finish(f"用法：.插话概率 5 （表示 5%），当前 {_state['probability']:.0%}")
     if not 1 <= pct <= 20:

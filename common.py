@@ -91,7 +91,8 @@ def load_json_state(path: str, lock=None) -> dict:
 def save_json_state(path: str, data: dict, lock=None) -> None:
     """原子写 JSON 状态文件（tmp + os.replace），锁由调用方提供或使用公共锁。lock 为 RLock 或 None。"""
     with (lock or _NULL_LOCK):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if os.path.dirname(path):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)

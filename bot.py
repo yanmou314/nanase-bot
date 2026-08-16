@@ -2,10 +2,18 @@ import os
 
 from dotenv import load_dotenv
 
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+_BOT_ROOT = os.path.dirname(os.path.abspath(__file__))
+os.chdir(_BOT_ROOT)
+load_dotenv(os.path.join(_BOT_ROOT, ".env"))
 
 import nonebot
 from nonebot.adapters.onebot.v11 import Adapter as OneBotV11Adapter
+
+_OWNER = os.getenv("QQBOT_OWNER", "")
+if not _OWNER.isdigit():
+    raise RuntimeError(
+        "QQBOT_OWNER 未配置或不是纯数字 QQ 号，请在 .env 中设置后再启动"
+    )
 
 nonebot.init(
     apscheduler_config={
@@ -17,7 +25,7 @@ nonebot.init(
 driver = nonebot.get_driver()
 driver.register_adapter(OneBotV11Adapter)
 
-nonebot.load_from_toml("pyproject.toml")
+nonebot.load_from_toml(os.path.join(_BOT_ROOT, "pyproject.toml"))
 
 if __name__ == "__main__":
     nonebot.run()

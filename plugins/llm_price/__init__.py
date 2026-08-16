@@ -115,7 +115,7 @@ async def _fetch_api_json():
     try:
         client = _get_http_client()
         r = await client.get(API_URL, headers={"User-Agent": "Mozilla/5.0"})
-    except (httpx.ProxyError, httpx.ConnectError, httpx.ConnectTimeout) as e:
+    except (httpx.ProxyError, httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.TimeoutException) as e:
         _logger.warning("models.dev 走代理失败（%r），回退直连", e)
         async with httpx.AsyncClient(timeout=FETCH_TIMEOUT) as direct:
             r = await direct.get(API_URL, headers={"User-Agent": "Mozilla/5.0"})
@@ -346,6 +346,17 @@ async def gen_chart(force: bool):
     ]
     if stale_n:
         lines.append(f"⚠️ 其中 {stale_n} 个模型为缓存价（实时源缺失）")
+
+    # 实时成功时也回写缓存，避免降级数据无限变旧
+    if prices is not None:
+        payload = {
+            "fetched_at": datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+            "source": "models.dev",
+            "usd_cny": USD_CNY,
+            "models": {mid: prices[mid] for mid, *_ in MODELS if mid in prices},
+        }
+        save_cache(payload)
+
     return path, "\n".join(lines)
 
 
@@ -361,5 +372,5 @@ async def handle_price(event: MessageEvent, arg: Message = CommandArg()):
         path, summary = await gen_chart(force)
     except Exception as e:
         _logger.exception("价格图生成失败")
-        await price_cmd.finish(at_prefix(event) + f"❌ 生成失败：{e}")
+        await price_cmd.finish(at_prefix(event) + "❌ 生成失败，请稍后再试")
     await price_cmd.finish(at_prefix(event) + summary + MessageSegment.image("file://" + path))

@@ -12,6 +12,7 @@ from nonebot.adapters.onebot.v11 import (
     FriendRequestEvent,
     GroupRequestEvent,
     MessageEvent,
+    MessageSegment,
 )
 from nonebot.params import CommandArg
 
@@ -51,7 +52,16 @@ def _load_config() -> dict:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
     except Exception:
+        # 文件损坏/读取失败时先备份现场再返回空，防止后续保存把其他群的配置静默清掉
+        backup = f"{CONFIG_FILE}.corrupt-{int(time.time())}"
+        try:
+            os.replace(CONFIG_FILE, backup)
+        except OSError:
+            pass
+        _logger.error("自动通过配置读取失败，原文件已备份为 %s", backup, exc_info=True)
         return {}
 
 
@@ -87,7 +97,7 @@ async def _auto_approve(bot: Bot, event: GroupRequestEvent, comment: str) -> boo
             await bot.set_group_add_request(flag=event.flag, sub_type=event.sub_type, approve=True)
             await bot.send_private_msg(
                 user_id=int(OWNER),
-                message=(
+                message=MessageSegment.text(
                     f"✅ 自动通过进群申请\n"
                     f"🏘 群号：{event.group_id}\n"
                     f"👤 申请人：{event.user_id}（{_now()}）\n"
@@ -98,7 +108,7 @@ async def _auto_approve(bot: Bot, event: GroupRequestEvent, comment: str) -> boo
             return True
         except Exception as e:
             try:
-                await bot.send_private_msg(user_id=int(OWNER), message=f"⚠️ 自动通过失败：{e}")
+                await bot.send_private_msg(user_id=int(OWNER), message=MessageSegment.text(f"⚠️ 自动通过失败：{e}"))
             except Exception:
                 pass
             return False
@@ -192,7 +202,7 @@ async def handle_request(bot: Bot, event):
         if await _auto_approve(bot, event, event.comment or ""):
             return
         # 诊断日志：记录未自动通过时的原始附言（验证问答的回答也在这里），便于排查
-        _logger.info(
+        _logger.debug(
             "加群申请未自动通过: group=%s user=%s sub=%s comment=%r",
             event.group_id, event.user_id, event.sub_type, event.comment,
         )
@@ -235,7 +245,8 @@ async def handle_request(bot: Bot, event):
     else:
         return
     try:
-        await bot.send_private_msg(user_id=int(OWNER), message=msg)
+        # MessageSegment.text 包裹：附言等申请人可控文本不会被解析为 CQ 码（防注入）
+        await bot.send_private_msg(user_id=int(OWNER), message=MessageSegment.text(msg))
     except Exception:
         pass
 
@@ -246,9 +257,9 @@ async def owner_decision(bot: Bot, event: MessageEvent):
     if str(event.user_id) != OWNER or event.message_type != "private":
         return
     text = event.get_plaintext().strip()
-    if text in ("同意", "同意 "):
+    if text == "同意":
         action = True
-    elif text in ("拒绝", "拒绝 "):
+    elif text == "拒绝":
         action = False
     else:
         return
@@ -336,6 +347,6 @@ async def forward_private(bot: Bot, event: MessageEvent):
         f"💬 {text}"
     )
     try:
-        await bot.send_private_msg(user_id=int(OWNER), message=msg)
+        await bot.send_private_msg(user_id=int(OWNER), message=MessageSegment.text(msg))
     except Exception:
         pass
