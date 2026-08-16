@@ -125,7 +125,8 @@ async def repeater(bot: Bot, event: GroupMessageEvent):
     _replied_ts[gid] = time.time()
     try:
         if fp[0] == "t":
-            await bot.send_group_msg(group_id=gid, message=fp[2])
+            # MessageSegment.text 包裹：用户输入的字面 [CQ:...] 不会被解析为真实 CQ 码
+            await bot.send_group_msg(group_id=gid, message=MessageSegment.text(fp[2]))
         else:
             await bot.send_group_msg(group_id=gid, message=MessageSegment.image(fp[2]))
     except Exception:
