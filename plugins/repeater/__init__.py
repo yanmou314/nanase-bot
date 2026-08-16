@@ -14,7 +14,7 @@ rep_matcher = on_message(priority=50, block=False)
 
 _track: dict = {}
 _replied_ts: dict = {}
-COOLDOWN = 300
+_replied_fp: dict = {}  # 每个群最近一次已复读的指纹；同一串连续复读只触发一次
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), "repeater_state.json")
 
@@ -89,6 +89,7 @@ def _prune() -> None:
         if _replied_ts.get(gid, 0) < cutoff:
             _track.pop(gid, None)
             _replied_ts.pop(gid, None)
+            _replied_fp.pop(gid, None)
 
 
 def _fingerprint(event: GroupMessageEvent):
@@ -113,15 +114,15 @@ async def repeater(bot: Bot, event: GroupMessageEvent):
     deq = _track.setdefault(gid, deque(maxlen=3))
     deq.append(fp)
     if len(deq) < 3 or not (deq[0] == deq[1] == deq[2]):
+        _replied_fp.pop(gid, None)  # 复读链被打断（出现了不同消息），重置已复读标记
         return
     if fp is None:
         return
+    if _replied_fp.get(gid) == fp:
+        return  # 同一串连续复读只触发一次
 
-    if time.time() - _replied_ts.get(gid, 0) < COOLDOWN:
-        return
-
+    _replied_fp[gid] = fp
     _replied_ts[gid] = time.time()
-    deq.clear()
     try:
         if fp[0] == "t":
             await bot.send_group_msg(group_id=gid, message=fp[2])

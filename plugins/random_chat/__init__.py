@@ -22,7 +22,6 @@ _COMMAND_START = tuple(s for s in get_driver().config.command_start if s)
 STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
 
 DEFAULT_PROBABILITY = 0.02  # 每条消息 2% 概率插话
-DEFAULT_MIN_INTERVAL = 600  # 同群两次插话最小间隔（秒）
 MIN_BUFFER = 5  # 缓冲至少 5 条消息才考虑插话
 BUFFER_SIZE = 20  # 每群保留最近 20 条消息作为上下文
 MAX_GROUPS = 200  # 最多为多少个群维护缓冲，防内存增长
@@ -30,11 +29,11 @@ MAX_GROUPS = 200  # 最多为多少个群维护缓冲，防内存增长
 _state = {
     "enabled_groups": [],
     "probability": DEFAULT_PROBABILITY,
-    "min_interval": DEFAULT_MIN_INTERVAL,
 }
 
 _buffers: dict[int, deque] = {}  # group_id -> 最近消息文本
 _last_interject: dict[int, float] = {}  # group_id -> 上次插话时间戳
+_inflight: set[int] = set()  # 正在生成插话的群，防止同群并发触发
 
 FALLBACK_LINES = [
     "えっと…ななせ一直在这里看你们聊天哦…（小声）",
@@ -65,10 +64,6 @@ def _load_state() -> None:
     try:
         p = float(data.get("probability", DEFAULT_PROBABILITY))
         _state["probability"] = min(max(p, 0.01), 0.2)
-    except (TypeError, ValueError):
-        pass
-    try:
-        _state["min_interval"] = int(data.get("min_interval", DEFAULT_MIN_INTERVAL))
     except (TypeError, ValueError):
         pass
 
@@ -163,21 +158,22 @@ async def watch(bot: Bot, event: GroupMessageEvent):
     buf = _buffers.get(gid)
     if buf is None or len(buf) < MIN_BUFFER:
         return
-    now = time.time()
-    if now - _last_interject.get(gid, 0) < _state["min_interval"]:
+    if gid in _inflight:  # 上一条插话还在生成中，避免同群并发触发
         return
     if random.random() >= _state["probability"]:
         return
 
-    _last_interject[gid] = now  # 先占位，AI 请求期间的后续消息不再触发
+    _inflight.add(gid)
     try:
         reply = await _generate_reply(gid)
     except Exception as e:
         logger.warning(f"random_chat 群 {gid} AI 生成失败（{e!r}），本次改用语料")
         reply = random.choice(FALLBACK_LINES)
+    finally:
+        _inflight.discard(gid)
     if not reply:
-        _last_interject.pop(gid, None)  # AI 主动沉默不占用冷却
         return
+    _last_interject[gid] = time.time()
     try:
         await bot.send_group_msg(group_id=gid, message=reply)
         logger.info(f"random_chat 群 {gid} 插话：{reply[:50]}")
@@ -197,10 +193,7 @@ async def enable(event: GroupMessageEvent):
         _state["enabled_groups"].append(gid)
     _save_state()
     logger.info(f"random_chat 主人开启群 {gid}")
-    await on_cmd.finish(
-        f"已开启本群随机插话：每条消息 {_state['probability']:.0%} 概率插话，"
-        f"同群冷却 {_state['min_interval'] // 60} 分钟"
-    )
+    await on_cmd.finish(f"已开启本群随机插话：每条消息 {_state['probability']:.0%} 概率插话")
 
 
 @off_cmd.handle()
@@ -235,7 +228,6 @@ async def status(event: GroupMessageEvent):
     await status_cmd.finish(
         f"本群随机插话状态：{enabled}\n"
         f"触发概率：{_state['probability']:.0%}（每条消息）\n"
-        f"同群冷却：{_state['min_interval'] // 60} 分钟\n"
         f"上下文缓冲：{buf_len}/{BUFFER_SIZE} 条\n"
         f"上次插话：{last_desc}\n"
         f"已开启群数：{len(_enabled_set)}"
