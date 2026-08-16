@@ -58,8 +58,9 @@ def _save_state(snapshot: dict | None = None) -> None:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(
                 snapshot or {
-                    # 文本指纹只持久化哈希部分，payload（原文）仅存内存
-                    "track": {str(g): [list(i[:2]) for i in d] for g, d in _track.items()},
+                    # 文本指纹只持久化哈希部分，payload（原文）仅存内存；
+                    # 不可复读消息的指纹为 None，只参与计数不落盘
+                    "track": {str(g): [list(i[:2]) for i in d if i] for g, d in _track.items()},
                     "replied_ts": {str(g): t for g, t in _replied_ts.items()},
                 },
                 f,
@@ -74,12 +75,15 @@ _load_state()
 
 @get_driver().on_shutdown
 async def _save_on_shutdown():
-    # 先在事件循环内做快照，再交给线程写盘，避免线程内迭代时字典被修改
-    snapshot = {
-        "track": {str(g): [list(i[:2]) for i in d] for g, d in _track.items()},
-        "replied_ts": {str(g): t for g, t in _replied_ts.items()},
-    }
-    await asyncio.to_thread(_save_state, snapshot)
+    try:
+        # 先在事件循环内做快照，再交给线程写盘，避免线程内迭代时字典被修改
+        snapshot = {
+            "track": {str(g): [list(i[:2]) for i in d if i] for g, d in _track.items()},
+            "replied_ts": {str(g): t for g, t in _replied_ts.items()},
+        }
+        await asyncio.to_thread(_save_state, snapshot)
+    except Exception:
+        pass  # 关机钩子绝不向上抛异常，避免拖垮 lifespan 导致状态全丢
 
 
 def _prune() -> None:
