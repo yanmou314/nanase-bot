@@ -9,12 +9,13 @@ from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from nonebot import get_bot, get_driver, on_command
+from nonebot import get_bot, on_command
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
+from nonebot.message import run_postprocessor
 from nonebot_plugin_apscheduler import scheduler
 
 from common import gradient_background, is_owner, load_json_state, render_html_to_png, save_json_state
-from plugins.chat_stats.db_pg import exec
+from plugins.chat_stats.db_pg import exec, write_command as db_write_command
 
 _logger = logging.getLogger(__name__)
 _SH = ZoneInfo("Asia/Shanghai")
@@ -33,12 +34,45 @@ stats_on_cmd = on_command("统计开启", priority=5, block=True)
 stats_off_cmd = on_command("统计关闭", priority=5, block=True)
 stats_status_cmd = on_command("统计状态", priority=5, block=True)
 
-_COMMAND_START = tuple(get_driver().config.command_start)
-_CMD_PREFIX = _COMMAND_START[0] if _COMMAND_START else "."
-CMD_LIKE = _CMD_PREFIX + "%"  # 与 .env 的 COMMAND_START 保持一致
-
 _name_cache: OrderedDict = OrderedDict()
 _name_ts: dict = {}
+
+
+def _command_from_matcher(matcher, state: dict) -> str:
+    """从成功运行的 NoneBot 命令响应器中取出实际使用的原始命令。"""
+    rule = getattr(matcher, "rule", None)
+    for checker in getattr(rule, "checkers", ()):
+        call = getattr(checker, "call", None)
+        # 避免依赖 NoneBot 内部类的导入路径；CommandRule 是稳定的类型名。
+        if call is not None and call.__class__.__name__ == "CommandRule":
+            prefix = state.get("_prefix", {})
+            raw_command = prefix.get("raw_command") if isinstance(prefix, dict) else None
+            return str(raw_command).strip() if raw_command else ""
+    return ""
+
+
+@run_postprocessor
+async def _record_successful_command(matcher, event, state, exception=None):
+    """只在命令响应器实际运行成功后记账，未知命令不会进入统计。"""
+    if exception is not None or not hasattr(event, "group_id"):
+        return
+    command = _command_from_matcher(matcher, state)
+    if not command:
+        return
+
+    # 同一条消息若因别名/组合规则命中多个响应器，只记一次。
+    prefix = state.get("_prefix")
+    if not isinstance(prefix, dict):
+        return
+    recorded = prefix.setdefault("_cmd_stats_recorded", set())
+    if command in recorded:
+        return
+    recorded.add(command)
+
+    try:
+        await db_write_command(int(event.group_id), int(event.user_id), command)
+    except Exception:
+        _logger.exception("成功指令写入统计失败：%s", command)
 
 
 def _load_config() -> dict:
@@ -112,20 +146,20 @@ async def _collect(day: str) -> dict:
     summary_rows, command_rows, user_rows = await asyncio.gather(
         exec(
             "SELECT COUNT(*), COUNT(DISTINCT group_id), COUNT(DISTINCT user_id) "
-            "FROM messages WHERE day=%s AND text LIKE %s",
-            (day, CMD_LIKE),
+            "FROM command_usages WHERE day=%s",
+            (day,),
         ),
         exec(
-            "SELECT split_part(trim(text), ' ', 1) AS command, COUNT(*), MIN(id) "
-            "FROM messages WHERE day=%s AND text LIKE %s "
+            "SELECT command, COUNT(*), MIN(id) "
+            "FROM command_usages WHERE day=%s "
             "GROUP BY command ORDER BY COUNT(*) DESC, MIN(id) ASC LIMIT %s",
-            (day, CMD_LIKE, TOP_CMDS),
+            (day, TOP_CMDS),
         ),
         exec(
             "SELECT user_id, COUNT(*), (array_agg(group_id ORDER BY id))[1], MIN(id) "
-            "FROM messages WHERE day=%s AND text LIKE %s "
+            "FROM command_usages WHERE day=%s "
             "GROUP BY user_id ORDER BY COUNT(*) DESC, MIN(id) ASC LIMIT %s",
-            (day, CMD_LIKE, TOP_USERS),
+            (day, TOP_USERS),
         ),
     )
     total, groups, users = summary_rows[0] if summary_rows else (0, 0, 0)
@@ -192,8 +226,9 @@ def _row_html(rank: int, name: str, cnt: int, max_cnt: int, color: str) -> str:
 def _render(day_label: str, data: dict) -> str:
     cmds = data["cmds"]
     users_named = data["users_named"]
-    cmd_h = len(cmds) * 66 if cmds else 80
-    user_h = len(users_named) * 66 if users_named else 0
+    # 每行实际高度大于原先估算的 66px；估算过小会把 TOP2 的第二行裁出图片。
+    cmd_h = len(cmds) * 90 if cmds else 80
+    user_h = len(users_named) * 90 if users_named else 80
     w, h = 900, 380 + cmd_h + user_h
     bg = gradient_background(w, h)
     max_cmd = max((c for _, c in cmds), default=0) or 1

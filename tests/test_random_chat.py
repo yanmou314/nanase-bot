@@ -17,6 +17,18 @@ def test_record_buffer_format_and_maxlen():
     assert buf[0] == "u10: msg10"
 
 
+def test_context_is_shared_by_group_members():
+    mod = random_chat
+    mod._buffers.clear()
+    mod._record(222, "alice", "来自 alice")
+    mod._record(222, "bob", "来自 bob")
+    mod._record(333, "other", "另一个群")
+
+    assert list(mod._buffers[222]) == ["alice: 来自 alice", "bob: 来自 bob"]
+    assert list(mod._buffers[333]) == ["other: 另一个群"]
+    assert mod._buffers[222].maxlen == mod.GROUP_CONTEXT_SIZE == 20
+
+
 def test_record_evicts_beyond_max_groups(monkeypatch):
     mod = random_chat
     monkeypatch.setattr(mod, "MAX_GROUPS", 2)

@@ -44,6 +44,34 @@ def test_get_memory_maxlen():
     assert mem[-1]["content"] == "29"
 
 
+def test_group_memory_key_is_shared_but_private_memory_isolated():
+    mod = auto_chat
+    assert mod._memory_key("123", "alice") == ("group", "123")
+    assert mod._memory_key("123", "bob") == ("group", "123")
+    assert mod._memory_key("0", "alice") == ("private", "alice")
+    assert mod._memory_key("0", "bob") == ("private", "bob")
+
+
+def test_ai_reply_uses_shared_group_memory(monkeypatch):
+    mod = auto_chat
+    calls = []
+
+    async def fake_completion(messages, max_tokens=300, timeout=30):
+        calls.append(messages)
+        return "收到啦"
+
+    monkeypatch.setattr(mod, "chat_completion", fake_completion)
+    mod._memory.clear()
+    mod._memory_last_seen.clear()
+
+    asyncio.run(mod._ai_reply("key", "alice", "123", "第一句话"))
+    asyncio.run(mod._ai_reply("key", "bob", "123", "第二句话"))
+
+    assert any(m["content"] == "第一句话" for m in calls[1])
+    assert ("group", "123") in mod._memory
+    assert ("123", "alice") not in mod._memory
+
+
 def test_get_memory_ttl_eviction():
     mod = auto_chat
     mod._get_memory(("g2", "u2"))  # 建立条目

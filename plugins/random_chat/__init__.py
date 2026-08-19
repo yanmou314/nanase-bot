@@ -24,7 +24,8 @@ STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
 
 DEFAULT_PROBABILITY = 0.02  # 每条消息 2% 概率插话
 MIN_BUFFER = 5  # 缓冲至少 5 条消息才考虑插话
-BUFFER_SIZE = 20  # 每群保留最近 20 条消息作为上下文
+GROUP_CONTEXT_SIZE = 20  # 每个群共同保留最近 20 条消息作为上下文
+BUFFER_SIZE = GROUP_CONTEXT_SIZE  # 保留旧名称，便于状态查询和已有测试复用
 MAX_GROUPS = 200  # 最多为多少个群维护缓冲，防内存增长
 
 _state = {
@@ -86,12 +87,13 @@ def _is_enabled(gid: int) -> bool:
 
 
 def _record(gid: int, sender: str, text: str) -> None:
+    """把消息写入群级上下文；同一群所有成员共享这一条 20 条消息队列。"""
     buf = _buffers.get(gid)
     if buf is None:
         if len(_buffers) >= MAX_GROUPS:
             stale = min(_buffers, key=lambda g: _last_interject.get(g, 0))
             _buffers.pop(stale, None)
-        buf = _buffers[gid] = deque(maxlen=BUFFER_SIZE)
+        buf = _buffers[gid] = deque(maxlen=GROUP_CONTEXT_SIZE)
     buf.append(f"{sender}: {text}")
 
 
@@ -212,7 +214,7 @@ async def status(event: GroupMessageEvent):
     await status_cmd.finish(
         f"本群随机插话状态：{enabled}\n"
         f"触发概率：{_state['probability']:.0%}（每条消息）\n"
-        f"上下文缓冲：{buf_len}/{BUFFER_SIZE} 条\n"
+        f"群共同上下文：{buf_len}/{GROUP_CONTEXT_SIZE} 条\n"
         f"上次插话：{last_desc}\n"
         f"已开启群数：{len(_enabled_set)}"
     )

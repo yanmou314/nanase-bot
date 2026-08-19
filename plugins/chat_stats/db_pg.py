@@ -59,6 +59,23 @@ async def get_pool() -> AsyncConnectionPool:
                     await conn.execute("CREATE INDEX IF NOT EXISTS idx_day ON messages(day)")
                     await conn.execute("CREATE INDEX IF NOT EXISTS idx_gday ON messages(group_id, day)")
                     await conn.execute("CREATE INDEX IF NOT EXISTS idx_guday ON messages(group_id, user_id, day)")
+                    await conn.execute(
+                        """CREATE TABLE IF NOT EXISTS command_usages (
+                            id BIGSERIAL PRIMARY KEY,
+                            group_id BIGINT NOT NULL,
+                            user_id BIGINT NOT NULL,
+                            day DATE NOT NULL,
+                            hour INT NOT NULL,
+                            command TEXT NOT NULL
+                        )"""
+                    )
+                    await conn.execute("CREATE INDEX IF NOT EXISTS idx_cmd_day ON command_usages(day)")
+                    await conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_cmd_gday ON command_usages(group_id, day)"
+                    )
+                    await conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_cmd_uday ON command_usages(user_id, day)"
+                    )
                     await conn.commit()
     return _pool
 
@@ -178,3 +195,18 @@ async def write(group_id: int, user_id: int, msg_type: str, text: str) -> None:
         queue.put_nowait(item)
     except asyncio.QueueFull:
         _logger.warning("消息队列已满，丢弃该条消息 (group=%s user=%s)", group_id, user_id)
+
+
+async def write_command(group_id: int, user_id: int, command: str) -> None:
+    """记录一个已经通过 NoneBot 命令匹配并执行的群指令。"""
+    if _closed:
+        return
+    pool = await get_pool()
+    now = datetime.now(_SH)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO command_usages(group_id, user_id, day, hour, command) "
+            "VALUES(%s, %s, %s, %s, %s)",
+            (group_id, user_id, now.date().isoformat(), now.hour, command[:100]),
+        )
+        await conn.commit()

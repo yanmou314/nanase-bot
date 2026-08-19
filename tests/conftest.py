@@ -147,6 +147,10 @@ def _install_stubs():
     nb.on_command = lambda *a, **k: _Matcher()
     nb.on_notice = lambda *a, **k: _Matcher()
     nb.on_request = lambda *a, **k: _Matcher()
+    nb.run_postprocessor = lambda fn: fn
+
+    message_mod = types.ModuleType("nonebot.message")
+    message_mod.run_postprocessor = lambda fn: fn
 
     adapters = types.ModuleType("nonebot.adapters")
     adapters.__path__ = []
@@ -189,6 +193,7 @@ def _install_stubs():
         "nonebot.adapters.onebot.v11": v11,
         "nonebot.rule": rule,
         "nonebot.params": params_mod,
+        "nonebot.message": message_mod,
         "nonebot_plugin_apscheduler": aps,
         "psycopg_pool": psycopg_pool,
     }.items():
