@@ -29,7 +29,7 @@ poke_matcher = on_notice(priority=5, block=False)
 
 CFG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 API_URL = "https://opencode.ai/zen/go/v1/chat/completions"
-MODEL = "deepseek-v4-flash"
+MODEL = "mimo-v2.5"
 
 SYSTEM = (
     "现在你是西野七濑（ななせまる），乃木坂46一期生、现役偶像，大阪出身。"
@@ -51,7 +51,8 @@ _RATE_LIMIT = 3  # 每用户 3 秒冷却
 _last_poke: dict[str, float] = {}
 _POKE_RATE_LIMIT = 5  # 每用户 5 秒冷却，防止连戳刷 AI 请求
 _AI_SEM = asyncio.Semaphore(3)  # 最多 3 个并发 AI 请求
-_memory: dict = defaultdict(lambda: deque(maxlen=20))
+MEMORY_SIZE = 20
+_memory: dict = defaultdict(lambda: deque(maxlen=MEMORY_SIZE))
 _memory_last_seen: dict = {}
 _MEMORY_MAX_KEYS = 500
 _MEMORY_TTL = 24 * 60 * 60
@@ -148,7 +149,7 @@ def _clean_msg(event: MessageEvent) -> str:
 
 
 def _get_memory(key_id) -> deque:
-    """取（群, 用户）的对话记忆，自动清理超时与超量条目。"""
+    """取一份对话记忆，自动清理超时与超量条目。"""
     now = time.time()
     if key_id not in _memory:
         if len(_memory) >= _MEMORY_MAX_KEYS:
@@ -164,8 +165,13 @@ def _get_memory(key_id) -> deque:
     return _memory[key_id]
 
 
+def _memory_key(gid: str, uid: str) -> tuple[str, str]:
+    """群聊按群共享上下文，私聊仍按用户隔离。"""
+    return ("group", gid) if gid and gid != "0" else ("private", uid)
+
+
 async def _ai_reply(key: str, uid: str, gid: str, msg: str) -> str:
-    mem = _get_memory((gid, uid))
+    mem = _get_memory(_memory_key(gid, uid))
     messages = [{"role": "system", "content": SYSTEM}]
     messages.extend(list(mem))
     messages.append({"role": "user", "content": msg})
@@ -177,8 +183,8 @@ async def _ai_reply(key: str, uid: str, gid: str, msg: str) -> str:
 
 
 async def _ai_poke_reply(key: str, uid: str, gid: str) -> str:
-    """戳一戳的 AI 回复：结合该用户最近的对话上下文，以人设回应被戳。"""
-    mem = _get_memory((gid, uid))
+    """戳一戳的 AI 回复：结合群级/私聊级上下文，以人设回应被戳。"""
+    mem = _get_memory(_memory_key(gid, uid))
     messages = [{"role": "system", "content": SYSTEM}]
     messages.extend(list(mem))
     messages.append({"role": "user", "content": "（有人轻轻戳了戳你）"})
@@ -209,7 +215,9 @@ async def chat(bot: Bot, event: MessageEvent):
     reply = ""
     if key:
         try:
-            reply = await _ai_reply(key, uid, str(getattr(event, "group_id", 0)), msg[:200])
+            reply = await _ai_reply(
+                key, uid, str(getattr(event, "group_id", 0) or 0), msg[:200]
+            )
         except Exception as e:
             logger.warning(f"auto_chat AI 生成失败（{e!r}），尝试备用源")
             reply = ""
