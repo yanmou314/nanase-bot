@@ -119,11 +119,17 @@ async def repeater(bot: Bot, event: GroupMessageEvent):
 
     deq = _track.setdefault(gid, deque(maxlen=3))
     deq.append(fp)
-    # 比较只取前两元（类型+哈希），重载后的持久化条目 payload 为空串不影响匹配
-    if len(deq) < 3 or not (deq[0][:2] == deq[1][:2] == deq[2][:2]):
+    # 比较只取前两元（类型+哈希）；None（@、表情、混合内容等不可复读消息）
+    # 参与计数但会打断复读链，且比较前必须判空，否则 None[:2] 直接 TypeError
+    if (
+        len(deq) < 3
+        or deq[0] is None
+        or deq[1] is None
+        or deq[2] is None
+        or deq[0][:2] != deq[1][:2]
+        or deq[1][:2] != deq[2][:2]
+    ):
         _replied_fp.pop(gid, None)  # 复读链被打断（出现了不同消息），重置已复读标记
-        return
-    if fp is None:
         return
     if _replied_fp.get(gid) == fp:
         return  # 同一串连续复读只触发一次

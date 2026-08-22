@@ -11,6 +11,7 @@ from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import (
     FriendRequestEvent,
     GroupRequestEvent,
+    GroupMessageEvent,
     MessageEvent,
     MessageSegment,
 )
@@ -22,6 +23,25 @@ _logger = logging.getLogger(__name__)
 
 request_matcher = on_request(priority=1, block=False)
 private_matcher = on_message(priority=20, block=False)
+
+
+async def _owner_decision_rule(event: MessageEvent) -> bool:
+    """主人的纯「同意/拒绝」审批指令：
+
+    priority=1 + block=True，抢在 auto_chat 等聊天插件之前。
+    群内（无需@）和私聊均始终识别，反馈只私发给主人、不在群里回话，
+    避免审批操作被聊天插件当成聊天公开回复。
+    """
+    if str(event.user_id) != OWNER:
+        return False
+    return event.get_plaintext().strip() in {"同意", "拒绝"}
+
+
+decision_matcher = on_message(
+    rule=_owner_decision_rule,
+    priority=1,
+    block=True,
+)
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "auto_approve.json")
 
@@ -216,7 +236,7 @@ async def handle_request(bot: Bot, event):
             f"🏘 群号：{event.group_id}\n"
             f"👤 申请人：{event.user_id}（{ts}）\n"
             f"💬 附言：{event.comment or '无'}\n"
-            f"回复「同意」或「拒绝」处理"
+            f"✍️ 群里直接回复「同意」或「拒绝」即可处理（无需@机器人，结果将私聊发给你），私聊回复也可以"
         )
     elif isinstance(event, FriendRequestEvent):
         _pending[event.flag] = {
@@ -227,7 +247,7 @@ async def handle_request(bot: Bot, event):
             f"🔔 好友申请\n"
             f"👤 申请人：{event.user_id}（{ts}）\n"
             f"💬 验证消息：{event.comment or '无'}\n"
-            f"回复「同意」或「拒绝」处理"
+            f"✍️ 私聊回复「同意」或「拒绝」即可处理"
         )
     elif isinstance(event, GroupRequestEvent) and event.sub_type == "invite":
         _pending[event.flag] = {
@@ -240,7 +260,7 @@ async def handle_request(bot: Bot, event):
             f"🏘 群号：{event.group_id}\n"
             f"👤 邀请人：{event.user_id}（{ts}）\n"
             f"💬 附言：{event.comment or '无'}\n"
-            f"回复「同意」或「拒绝」处理"
+            f"✍️ 群里直接回复「同意」或「拒绝」即可处理（无需@机器人，结果将私聊发给你），私聊回复也可以"
         )
     else:
         return
@@ -252,59 +272,77 @@ async def handle_request(bot: Bot, event):
 
 
 # ---------------- 主人回复 同意/拒绝 ----------------
-@private_matcher.handle()
-async def owner_decision(bot: Bot, event: MessageEvent):
-    if str(event.user_id) != OWNER or event.message_type != "private":
-        return
-    text = event.get_plaintext().strip()
-    if text == "同意":
-        action = True
-    elif text == "拒绝":
-        action = False
-    else:
-        return
+async def _send_decision_notice(bot: Bot, message: str) -> None:
+    """审批结果是管理操作反馈，只私发给主人，不在群里公开。"""
+    await bot.send_private_msg(
+        user_id=int(OWNER),
+        message=MessageSegment.text(message),
+    )
+
+
+async def _process_decision(bot: Bot, event: MessageEvent, action: bool) -> None:
     _purge_pending()
     if not _pending:
-        await bot.send_private_msg(user_id=int(OWNER), message="📭 当前没有待处理的申请")
+        await _send_decision_notice(bot, "📭 当前没有待处理的申请")
         return
 
     target_key = None
-    reply_id = None
-    for seg in event.message:
-        if seg.type == "reply":
-            reply_id = seg.data.get("id")
-            break
-    if reply_id:
-        try:
-            info = await bot.get_msg(message_id=int(reply_id))
-            quoted = str(info.get("raw_message") or "")
-            m = re.search(r"申请人[:：](\d+)", quoted)
-            if m:
-                uid = m.group(1)
-                for k, v in _pending.items():
-                    if v["kind"] == "friend" and str(v.get("user_id")) == uid:
-                        target_key = k
-                        break
-            if target_key is None:
-                m = re.search(r"群号[:：](\d+)", quoted)
-                if m:
-                    gid = int(m.group(1))
-                    for k, v in _pending.items():
-                        if v["kind"] == "group" and v.get("group_id") == gid:
-                            target_key = k
-                            break
-        except Exception:
-            pass
 
-    if target_key is None:
-        if len(_pending) == 1:
-            target_key = next(iter(_pending))
-        else:
-            await bot.send_private_msg(
-                user_id=int(OWNER),
-                message="⚠️ 有多个待处理申请，请回复时引用对应的通知消息来指定处理哪一个",
+    if isinstance(event, GroupMessageEvent):
+        # 群内操作只允许处理当前群的进群/邀请申请，不能误操作其他群或好友申请。
+        candidates = [
+            (key, value)
+            for key, value in _pending.items()
+            if value.get("kind") == "group"
+            and value.get("group_id") == event.group_id
+        ]
+        if not candidates:
+            await _send_decision_notice(bot, "📭 当前群没有待处理的进群申请")
+            return
+        if len(candidates) > 1:
+            await _send_decision_notice(
+                bot,
+                "⚠️ 当前群有多个待处理申请，请到私聊引用对应的申请通知消息来指定处理哪一个",
             )
             return
+        target_key = candidates[0][0]
+    else:
+        reply_id = None
+        for seg in event.message:
+            if seg.type == "reply":
+                reply_id = seg.data.get("id")
+                break
+        if reply_id:
+            try:
+                info = await bot.get_msg(message_id=int(reply_id))
+                quoted = str(info.get("raw_message") or "")
+                m = re.search(r"申请人[:：](\d+)", quoted)
+                if m:
+                    uid = m.group(1)
+                    for k, v in _pending.items():
+                        if v["kind"] == "friend" and str(v.get("user_id")) == uid:
+                            target_key = k
+                            break
+                if target_key is None:
+                    m = re.search(r"群号[:：](\d+)", quoted)
+                    if m:
+                        gid = int(m.group(1))
+                        for k, v in _pending.items():
+                            if v["kind"] == "group" and v.get("group_id") == gid:
+                                target_key = k
+                                break
+            except Exception:
+                pass
+
+        if target_key is None:
+            if len(_pending) == 1:
+                target_key = next(iter(_pending))
+            else:
+                await _send_decision_notice(
+                    bot,
+                    "⚠️ 有多个待处理申请，请回复时引用对应的通知消息来指定处理哪一个",
+                )
+                return
 
     val = _pending.pop(target_key)
     kind, flag = val["kind"], val["flag"]
@@ -312,21 +350,29 @@ async def owner_decision(bot: Bot, event: MessageEvent):
         if kind == "friend":
             if action:
                 await bot.set_friend_add_request(flag=flag, approve=True, remark="")
-                await bot.send_private_msg(user_id=int(OWNER), message=f"✅ 已同意好友申请（QQ {val.get('user_id')}）")
+                message = f"✅ 已通过好友申请（QQ {val.get('user_id')}）"
             else:
                 await bot.set_friend_add_request(flag=flag, approve=False)
-                await bot.send_private_msg(user_id=int(OWNER), message=f"❌ 已拒绝好友申请（QQ {val.get('user_id')}）")
+                message = f"❌ 已拒绝好友申请（QQ {val.get('user_id')}）"
         else:
             sub = val["sub_type"]  # 使用真实 sub_type，add 申请不再错误地以 invite 处理
+            who = "邀请人" if sub == "invite" else "申请人"
             if action:
                 await bot.set_group_add_request(flag=flag, sub_type=sub, approve=True)
-                await bot.send_private_msg(user_id=int(OWNER), message=f"✅ 已同意进群（群 {val.get('group_id')}）")
+                message = f"✅ 已通过进群申请\n🏘 群号：{val.get('group_id')}\n👤 {who}：{val.get('user_id')}"
             else:
                 await bot.set_group_add_request(flag=flag, sub_type=sub, approve=False)
-                await bot.send_private_msg(user_id=int(OWNER), message=f"❌ 已拒绝进群（群 {val.get('group_id')}）")
+                message = f"❌ 已拒绝进群申请\n🏘 群号：{val.get('group_id')}\n👤 {who}：{val.get('user_id')}"
+        await _send_decision_notice(bot, message)
     except Exception as e:
         _pending[target_key] = val  # 处理失败时放回待处理列表，主人可重试
-        await bot.send_private_msg(user_id=int(OWNER), message=f"⚠️ 处理失败：{e}")
+        await _send_decision_notice(bot, f"⚠️ 处理失败：{e}")
+
+
+@decision_matcher.handle()
+async def owner_decision(bot: Bot, event: MessageEvent):
+    text = event.get_plaintext().strip()
+    await _process_decision(bot, event, text == "同意")
 
 
 # ---------------- 私聊消息转发 ----------------
