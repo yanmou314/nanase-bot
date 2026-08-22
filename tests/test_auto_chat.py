@@ -72,6 +72,106 @@ def test_ai_reply_uses_shared_group_memory(monkeypatch):
     assert ("123", "alice") not in mod._memory
 
 
+class _Sender:
+    def __init__(self, card=None, nickname=None):
+        self.card = card
+        self.nickname = nickname
+
+
+def test_sender_name_prefers_card_then_nickname_then_qq():
+    mod = auto_chat
+    ev = MessageEvent(plain="hi", user_id=123, sender=_Sender(card=" 小明 ", nickname="笨蛋明"))
+    assert mod._sender_name(ev) == "小明"
+    ev2 = MessageEvent(plain="hi", user_id=123, sender=_Sender(card="", nickname="笨蛋明"))
+    assert mod._sender_name(ev2) == "笨蛋明"
+    ev3 = MessageEvent(plain="hi", user_id=123, sender=_Sender())
+    assert mod._sender_name(ev3) == "123"
+    ev4 = MessageEvent(plain="hi", user_id=123)
+    assert mod._sender_name(ev4) == "123"
+
+
+def test_ai_reply_prefixes_sender_in_group_context(monkeypatch):
+    mod = auto_chat
+    calls = []
+
+    async def fake_completion(messages, max_tokens=300, timeout=30):
+        calls.append(messages)
+        return "收到啦"
+
+    monkeypatch.setattr(mod, "chat_completion", fake_completion)
+    mod._memory.clear()
+    mod._memory_last_seen.clear()
+
+    asyncio.run(mod._ai_reply("key", "alice", "123", "第一句话", "小明"))
+    asyncio.run(mod._ai_reply("key", "bob", "123", "第二句话", "小红"))
+
+    # 发给 AI 的最新一条消息带发言人前缀
+    assert calls[0][-1]["content"] == "小明: 第一句话"
+    assert calls[1][-1]["content"] == "小红: 第二句话"
+    # 历史上下文保留了不同人的发言，AI 能分清多说话人
+    assert any(m["content"] == "小明: 第一句话" for m in calls[1])
+    assert any(m["content"] == "小红: 第二句话" for m in mod._memory[("group", "123")])
+
+
+def test_ai_reply_private_chat_has_no_prefix(monkeypatch):
+    mod = auto_chat
+    calls = []
+
+    async def fake_completion(messages, max_tokens=300, timeout=30):
+        calls.append(messages)
+        return "嗯嗯"
+
+    monkeypatch.setattr(mod, "chat_completion", fake_completion)
+    mod._memory.clear()
+    mod._memory_last_seen.clear()
+
+    asyncio.run(mod._ai_reply("key", "alice", "0", "私聊内容", ""))
+
+    assert calls[0][-1]["content"] == "私聊内容"
+
+
+def test_ai_poke_reply_includes_sender_name(monkeypatch):
+    mod = auto_chat
+    calls = []
+
+    async def fake_completion(messages, max_tokens=300, timeout=30):
+        calls.append(messages)
+        return "呀！"
+
+    monkeypatch.setattr(mod, "chat_completion", fake_completion)
+    mod._memory.clear()
+    mod._memory_last_seen.clear()
+
+    asyncio.run(mod._ai_poke_reply("key", "42", "0", "小明"))
+
+    assert "小明" in calls[0][-1]["content"]
+    mem = list(mod._memory[("private", "42")])
+    assert any("小明" in m["content"] for m in mem)
+
+
+def test_sender_name_by_id_fetch_and_fallback():
+    class _Bot:
+        async def get_group_member_info(self, group_id=None, user_id=None):
+            return {"card": "群名片", "nickname": "昵称"}
+
+        async def get_stranger_info(self, user_id=None):
+            return {"card": "", "nickname": "陌生人昵称"}
+
+    class _BadBot:
+        async def get_stranger_info(self, user_id=None):
+            raise RuntimeError("boom")
+
+    mod = auto_chat
+    assert asyncio.run(mod._sender_name_by_id(_Bot(), 1, 99)) == "群名片"
+    assert asyncio.run(mod._sender_name_by_id(_Bot(), 1, 0)) == "陌生人昵称"
+    assert asyncio.run(mod._sender_name_by_id(_BadBot(), 7, 0)) == "7"
+
+
+def test_system_prompt_documents_multi_speaker_format():
+    assert "昵称: 内容" in auto_chat.SYSTEM
+    assert "不同昵称代表不同的群友" in auto_chat.SYSTEM
+
+
 def test_get_memory_ttl_eviction():
     mod = auto_chat
     mod._get_memory(("g2", "u2"))  # 建立条目

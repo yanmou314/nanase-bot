@@ -42,6 +42,8 @@ SYSTEM = (
     "  禁止整段使用日文，禁止使用日语句法或日语句尾；日语只能作为极少量语气词，\n"
     "  每次最多使用 1～2 个（如「えへへ」「うん」「そうそう」）。即使用户用日语提问，\n"
     "  也默认用简体中文回答，只有用户明确要求「请用日语回答」时才使用日语。\n"
+    "· 【群聊多说话人】群聊中用户消息格式为「昵称: 内容」，不同昵称代表不同的群友；"
+    "  请分清每句话是谁说的，回应时可以点名具体某个人，不要把多个人的话当成同一个人说的\n"
     "· 自称「ななせ」或「我」\n"
     "· 爱好画画、漫画、游戏（怪物猎人）、吃肉和甜食；怕鬼怕高怕虫子，胆小爱哭\n"
     "· 被问不懂的事会坦诚说不懂，从不装懂\n"
@@ -154,6 +156,27 @@ def _clean_msg(event: MessageEvent) -> str:
     return msg.strip()
 
 
+def _sender_name(event: MessageEvent) -> str:
+    """取发言人显示名：群名片 > 昵称 > QQ 号；截断 20 字防撑爆上下文。"""
+    sender = getattr(event, "sender", None)
+    card = (getattr(sender, "card", "") or "").strip() if sender else ""
+    nick = (getattr(sender, "nickname", "") or "").strip() if sender else ""
+    return ((card or nick) or str(event.user_id))[:20]
+
+
+async def _sender_name_by_id(bot: Bot, uid: int, gid: int) -> str:
+    """按 QQ 号查显示名（群名片 > 昵称 > QQ 号），供通知类事件使用；查询失败退回 QQ 号。"""
+    try:
+        if gid:
+            info = await bot.get_group_member_info(group_id=gid, user_id=uid)
+        else:
+            info = await bot.get_stranger_info(user_id=uid)
+        name = ((info.get("card") or info.get("nickname") or "") if isinstance(info, dict) else "").strip()
+        return (name or str(uid))[:20]
+    except Exception:
+        return str(uid)
+
+
 def _get_memory(key_id) -> deque:
     """取一份对话记忆，自动清理超时与超量条目。"""
     now = time.time()
@@ -176,27 +199,29 @@ def _memory_key(gid: str, uid: str) -> tuple[str, str]:
     return ("group", gid) if gid and gid != "0" else ("private", uid)
 
 
-async def _ai_reply(key: str, uid: str, gid: str, msg: str) -> str:
+async def _ai_reply(key: str, uid: str, gid: str, msg: str, sender: str = "") -> str:
+    """群聊时 sender 非空，消息以「昵称: 内容」进入上下文，让 AI 分清多说话人。"""
     mem = _get_memory(_memory_key(gid, uid))
+    content = f"{sender}: {msg}" if sender else msg
     messages = [{"role": "system", "content": SYSTEM}]
     messages.extend(list(mem))
-    messages.append({"role": "user", "content": msg})
+    messages.append({"role": "user", "content": content})
     reply = await chat_completion(messages, max_tokens=300)
-    mem.append({"role": "user", "content": msg})
+    mem.append({"role": "user", "content": content})
     if reply:
         mem.append({"role": "assistant", "content": reply})
     return reply
 
 
-async def _ai_poke_reply(key: str, uid: str, gid: str) -> str:
-    """戳一戳的 AI 回复：结合群级/私聊级上下文，以人设回应被戳。"""
+async def _ai_poke_reply(key: str, uid: str, gid: str, sender: str) -> str:
+    """戳一戳的 AI 回复：结合群级/私聊级上下文，以人设回应被戳（带戳的人的昵称）。"""
     mem = _get_memory(_memory_key(gid, uid))
     messages = [{"role": "system", "content": SYSTEM}]
     messages.extend(list(mem))
-    messages.append({"role": "user", "content": "（有人轻轻戳了戳你）"})
+    messages.append({"role": "user", "content": f"（{sender}轻轻戳了戳你）"})
     reply = await chat_completion(messages, max_tokens=80)
     if reply:
-        mem.append({"role": "user", "content": "（有人戳了戳你）"})
+        mem.append({"role": "user", "content": f"（{sender}戳了戳你）"})
         mem.append({"role": "assistant", "content": reply})
     return reply
 
@@ -240,11 +265,12 @@ async def chat(bot: Bot, event: MessageEvent):
 
     key = _load_key()
     reply = ""
+    gid = str(getattr(event, "group_id", 0) or 0)
     if key:
         try:
-            reply = await _ai_reply(
-                key, uid, str(getattr(event, "group_id", 0) or 0), msg[:200]
-            )
+            # 群聊时把发言人昵称拼进上下文；私聊本来就一对一，无需前缀
+            sender = _sender_name(event) if gid and gid != "0" else ""
+            reply = await _ai_reply(key, uid, gid, msg[:200], sender)
         except httpx.ReadTimeout as e:
             logger.warning(f"auto_chat AI 请求超时（{e!r}），尝试备用源")
             await _notify_owner_timeout(bot)
@@ -289,10 +315,12 @@ async def poke(bot: Bot, event: PokeNotifyEvent):
             _last_poke.pop(k, None)
     reply = ""
     key = _load_key()
+    gid = str(event.group_id or 0)
     if key and now - _last_poke.get(uid, 0) >= _POKE_RATE_LIMIT:
         _last_poke[uid] = now
         try:
-            reply = await _ai_poke_reply(key, uid, str(getattr(event, "group_id", 0)))
+            sender = await _sender_name_by_id(bot, event.user_id, event.group_id or 0)
+            reply = await _ai_poke_reply(key, uid, gid, sender)
         except Exception as e:
             logger.warning(f"auto_chat 戳一戳 AI 生成失败（{e!r}）")
             reply = ""
