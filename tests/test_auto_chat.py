@@ -148,3 +148,34 @@ def test_chat_completion_ok(monkeypatch):
     assert call["json"]["model"] == mod.MODEL
     assert call["json"]["max_tokens"] == 77
     assert call["json"]["thinking"] == {"type": "disabled"}
+
+
+def test_model_is_switched_back_to_deepseek():
+    assert auto_chat.MODEL == "deepseek-v4-flash"
+
+
+def test_system_prompt_has_hard_simplified_chinese_rule():
+    assert "所有回复必须使用简体中文" in auto_chat.SYSTEM
+    assert "禁止整段使用日文" in auto_chat.SYSTEM
+    assert "每次最多使用 1～2 个" in auto_chat.SYSTEM
+
+
+def test_timeout_notifies_owner_with_cooldown(monkeypatch):
+    class _Bot:
+        def __init__(self):
+            self.calls = []
+
+        async def send_private_msg(self, **kwargs):
+            self.calls.append(kwargs)
+
+    mod = auto_chat
+    bot = _Bot()
+    monkeypatch.setattr(mod, "_OWNER", "123456")
+    monkeypatch.setattr(mod, "_last_timeout_notice", 0.0)
+
+    asyncio.run(mod._notify_owner_timeout(bot))
+    asyncio.run(mod._notify_owner_timeout(bot))
+
+    assert len(bot.calls) == 1
+    assert bot.calls[0]["user_id"] == 123456
+    assert "超时" in str(bot.calls[0]["message"])
