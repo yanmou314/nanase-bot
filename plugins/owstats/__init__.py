@@ -6,11 +6,16 @@ import time
 from pathlib import Path
 
 import httpx
-from nonebot import get_driver, on_command
+from nonebot import get_driver, logger, on_command
 from nonebot.adapters.onebot.v11 import Message, MessageEvent, MessageSegment
 from nonebot.params import CommandArg
 
-from common import at_prefix, cleanup_cache, close_http_clients, get_http_client, parse_tag, save_json_state, save_image as save_img
+from common import at_prefix, close_http_clients, get_http_client, parse_tag, save_json_state, save_image as save_img
+
+try:
+    from nonebot_plugin_apscheduler import scheduler
+except ImportError:  # 测试 stub 环境缺依赖时跳过定时预热
+    scheduler = None
 
 # 上游数据服务（overstats）地址，可用环境变量覆盖
 API = os.getenv("OW_API_BASE", "http://127.0.0.1:18080")
@@ -18,6 +23,10 @@ CACHE = os.path.join(os.path.dirname(__file__), "cache")
 BIND_FILE = os.path.join(os.path.dirname(__file__), "bindings.json")
 _LOCK = threading.RLock()
 OW_LOCK = asyncio.Lock()
+
+# 总结各档位的超时预算：上游有 5 请求/秒的硬限速，一次总结要几十上百次请求，
+# 冷缓存时仅限速排队就要 20-30 秒，预算必须盖住冷查询（预热只是缓解、不能保证全热）
+SUMMARY_TIMEOUTS = {"today": 75, "yesterday": 90, "week": 180}
 
 matchrep_cmd = on_command("战报", aliases={"战绩图", "report"}, priority=5, block=True)
 rankhist_cmd = on_command("段位", aliases={"段位历史", "rank"}, priority=5, block=True)
@@ -87,6 +96,51 @@ def _get_bound(uid: str) -> str:
         return _load_bindings().get(uid, "")
 
 
+# ---------------- 后台预热 ----------------
+WARMUP_ENABLED = os.getenv("OW_WARMUP", "1").strip().lower() not in {"0", "false", "no", "off"}
+WARMUP_DETAIL_MATCHES = 20  # 预取最近 N 局详情（详情缓存 TTL 30 分钟，查询直接命中）
+WARMUP_GAP_SECONDS = 20  # 玩家间隔，避免挤占上游 5 请求/秒共享配额
+
+
+async def _warmup_player(tag: str) -> bool:
+    """调用 overstats 预热接口：暖玩家解析/对局列表/详情/天气缓存，不做图片渲染。"""
+    try:
+        data = await _post_json(
+            "/api/v2/dashen-summary/warmup",
+            {"bnet_id": tag, "detail_matches": WARMUP_DETAIL_MATCHES},
+            timeout=180,
+        )
+    except Exception as e:
+        logger.warning(f"owstats 预热 {tag} 请求失败（{e!r}）")
+        return False
+    if not data.get("ok"):
+        logger.info(f"owstats 预热 {tag} 未执行：{data.get('error') or data.get('message')}")
+        return False
+    logger.info(
+        f"owstats 预热 {tag} 完成：列表 {data.get('match_count')} 局 / "
+        f"详情 {data.get('detail_count')} 局 / 天气 {data.get('weather_count')} 局"
+    )
+    return True
+
+
+if scheduler is not None:
+    @scheduler.scheduled_job("cron", minute="7", hour="9-23/2", id="owstats_warmup", timezone="Asia/Shanghai")
+    async def _warmup_bound_players():
+        """白天每两小时预热所有绑定玩家，让 .总结 查询尽量命中缓存。"""
+        if not WARMUP_ENABLED:
+            return
+        tags = sorted(set(_load_bindings().values()))
+        if not tags:
+            return
+        logger.info(f"owstats 开始预热 {len(tags)} 个绑定玩家")
+        for tag in tags:
+            if OW_LOCK.locked():  # 用户查询优先，本轮预热让位
+                logger.info("owstats 预热检测到用户查询进行中，本轮中止")
+                return
+            await _warmup_player(tag)
+            await asyncio.sleep(WARMUP_GAP_SECONDS)
+
+
 async def _post_json(path: str, payload: dict, timeout: float = 90.0):
     r = await _http().post(f"{API}{path}", json=payload, timeout=timeout)
     if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
@@ -124,13 +178,34 @@ async def _post_json_with_notice(matcher, at: Message, notice: str, path: str, p
             pass
 
 
-def _resolve_tag(arg: Message, event: MessageEvent) -> str:
+def _resolve_tag(arg: Message, event: MessageEvent) -> tuple[str, bool]:
+    """解析查询目标。返回 (tag, 显式输入但格式无效)——后者用于提示用户而不是
+    静默回退到发送者自己的绑定（否则「.战报 张三」会查出别人以为的数据）。"""
     raw = arg.extract_plain_text().strip()
     if raw:
         tag = parse_tag(raw.split()[0])
-        if tag:
-            return tag
-    return _get_bound(str(event.user_id))
+        return (tag, False) if tag else ("", True)
+    return _get_bound(str(event.user_id)), False
+
+
+_BAD_ID_HINT = "ID 格式不对哦：要用 名字#数字（例如 Yanmou#51293）\n去掉 ID 直接发指令则查询自己绑定的 ID"
+
+
+_last_query: dict[str, float] = {}
+_QUERY_COOLDOWN = 10  # 每用户查询冷却，防止连点刷屏排满渲染队列
+
+
+def _check_cooldown(uid: str) -> float:
+    """通过冷却则记账并返回 0；冷却中返回剩余秒数（不记账）。"""
+    now = time.time()
+    if len(_last_query) > 5000:  # 防内存增长
+        for k in [k for k, t in _last_query.items() if now - t > 3600]:
+            _last_query.pop(k, None)
+    remain = _QUERY_COOLDOWN - (now - _last_query.get(uid, 0))
+    if remain > 0:
+        return remain
+    _last_query[uid] = now
+    return 0.0
 
 
 async def _wait_queue(matcher, event: MessageEvent):
@@ -144,11 +219,27 @@ def _done(matcher_msg: Message, at: Message, elapsed: float) -> Message:
     return at + matcher_msg + Message(f"\n⏱ 用时 {elapsed:.1f}s")
 
 
-def _friendly_error(data: dict) -> str:
+def _friendly_error(data: dict, scope: str = "") -> str:
     code = data.get("error") or ""
     msg = data.get("message") or ""
     if code == "summary_empty":
-        return "该玩家在过去 24 小时内没有对局记录，暂时无法生成总结～"
+        empty_texts = {
+            "today": "该玩家在过去 24 小时内没有对局记录，暂时无法生成总结～",
+            "yesterday": "该玩家昨日没有对局记录，暂时无法生成总结～",
+            "week": "该玩家在过去 7 天内没有对局记录，暂时无法生成总结～",
+        }
+        return empty_texts.get(scope) or "该玩家近期没有对局记录，暂时无法生成总结～"
+    if code == "bnet_not_found":
+        details = data.get("details") if isinstance(data.get("details"), dict) else {}
+        query = str(details.get("query") or "").strip()
+        target = f"「{query}」" if query else "该 ID"
+        return f"没找到 {target}，请检查名字大小写和 # 后面的数字是否正确～"
+    if code == "missing_target":
+        return "缺少查询 ID：请带上 名字#数字，或先用 .绑定 绑定自己的 ID"
+    if code == "too_many_requests":
+        return "现在查询的人有点多，请稍等几秒再试～"
+    if code == "summary_busy":
+        return "总结正在生成中，请稍后再试～"
     if code and not msg:
         return f"查询失败：{code}"
     return msg or "未知错误"
@@ -184,9 +275,14 @@ async def myid(event: MessageEvent):
 async def match_report(event: MessageEvent, arg: Message = CommandArg()):
     t0 = time.monotonic()
     at = at_prefix(event)
-    tag = _resolve_tag(arg, event)
+    tag, bad_id = _resolve_tag(arg, event)
+    if bad_id:
+        await matchrep_cmd.finish(at + _BAD_ID_HINT)
     if not tag:
         await matchrep_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.战报 名字#数字")
+    remain = _check_cooldown(str(event.user_id))
+    if remain > 0:
+        await matchrep_cmd.finish(at + f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～")
     await _wait_queue(matchrep_cmd, event)
     try:
         await matchrep_cmd.send(at + f"⏳ 正在生成 {tag} 的战绩图...")
@@ -213,9 +309,14 @@ async def match_report(event: MessageEvent, arg: Message = CommandArg()):
 async def rank_history(event: MessageEvent, arg: Message = CommandArg()):
     t0 = time.monotonic()
     at = at_prefix(event)
-    tag = _resolve_tag(arg, event)
+    tag, bad_id = _resolve_tag(arg, event)
+    if bad_id:
+        await rankhist_cmd.finish(at + _BAD_ID_HINT)
     if not tag:
         await rankhist_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.段位 名字#数字")
+    remain = _check_cooldown(str(event.user_id))
+    if remain > 0:
+        await rankhist_cmd.finish(at + f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～")
     await _wait_queue(rankhist_cmd, event)
     try:
         await rankhist_cmd.send(at + f"⏳ 正在查询 {tag} 的段位历史...")
@@ -237,9 +338,14 @@ async def rank_history(event: MessageEvent, arg: Message = CommandArg()):
 async def strength(event: MessageEvent, arg: Message = CommandArg()):
     t0 = time.monotonic()
     at = at_prefix(event)
-    tag = _resolve_tag(arg, event)
+    tag, bad_id = _resolve_tag(arg, event)
+    if bad_id:
+        await strength_cmd.finish(at + _BAD_ID_HINT)
     if not tag:
         await strength_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.强度 名字#数字")
+    remain = _check_cooldown(str(event.user_id))
+    if remain > 0:
+        await strength_cmd.finish(at + f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～")
     await _wait_queue(strength_cmd, event)
     try:
         await strength_cmd.send(at + f"⏳ 正在分析 {tag} 的强度...")
@@ -268,15 +374,22 @@ async def summary(event: MessageEvent, arg: Message = CommandArg()):
                  "昨天": "yesterday", "本周": "week"}.get(parts[0], "today")
         parts = parts[1:]
     tag = ""
+    bad_id = False
     if parts:
         tag = parse_tag(parts[0])
+        bad_id = not tag
     if not tag:
         tag = _get_bound(str(event.user_id))
+    if bad_id:
+        await summary_cmd.finish(at + _BAD_ID_HINT)
     if not tag:
         await summary_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.总结 名字#数字")
+    remain = _check_cooldown(str(event.user_id))
+    if remain > 0:
+        await summary_cmd.finish(at + f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～")
     await _wait_queue(summary_cmd, event)
     try:
-        timeout = {"today": 40, "yesterday": 60, "week": 150}.get(scope, 40)
+        timeout = SUMMARY_TIMEOUTS.get(scope, SUMMARY_TIMEOUTS["today"])
         labels = {"today": "今日", "yesterday": "昨日", "week": "本周"}
         await summary_cmd.send(at + f"⏳ 正在生成 {tag} 的{labels[scope]}总结，数据量大请稍候...")
         try:
@@ -287,6 +400,6 @@ async def summary(event: MessageEvent, arg: Message = CommandArg()):
         if data.get("_image"):
             path = save_img(data["bytes"], data["content_type"], "summary", CACHE)
             await summary_cmd.finish(_done(Message(MessageSegment.image(Path(path).as_uri())), at, time.monotonic() - t0))
-        await summary_cmd.finish(at + _friendly_error(data))
+        await summary_cmd.finish(at + _friendly_error(data, scope))
     finally:
         OW_LOCK.release()
