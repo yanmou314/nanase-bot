@@ -147,10 +147,13 @@ def _install_stubs():
     nb.on_command = lambda *a, **k: _Matcher()
     nb.on_notice = lambda *a, **k: _Matcher()
     nb.on_request = lambda *a, **k: _Matcher()
-    nb.run_postprocessor = lambda fn: fn
+    nb.run_post_processor = lambda fn: fn
+    nb.run_postprocessor = nb.run_post_processor  # 兼容旧拼写
+    nb.require = lambda name: None
 
     message_mod = types.ModuleType("nonebot.message")
-    message_mod.run_postprocessor = lambda fn: fn
+    message_mod.run_post_processor = nb.run_post_processor
+    message_mod.run_postprocessor = nb.run_post_processor
 
     adapters = types.ModuleType("nonebot.adapters")
     adapters.__path__ = []
@@ -173,15 +176,48 @@ def _install_stubs():
     params_mod = types.ModuleType("nonebot.params")
     params_mod.CommandArg = lambda: None
 
+    matcher_mod = types.ModuleType("nonebot.matcher")
+    matcher_mod.Matcher = _Matcher
+
+    class _NoneBotException(Exception):
+        pass
+
+    class _MatcherException(_NoneBotException):
+        pass
+
+    class _ProcessException(_NoneBotException):
+        pass
+
+    exception_mod = types.ModuleType("nonebot.exception")
+    exception_mod.MatcherException = _MatcherException
+    exception_mod.SkippedException = _ProcessException
+    exception_mod.IgnoredException = _ProcessException
+    exception_mod.NoneBotException = _NoneBotException
+
     aps = types.ModuleType("nonebot_plugin_apscheduler")
 
     class _Scheduler:
+        def __init__(self):
+            self.listeners = []
+
         def scheduled_job(self, *a, **k):
             def deco(fn):
                 return fn
             return deco
 
+        def add_listener(self, callback, mask=0):
+            self.listeners.append((callback, mask))
+
+        def get_job(self, job_id):
+            return None
+
     aps.scheduler = _Scheduler()
+
+    apscheduler_pkg = types.ModuleType("apscheduler")
+    apscheduler_pkg.__path__ = []
+    aps_events = types.ModuleType("apscheduler.events")
+    aps_events.EVENT_JOB_ERROR = 64  # 与真实值一致（1 << 6）
+    aps_events.JobExecutionEvent = object
 
     psycopg_pool = types.ModuleType("psycopg_pool")
     psycopg_pool.AsyncConnectionPool = object  # 仅满足 import；测试不真正建池
@@ -194,7 +230,11 @@ def _install_stubs():
         "nonebot.rule": rule,
         "nonebot.params": params_mod,
         "nonebot.message": message_mod,
+        "nonebot.matcher": matcher_mod,
+        "nonebot.exception": exception_mod,
         "nonebot_plugin_apscheduler": aps,
+        "apscheduler": apscheduler_pkg,
+        "apscheduler.events": aps_events,
         "psycopg_pool": psycopg_pool,
     }.items():
         sys.modules[name] = mod

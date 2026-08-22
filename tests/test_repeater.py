@@ -81,3 +81,34 @@ def test_save_state_skips_none_fingerprints(monkeypatch, tmp_path):
     data = _json.loads(f.read_text(encoding="utf-8"))
     assert data["track"] == {"42": [["t", "a" * 40]]}
     assert mod._replied_ts  # 未被破坏
+
+
+def test_repeater_none_fingerprint_breaks_chain_without_crash():
+    """回归：@、表情、混合消息的指纹为 None，进入队列后比较不得抛 TypeError。"""
+    import asyncio
+
+    mod = repeater
+    mod._track.clear(); mod._replied_ts.clear(); mod._replied_fp.clear()
+
+    sent = []
+
+    class FakeBot:
+        async def send_group_msg(self, **kw):
+            sent.append(kw)
+
+    async def feed(plain, message):
+        ev = GroupMessageEvent(group_id=999, plain=plain, message=message)
+        await mod.repeater(FakeBot(), ev)
+
+    # 序列：哈哈 / 不可复读(→None) / 哈哈 / 哈哈 / 哈哈 / 哈哈
+    # 旧代码在第 3 条消息时 deq=[t, None, t]，deq[1][:2] 直接 TypeError
+    asyncio.run(feed("哈哈", [MessageSegment.text("哈哈")]))
+    asyncio.run(feed("看图", [MessageSegment.text("看图"), MessageSegment.image("f")]))
+    asyncio.run(feed("哈哈", [MessageSegment.text("哈哈")]))  # 旧代码在此崩溃
+    asyncio.run(feed("哈哈", [MessageSegment.text("哈哈")]))
+    asyncio.run(feed("哈哈", [MessageSegment.text("哈哈")]))  # 三连成立 → 复读一次
+    asyncio.run(feed("哈哈", [MessageSegment.text("哈哈")]))  # 同一串复读不重复触发
+    assert len(sent) == 1
+    assert sent[0]["group_id"] == 999
+    assert str(sent[0]["message"]) == "哈哈"
+    mod._track.clear(); mod._replied_ts.clear(); mod._replied_fp.clear()
