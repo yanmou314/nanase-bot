@@ -29,7 +29,8 @@ poke_matcher = on_notice(priority=5, block=False)
 
 CFG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 API_URL = "https://opencode.ai/zen/go/v1/chat/completions"
-MODEL = "mimo-v2.5"
+MODEL = "deepseek-v4-flash"
+_OWNER = os.getenv("QQBOT_OWNER", "").strip()
 
 SYSTEM = (
     "现在你是西野七濑（ななせまる），乃木坂46一期生、现役偶像，大阪出身。"
@@ -37,7 +38,10 @@ SYSTEM = (
     "· 性格：极度怕生、慢热、小声软糯；熟了会放松，偶尔天然呆、小声吐槽；被夸会慌张否认\n"
     "· 说话：开口前先轻声笑（えへへ、ふふっ），常用「えっと…」「なんか…」缓冲，"
     "句尾爱用「…かな」「…かも」「…だよね」；语速慢、短句、轻声\n"
-    "· 语言：中文为主，夹杂日语语气词（うん、もう～、そうそう）和颜文字\n"
+    "· 【语言硬性规则】除非用户明确要求使用日语，否则所有回复必须使用简体中文。\n"
+    "  禁止整段使用日文，禁止使用日语句法或日语句尾；日语只能作为极少量语气词，\n"
+    "  每次最多使用 1～2 个（如「えへへ」「うん」「そうそう」）。即使用户用日语提问，\n"
+    "  也默认用简体中文回答，只有用户明确要求「请用日语回答」时才使用日语。\n"
     "· 自称「ななせ」或「我」\n"
     "· 爱好画画、漫画、游戏（怪物猎人）、吃肉和甜食；怕鬼怕高怕虫子，胆小爱哭\n"
     "· 被问不懂的事会坦诚说不懂，从不装懂\n"
@@ -58,6 +62,8 @@ _MEMORY_MAX_KEYS = 500
 _MEMORY_TTL = 24 * 60 * 60
 _cached_key = ""
 _cached_key_mtime = -1.0
+_last_timeout_notice = 0.0
+_TIMEOUT_NOTICE_COOLDOWN = 10 * 60
 
 POKE_REPLIES = [
     "呜哇！吓、吓一跳…！",
@@ -195,6 +201,27 @@ async def _ai_poke_reply(key: str, uid: str, gid: str) -> str:
     return reply
 
 
+async def _notify_owner_timeout(bot: Bot) -> None:
+    """主 AI 超时时私聊主人提醒；限频避免连续超时刷屏。"""
+    global _last_timeout_notice
+    if not _OWNER.isdigit():
+        return
+    now = time.time()
+    if now - _last_timeout_notice < _TIMEOUT_NOTICE_COOLDOWN:
+        return
+    _last_timeout_notice = now
+    try:
+        await bot.send_private_msg(
+            user_id=int(_OWNER),
+            message=MessageSegment.text(
+                "⚠️ @机器人主 AI 请求超时，已切换到青云客备用接口；"
+                "备用接口不使用完整人设提示词，回复风格可能不稳定。"
+            ),
+        )
+    except Exception as notify_error:
+        logger.warning(f"auto_chat 超时通知主人失败（{notify_error!r}）")
+
+
 @chat_matcher.handle()
 async def chat(bot: Bot, event: MessageEvent):
     uid = str(event.user_id)
@@ -218,6 +245,10 @@ async def chat(bot: Bot, event: MessageEvent):
             reply = await _ai_reply(
                 key, uid, str(getattr(event, "group_id", 0) or 0), msg[:200]
             )
+        except httpx.ReadTimeout as e:
+            logger.warning(f"auto_chat AI 请求超时（{e!r}），尝试备用源")
+            await _notify_owner_timeout(bot)
+            reply = ""
         except Exception as e:
             logger.warning(f"auto_chat AI 生成失败（{e!r}），尝试备用源")
             reply = ""

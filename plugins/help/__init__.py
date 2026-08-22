@@ -1,6 +1,36 @@
+import asyncio
+import glob
+import hashlib
+import logging
+import os
+import threading
+
 from nonebot import on_command
-from nonebot.adapters.onebot.v11 import MessageEvent
-from common import is_owner
+from nonebot.adapters.onebot.v11 import MessageEvent, MessageSegment
+from PIL import Image, ImageDraw, ImageFont
+
+from common import FONTS, cleanup_cache, is_owner
+
+_logger = logging.getLogger(__name__)
+_BASE_DIR = os.path.dirname(__file__)
+_CACHE_DIR = os.path.join(_BASE_DIR, "cache")
+_CACHE_MAX_AGE = 30 * 24 * 60 * 60
+_RENDER_VERSION = "help-card-v2"
+_CACHE_LOCK = threading.RLock()
+
+_IMAGE_SYMBOLS = {
+    "🤖": "◆",
+    "🎲": "◆",
+    "🎮": "◆",
+    "💬": "◆",
+    "⏳": "◆",
+    "💸": "◆",
+    "📌": "•",
+    "🔔": "◆",
+    "📊": "◆",
+    "📢": "◆",
+    "👥": "◆",
+}
 
 help_cmd = on_command("hp", aliases={"帮助", "help", "菜单"}, priority=1, block=True)
 
@@ -38,11 +68,11 @@ OWNER_TEXT = """
   .词云 [N]       · 今日热词（N=1~60，默认40）
 
 📢 每日推送（在哪个群开启就推送到哪个群，可多群）
-  .新闻开启        · 本群开启每日新闻推送（每天 5:30）
+  .新闻开启        · 本群开启每日新闻推送（每天 7:00）
   .新闻关闭        · 本群关闭每日新闻
   .新闻测试        · 立即发送新闻总结测试
   .新闻状态        · 查看已开启推送的群
-  .词云开启        · 本群开启每日词云推送（每天 4:30）
+  .词云开启        · 本群开启每日词云推送（每天 00:00）
   .词云关闭        · 本群关闭每日词云推送
   .词云状态        · 查看已开启推送的群
   .倒计时开启      · 本群开启每天 17:00 倒计时推送
@@ -67,9 +97,118 @@ OWNER_TEXT = """
   .自动通过数量    · 查看关键字数量"""
 
 
+def _wrap_line(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> list[str]:
+    if not text:
+        return [""]
+    lines: list[str] = []
+    current = ""
+    for char in text:
+        candidate = current + char
+        if current and draw.textlength(candidate, font=font) > max_width:
+            lines.append(current)
+            current = char
+        else:
+            current = candidate
+    lines.append(current)
+    return lines
+
+
+def _help_cache_path(text: str, variant: str) -> str:
+    payload = (
+        f"{_RENDER_VERSION}\n{variant}\n{_plugin_source_signature()}\n{text}"
+    ).encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()[:20]
+    return os.path.join(_CACHE_DIR, f"help_{variant}_{digest}.png")
+
+
+def _normalize_image_text(text: str) -> str:
+    """将服务器缺失字体的装饰 emoji 转成稳定的可渲染符号。"""
+    for emoji, symbol in _IMAGE_SYMBOLS.items():
+        text = text.replace(emoji, symbol)
+    return text
+
+
+def _plugin_source_signature() -> str:
+    """用插件源码的路径、大小和修改时间检测帮助相关实现是否变化。"""
+    digest = hashlib.sha256()
+    plugin_root = os.path.dirname(_BASE_DIR)
+    pattern = os.path.join(plugin_root, "**", "*.py")
+    for path in sorted(glob.glob(pattern, recursive=True)):
+        if "__pycache__" in path:
+            continue
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        relative = os.path.relpath(path, plugin_root).replace(os.sep, "/")
+        digest.update(f"{relative}\0{stat.st_size}\0{stat.st_mtime_ns}\n".encode())
+    return digest.hexdigest()[:20]
+
+
+def _render_help_image(text: str, variant: str) -> str:
+    """按帮助内容哈希缓存图片，内容变化时自动生成新版本。"""
+    path = _help_cache_path(text, variant)
+    with _CACHE_LOCK:
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        cleanup_cache(_CACHE_DIR, max_age=_CACHE_MAX_AGE)
+        if os.path.isfile(path) and os.path.getsize(path) > 0:
+            return path
+
+        try:
+            title_font = ImageFont.truetype(FONTS["noto_bold"], 42)
+            body_font = ImageFont.truetype(FONTS["noto_reg"], 27)
+        except OSError:
+            title_font = body_font = ImageFont.load_default()
+
+        width = 1080
+        margin = 58
+        content_width = width - margin * 2
+        measure = Image.new("RGB", (width, 10), "white")
+        measure_draw = ImageDraw.Draw(measure)
+        rendered: list[tuple[str, object, int, tuple[int, int, int]]] = []
+        source_lines = _normalize_image_text(text).splitlines()
+        for index, source_line in enumerate(source_lines):
+            font = title_font if index == 0 else body_font
+            line_height = 62 if index == 0 else 42
+            fill = (31, 35, 45) if index == 0 else (55, 58, 68)
+            for line in _wrap_line(measure_draw, source_line, font, content_width):
+                rendered.append((line, font, line_height, fill))
+
+        height = 56 + sum(item[2] for item in rendered) + 48
+        image = Image.new("RGB", (width, height), (244, 246, 250))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle(
+            (18, 18, width - 18, height - 18),
+            radius=24,
+            fill=(255, 255, 255),
+            outline=(224, 228, 236),
+            width=2,
+        )
+        y = 48
+        for line, font, line_height, fill in rendered:
+            draw.text((margin, y), line, font=font, fill=fill)
+            y += line_height
+
+        tmp_path = f"{path}.tmp-{os.getpid()}-{threading.get_ident()}"
+        try:
+            image.save(tmp_path, "PNG")
+            os.replace(tmp_path, path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        return path
+
+
 @help_cmd.handle()
 async def handle(event: MessageEvent):
     text = TEXT
+    variant = "public"
     if is_owner(event):
         text += OWNER_TEXT
-    await help_cmd.finish(text)
+        variant = "owner"
+    try:
+        path = await asyncio.to_thread(_render_help_image, text, variant)
+    except Exception:
+        _logger.exception("帮助图片生成失败，回退发送文本")
+        await help_cmd.finish(text)
+    await help_cmd.finish(MessageSegment.image("file://" + path))

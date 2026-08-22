@@ -28,6 +28,7 @@ _nick_ts: dict = {}
 NICK_TTL = 300
 NICK_CACHE_MAX = 10000
 RETENTION_DAYS = 30
+WORDS_CUTOFF_HOUR = 0
 
 record_matcher = on_message(priority=1, block=False)
 dragon_cmd = on_command("龙王", priority=5, block=True)
@@ -98,14 +99,14 @@ async def _get_name(bot: Bot, group_id: int, user_id: int) -> str:
 
 
 async def _build_word_image(group_id: int, n: int) -> str | None:
-    # 词云窗口：昨天 4:00 至今天 4:00（按上海时区计算，不依赖数据库时区）
+    # 词云窗口：昨天 00:00 至今天 00:00（按上海时区计算，不依赖数据库时区）
     today = _sh_today()
     yesterday = (today - timedelta(days=1)).isoformat()
     today_s = today.isoformat()
     rows = await exec(
         "SELECT text FROM messages WHERE group_id=%s AND "
-        "((day=%s AND hour>=4) OR (day=%s AND hour<4)) AND text!=''",
-        (group_id, yesterday, today_s),
+        "((day=%s AND hour>=%s) OR (day=%s AND hour<%s)) AND text!=''",
+        (group_id, yesterday, WORDS_CUTOFF_HOUR, today_s, WORDS_CUTOFF_HOUR),
     )
     counter: Counter = Counter()
     normal_message_count = 0
@@ -187,7 +188,7 @@ async def words_on(event: GroupMessageEvent):
     if not is_owner(event):
         await words_on_cmd.finish("❌ 你没有权限使用此功能")
     _add_words_group(str(event.group_id))
-    await words_on_cmd.finish(f"✅ 本群已开启每日词云推送\n每天 4:30 自动发送 4:00 前 24 小时的热词词云到此群")
+    await words_on_cmd.finish(f"✅ 本群已开启每日词云推送\n每天 00:00 自动发送前一天的热词词云到此群")
 
 
 @words_off_cmd.handle()
@@ -204,11 +205,11 @@ async def words_status(event: GroupMessageEvent):
         await words_status_cmd.finish("❌ 你没有权限使用此功能")
     groups = _words_groups()
     if groups:
-        await words_status_cmd.finish(f"📊 每日词云推送已开启于 {len(groups)} 个群（每天 4:30 发送）：\n{'、'.join(groups)}")
+        await words_status_cmd.finish(f"📊 每日词云推送已开启于 {len(groups)} 个群（每天 00:00 发送）：\n{'、'.join(groups)}")
     await words_status_cmd.finish("📊 每日词云推送：未开启")
 
 
-@scheduler.scheduled_job("cron", hour=4, minute=30, id="daily_words", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=0, minute=0, id="daily_words", timezone="Asia/Shanghai")
 async def daily_words_job():
     groups = _words_groups()
     if not groups:
@@ -240,5 +241,5 @@ async def words(event: GroupMessageEvent, arg: Message = CommandArg()):
         n = 20
     path = await _build_word_image(event.group_id, n)
     if not path:
-        await words_cmd.finish("近 24 小时（凌晨 4:00 前）还没有可统计的文字内容～")
+        await words_cmd.finish("前一天还没有可统计的文字内容～")
     await words_cmd.finish(MessageSegment.image("file://" + path))

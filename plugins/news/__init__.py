@@ -113,19 +113,27 @@ async def _fetch_60s(day: date) -> list[str]:
 
 
 async def _fetch_baidu() -> list[str]:
-    """百度热搜实时榜：条目位于 cards[].content[] 直接层级，字段名为 word。"""
+    """获取百度热搜实时榜，并兼容接口返回的多层 content 结构。"""
     client = _get_http_client()
     r = await client.get(BAIDU_API, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
     r.raise_for_status()
     data = r.json()
     items = []
-    for card in data.get("data", {}).get("cards", []):
-        for item in card.get("content", []):
-            if not isinstance(item, dict):
-                continue
-            word = item.get("word") or item.get("query")
+    def collect_words(value) -> None:
+        """递归提取 word/query，兼容百度接口 content 嵌套层级变化。"""
+        if isinstance(value, dict):
+            word = value.get("word") or value.get("query")
             if word:
                 items.append(str(word))
+            for child in value.values():
+                collect_words(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect_words(child)
+
+    collect_words((data.get("data") or {}).get("cards") or [])
+    # 百度接口偶尔会在多个卡片中重复返回同一条热搜，保持顺序去重。
+    items = list(dict.fromkeys(items))
     return items[:10]
 
 
@@ -203,12 +211,15 @@ async def _send_news(day: date) -> None:
         source = "60秒读懂世界"
         if not news:
             raise RuntimeError("60s 返回空列表")
-    except Exception:
+    except Exception as exc:
+        _logger.warning("60s 新闻获取失败，切换百度热搜: %s", exc)
         try:
             news = await _fetch_baidu()
             source = "百度热搜"
+            if not news:
+                _logger.warning("百度热搜返回空列表")
         except Exception:
-            _logger.exception("新闻源全部获取失败")
+            _logger.exception("百度热搜获取失败")
             return
     if not news:
         _logger.warning("新闻源返回为空")
@@ -230,7 +241,7 @@ async def _send_news(day: date) -> None:
             _logger.exception("新闻发送到群 %s 失败", gid)
 
 
-@scheduler.scheduled_job("cron", hour=5, minute=30, id="daily_news", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=7, minute=0, id="daily_news", timezone="Asia/Shanghai")
 async def daily_news_job():
     await _send_news(_sh_today() - timedelta(days=1))
 
@@ -242,7 +253,7 @@ async def news_on(event: MessageEvent):
     if not isinstance(event, GroupMessageEvent):
         await news_on_cmd.finish("请在有机器人的群里开启此功能")
     _add_group(str(event.group_id))
-    await news_on_cmd.finish(f"✅ 本群已开启每日新闻推送\n每天 5:30 自动发送前一天新闻总结到此群")
+    await news_on_cmd.finish(f"✅ 本群已开启每日新闻推送\n每天 07:00 自动发送前一天新闻总结到此群")
 
 
 @news_off_cmd.handle()
@@ -288,5 +299,5 @@ async def news_status(event: MessageEvent):
         await news_status_cmd.finish("❌ 你没有权限使用此功能")
     groups = _get_groups()
     if groups:
-        await news_status_cmd.finish(f"📰 每日新闻推送已开启于 {len(groups)} 个群（每天 5:30 发送）：\n{'、'.join(groups)}")
+        await news_status_cmd.finish(f"📰 每日新闻推送已开启于 {len(groups)} 个群（每天 07:00 发送）：\n{'、'.join(groups)}")
     await news_status_cmd.finish("📰 每日新闻推送：未开启")
