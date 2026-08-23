@@ -93,9 +93,6 @@ QQBOT_OWNER=你的QQ号
 # 若 NapCatQQ 侧配置了 access token，需增加：
 # ONEBOT_ACCESS_TOKEN=与NapCat一致
 
-# 链接解析插件（nonebot-plugin-parser）可选：
-# PARSER_MAX_SIZE=50   # 单个资源最大 MB
-# PARSER_BILI_CK=      # B站 Cookie（解锁高清晰度与 AI 总结）
 ```
 
 ### 3. 按需启用插件
