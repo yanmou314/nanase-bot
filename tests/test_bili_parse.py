@@ -290,3 +290,35 @@ def test_build_card_image_render_failure_returns_none(monkeypatch):
     monkeypatch.setattr(bili, "_fetch_cover_bytes", fake_cover)
     bili._img_cache.clear()
     assert asyncio.run(bili.build_card_image(dict(_INFO))) is None
+
+
+# ---------------- 重复请求的重发缓存行为 ----------------
+
+def test_handler_resends_cached_image_on_repeat(tmp_path, monkeypatch):
+    import time as _time
+    img = tmp_path / "cached.png"
+    img.write_bytes(b"png")
+    now = _time.time()
+    bili._info_cache["BV1GJ411x7h7"] = (now + 600, dict(_INFO))
+    bili._img_cache[_INFO["bvid"]] = (now + 600, str(img))
+    bili._recent[("100", "BV1GJ411x7h7")] = now - 120  # 60秒前已答复过
+
+    called = []
+    monkeypatch.setattr(bili, "fetch_info", lambda vid: called.append(vid))
+
+    asyncio.run(bili.bili_matcher.handlers[0](_ev("BV1GJ411x7h7")))
+    assert not called                      # 不重新查询/渲染
+    assert len(bili.bili_matcher.sent) == 1
+    seg = bili.bili_matcher.sent[0]
+    assert seg.type == "image" and seg.data["file"] == "file://" + str(img)
+    # 重发也刷新 60 秒防连点窗口
+    assert bili._recent[("100", "BV1GJ411x7h7")] >= now
+
+
+def test_handler_stays_silent_within_60s_double_tap(tmp_path, monkeypatch):
+    import time as _time
+    bili._recent[("100", "BV1GJ411x7h7")] = _time.time()  # 刚答复过
+    called = []
+    monkeypatch.setattr(bili, "fetch_info", lambda vid: called.append(vid))
+    asyncio.run(bili.bili_matcher.handlers[0](_ev("BV1GJ411x7h7")))
+    assert not called and not bili.bili_matcher.sent
