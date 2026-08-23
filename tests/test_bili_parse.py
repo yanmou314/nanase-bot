@@ -96,12 +96,32 @@ def test_handler_sends_card(monkeypatch):
         calls.append(vid)
         return dict(_INFO)
 
+    async def fake_image(info):
+        return "/tmp/bili_card.png"
+
     monkeypatch.setattr(bili, "fetch_info", fake_fetch)
+    monkeypatch.setattr(bili, "build_card_image", fake_image)
     asyncio.run(bili.bili_matcher.handlers[0](_ev("看下 BV1GJ411x7h7")))
     assert calls == ["BV1GJ411x7h7"]
     assert len(bili.bili_matcher.sent) == 1
-    sent = bili.bili_matcher.sent[0]
-    assert list(sent)[0].type == "image"
+    seg = bili.bili_matcher.sent[0]  # handler 直接发送单个图片段
+    assert seg.type == "image" and seg.data["file"] == "file:///tmp/bili_card.png"
+
+
+def test_handler_falls_back_to_text_card_when_render_fails(monkeypatch):
+    async def fake_fetch(vid):
+        return dict(_INFO)
+
+    async def broken_image(info):
+        return None
+
+    monkeypatch.setattr(bili, "fetch_info", fake_fetch)
+    monkeypatch.setattr(bili, "build_card_image", broken_image)
+    asyncio.run(bili.bili_matcher.handlers[0](_ev("看下 BV1GJ411x7h7")))
+    assert len(bili.bili_matcher.sent) == 1
+    segs = list(bili.bili_matcher.sent[0])
+    assert segs[0].type == "image"          # 封面 URL 直发
+    assert _INFO["title"] in str(segs[1])   # 文本卡片兜底
 
 
 def test_handler_skips_commands(monkeypatch):
@@ -117,7 +137,11 @@ def test_handler_dedupes_same_video_in_group(monkeypatch):
     async def fake_fetch(vid):
         return dict(_INFO)
 
+    async def no_image(info):
+        return None
+
     monkeypatch.setattr(bili, "fetch_info", fake_fetch)
+    monkeypatch.setattr(bili, "build_card_image", no_image)
     handler = bili.bili_matcher.handlers[0]
     asyncio.run(handler(_ev("BV1GJ411x7h7")))
     # 同视频在去重窗口内：不重复发送（未来时间戳模拟"刚发过"）
@@ -131,7 +155,11 @@ def test_handler_group_cooldown_blocks_other_video(monkeypatch):
     async def fake_fetch(vid):
         return dict(_INFO)
 
+    async def no_image(info):
+        return None
+
     monkeypatch.setattr(bili, "fetch_info", fake_fetch)
+    monkeypatch.setattr(bili, "build_card_image", no_image)
     handler = bili.bili_matcher.handlers[0]
     asyncio.run(handler(_ev("BV1GJ411x7h7")))
     bili._recent.clear()  # 排除去重因素，单测群冷却
@@ -170,3 +198,89 @@ def test_resolve_b23_extracts_from_final_url(monkeypatch):
 
     monkeypatch.setattr(bili, "get_http_client", lambda t: _Client())
     assert asyncio.run(bili.resolve_b23("https://b23.tv/abc123")) == "BV1GJ411x7h7"
+
+
+# ---------------- 图片卡片渲染 ----------------
+
+def test_build_html_contains_info_and_escapes():
+    info = dict(_INFO, title='恶意<script>alert(1)</script>标题')
+    page, height = bili._build_html(info, "data:image/jpeg;base64,QUJD")
+    assert "<script>alert(1)</script>" not in page   # 标题被转义
+    assert "&lt;script&gt;" in page
+    assert 'src="data:image/jpeg;base64,QUJD"' in page
+    assert _INFO["owner"] in page and "1234.6万" in page
+    assert "简介：" in page and "3:33" in page
+    assert f"size: 900px {height}px" in page
+
+
+def test_build_html_without_cover_uses_placeholder():
+    page, height = bili._build_html(dict(_INFO), None)
+    assert "no-cover" in page and "<img" not in page
+    assert bili._build_html(dict(_INFO), None)[1] < bili._build_html(dict(_INFO), "data:image/jpeg;base64,QUJD")[1]
+
+
+def test_build_html_multi_p_badge_and_no_desc():
+    page, _ = bili._build_html(dict(_INFO, videos=3), None)
+    assert "全3P" in page
+    page2, _ = bili._build_html(dict(_INFO, desc=""), None)
+    assert "简介" not in page2
+
+
+def test_fetch_cover_b64(monkeypatch):
+    class _Resp:
+        content = b"ABC"
+        headers = {"content-type": "image/jpeg"}
+
+    class _Client:
+        async def get(self, url, **kw):
+            assert url.startswith("https://i")
+            return _Resp()
+
+    monkeypatch.setattr(bili, "get_http_client", lambda t: _Client())
+    out = asyncio.run(bili._fetch_cover_b64(_INFO["pic"]))
+    assert out == "data:image/jpeg;base64,QUJD"
+
+    class _Big(_Resp):
+        content = b"x" * (bili._MAX_COVER_BYTES + 1)
+
+    class _BigClient:
+        async def get(self, url, **kw):
+            return _Big()
+
+    monkeypatch.setattr(bili, "get_http_client", lambda t: _BigClient())
+    assert asyncio.run(bili._fetch_cover_b64(_INFO["pic"])) is None
+
+
+def test_build_card_image_caches_render(tmp_path, monkeypatch):
+    rendered = []
+
+    async def fake_render(html, prefix, cache_dir, max_age=0):
+        rendered.append(prefix)
+        p = tmp_path / f"card{len(rendered)}.png"
+        p.write_bytes(b"png")
+        return str(p)
+
+    async def fake_cover(url):
+        return "data:image/jpeg;base64,QUJD"
+
+    monkeypatch.setattr(bili, "render_html_to_png_async", fake_render)
+    monkeypatch.setattr(bili, "_fetch_cover_b64", fake_cover)
+    bili._img_cache.clear()
+
+    p1 = asyncio.run(bili.build_card_image(dict(_INFO)))
+    p2 = asyncio.run(bili.build_card_image(dict(_INFO)))  # 命中缓存，不重渲染
+    assert p1 == p2 and len(rendered) == 1
+    assert p1.endswith(".png")
+
+
+def test_build_card_image_render_failure_returns_none(monkeypatch):
+    async def boom(html, prefix, cache_dir, max_age=0):
+        raise RuntimeError("weasyprint missing")
+
+    async def fake_cover(url):
+        return None
+
+    monkeypatch.setattr(bili, "render_html_to_png_async", boom)
+    monkeypatch.setattr(bili, "_fetch_cover_b64", fake_cover)
+    bili._img_cache.clear()
+    assert asyncio.run(bili.build_card_image(dict(_INFO))) is None

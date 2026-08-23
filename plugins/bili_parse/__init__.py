@@ -1,9 +1,13 @@
 """B站视频链接解析：群里出现 B站链接 / BV号 / av号 时，自动回复封面图与视频信息。
 
-只调用 B站查询 API 解析元信息，不下载视频；封面图以 URL 形式交给 NapCat
-直接发送，服务器零下载带宽。同群 30 秒冷却 + 同视频 10 分钟去重防刷屏。
+只调用 B站查询 API 解析元信息，不下载视频。卡片整体渲染为一张图片
+（weasyprint HTML→PNG，B站粉主题模板）；渲染失败时回退"封面+文本"卡片。
+同群 30 秒冷却 + 同视频 10 分钟去重防刷屏，信息与渲染结果各缓存 30 分钟。
 """
+import base64
+import html as html_mod
 import logging
+import os
 import re
 import time
 from datetime import datetime
@@ -13,10 +17,11 @@ import httpx
 from nonebot import on_message
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
 
-from common import get_http_client
+from common import get_http_client, render_html_to_png_async
 
 _logger = logging.getLogger(__name__)
 _SH = ZoneInfo("Asia/Shanghai")
+CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 
 bili_matcher = on_message(priority=25, block=False)
 
@@ -33,11 +38,13 @@ _CMD_PREFIXES = (".", "/", "。")
 
 _GROUP_COOLDOWN = 30.0        # 同群两次解析的最小间隔
 _DUP_WINDOW = 10 * 60.0       # 同群同一视频的去重窗口
-_CACHE_TTL = 30 * 60.0        # 视频信息缓存
+_CACHE_TTL = 30 * 60.0        # 视频信息/渲染卡片缓存
+_MAX_COVER_BYTES = 8 * 1024 * 1024  # 封面大小上限，防异常大图耗内存
 
 _group_last: dict[str, float] = {}                # group_id -> 上次解析时间
 _recent: dict[tuple[str, str], float] = {}        # (group_id, vid) -> 上次解析时间
 _info_cache: dict[str, tuple[float, dict]] = {}   # vid -> (过期时间, 信息)
+_img_cache: dict[str, tuple[float, str]] = {}     # bvid -> (过期时间, 渲染图路径)
 
 
 def extract_ids(*texts: str) -> list[str]:
@@ -87,7 +94,7 @@ async def fetch_info(vid: str) -> dict | None:
             "owner": (d.get("owner") or {}).get("name") or "",
             "tname": d.get("tname") or "",
             "videos": d.get("videos", 1) or 1,
-            "desc": " ".join((d.get("desc") or "").split()),
+            "desc": _clean_desc(d.get("desc")),
             "view": stat.get("view", 0),
             "danmaku": stat.get("danmaku", 0),
             "like": stat.get("like", 0),
@@ -110,6 +117,12 @@ async def fetch_info(vid: str) -> dict | None:
     return info
 
 
+def _clean_desc(raw: str | None) -> str:
+    """简介压成单行；过滤 "-" 之类的无意义占位内容。"""
+    flat = " ".join((raw or "").split())
+    return "" if flat in {"-", "——", "（本视频暂时没有简介）"} else flat
+
+
 def _fmt_count(n: int) -> str:
     return f"{n / 10000:.1f}万" if n >= 10000 else str(n)
 
@@ -127,6 +140,8 @@ def _fmt_desc(desc: str, limit: int = 60) -> str:
     flat = " ".join(desc.split())
     return flat if len(flat) <= limit else flat[:limit] + "…"
 
+
+# ---------------- 文本卡片（渲染失败的回退形态） ----------------
 
 def build_card(info: dict) -> MessageSegment:
     """封面图 + 信息卡片（文本段包裹，标题/UP主名不会触发 CQ 码解析）。"""
@@ -155,6 +170,160 @@ def build_card(info: dict) -> MessageSegment:
         parts.append(MessageSegment.image(info["pic"]))
     parts.append(MessageSegment.text(text))
     return sum(parts[1:], parts[0])
+
+
+# ---------------- 图片卡片（HTML 模板 → weasyprint 渲染） ----------------
+
+_CSS = """
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { width: 900px; font-family: "Noto Sans CJK SC", sans-serif;
+       background: #ffffff; color: #18191c; }
+.cover { position: relative; width: 900px; height: 506px; overflow: hidden;
+         border-radius: 18px 18px 0 0; background: #ffe4ee; }
+.cover img { width: 900px; height: 506px; object-fit: cover; }
+.no-cover { width: 900px; height: 150px; border-radius: 18px 18px 0 0;
+            background: linear-gradient(135deg, #fb7299 0%, #ff9db8 60%, #ffc6d9 100%); }
+.badge-duration { position: absolute; right: 14px; bottom: 12px;
+                  background: rgba(0,0,0,0.65); color: #fff; font-size: 16px;
+                  padding: 3px 10px; border-radius: 6px; }
+.badge-multi { position: absolute; left: 14px; top: 12px;
+               background: #fb7299; color: #fff; font-size: 15px;
+               padding: 3px 10px; border-radius: 6px; }
+.body { padding: 26px 30px 24px; }
+.title { font-size: 30px; font-weight: 700; line-height: 1.45; overflow: hidden; }
+.meta { margin-top: 14px; font-size: 17px; color: #61666d; }
+.meta .owner { color: #fb7299; font-weight: 700; }
+.meta .sep { color: #e3e5e7; margin: 0 10px; }
+.stats { margin-top: 20px; padding-top: 18px; border-top: 1px solid #f0f1f2;
+         display: flex; justify-content: space-between; }
+.stat { width: 118px; text-align: center; }
+.stat .num { font-size: 21px; font-weight: 700; color: #18191c; }
+.stat .label { margin-top: 4px; font-size: 13px; color: #9499a0; }
+.desc { margin-top: 18px; background: #f6f7f8; border-radius: 10px;
+        padding: 12px 16px; font-size: 15px; color: #61666d;
+        line-height: 1.55; overflow: hidden; }
+.footer { margin-top: 18px; display: flex; justify-content: space-between;
+          align-items: center; font-size: 14px; color: #9499a0; }
+.footer .brand { color: #fb7299; font-weight: 700; }
+.footer .link { color: #9499a0; }
+"""
+
+
+def _page_height(head_h: int, title_h: int, has_desc: bool) -> int:
+    """按分区高度累加：封面 + 标题 + meta + 数据行 + 简介块 + 页脚 + 内边距。"""
+    h = head_h + 26 + title_h      # 顶部内边距 + 标题
+    h += 14 + 25                    # meta（上间距 + 行高）
+    h += 20 + 18 + 43               # stats（上间距 + 分隔线内边距 + 行高）
+    if has_desc:
+        h += 18 + 47                # 简介（两行以内）
+    h += 18 + 21 + 24               # 页脚（上间距 + 行高 + 底部内边距）
+    return h
+
+
+def _build_html(info: dict, cover_b64: str | None) -> tuple[str, int]:
+    """构建卡片 HTML；返回 (html, 页面总高度px)。文本先截断保证高度确定。"""
+    esc = html_mod.escape
+    title = info["title"] or "未知标题"
+    if len(title) > 56:  # 标题最多两行，每行约 28 字
+        title = title[:56] + "…"
+    title_h = 44 if len(title) <= 28 else 88
+    desc = _fmt_desc(info.get("desc", ""), limit=80)
+
+    multi = f'<div class="badge-multi">全{info["videos"]}P</div>' \
+        if info.get("videos", 1) > 1 else ""
+    if cover_b64:
+        cover_html = (
+            f'<div class="cover"><img src="{cover_b64}">{multi}'
+            f'<div class="badge-duration">{_fmt_duration(info["duration"])}</div></div>'
+        )
+        head_h = 506
+    else:
+        cover_html = f'<div class="no-cover">{multi}</div>'
+        head_h = 150
+
+    owner = esc(info["owner"]) or "未知UP主"
+    tname = esc(info.get("tname", ""))
+    date = datetime.fromtimestamp(info["pubdate"], _SH).strftime("%Y-%m-%d") \
+        if info["pubdate"] else "未知"
+    meta = f'<span class="owner">{owner}</span>'
+    if tname:
+        meta += f'<span class="sep">|</span>{tname}'
+    meta += f'<span class="sep">|</span>发布于 {date}'
+
+    stats = [
+        ("播放", info["view"]), ("弹幕", info["danmaku"]), ("点赞", info["like"]),
+        ("投币", info["coin"]), ("收藏", info["favorite"]),
+        ("评论", info["reply"]), ("分享", info["share"]),
+    ]
+    stats_html = "".join(
+        f'<div class="stat"><div class="num">{_fmt_count(v)}</div>'
+        f'<div class="label">{k}</div></div>'
+        for k, v in stats
+    )
+
+    desc_html = f'<div class="desc">简介：{esc(desc)}</div>' if desc else ""
+    bvid = esc(info["bvid"])
+    height = _page_height(head_h, title_h, bool(desc))
+
+    body = f"""
+<div class="body">
+  <div class="title">{esc(title)}</div>
+  <div class="meta">{meta}</div>
+  <div class="stats">{stats_html}</div>
+  {desc_html}
+  <div class="footer">
+    <span class="brand">哔哩哔哩 bilibili.com</span>
+    <span class="link">{bvid}</span>
+  </div>
+</div>"""
+
+    page = (
+        '<!DOCTYPE html><html><head><meta charset="utf-8">'
+        f"<style>{_CSS}@page {{ size: 900px {height}px; margin: 0; }}</style>"
+        "</head><body>" + cover_html + body + "</body></html>"
+    )
+    return page, height
+
+
+async def _fetch_cover_b64(pic_url: str) -> str | None:
+    """下载封面并转为 data: URL 内嵌（weasyprint 只允许 data: 资源，防 SSRF）。"""
+    if not pic_url:
+        return None
+    try:
+        client = get_http_client(10.0)
+        resp = await client.get(pic_url, headers=_HEADERS)
+        data = resp.content
+        if len(data) > _MAX_COVER_BYTES:
+            _logger.warning("封面图异常大(%d bytes)已跳过: %s", len(data), pic_url)
+            return None
+        mime = (resp.headers.get("content-type") or "image/jpeg").split(";")[0].strip()
+        b64 = base64.b64encode(data).decode()
+        return f"data:{mime};base64,{b64}"
+    except httpx.HTTPError:
+        _logger.warning("封面下载失败: %s", pic_url)
+        return None
+
+
+async def build_card_image(info: dict) -> str | None:
+    """渲染图片卡片并返回 PNG 路径；渲染异常返回 None（调用方回退文本卡片）。"""
+    bvid = info["bvid"]
+    now = time.time()
+    cached = _img_cache.get(bvid)
+    if cached and cached[0] > now and os.path.exists(cached[1]):
+        return cached[1]
+    cover_b64 = await _fetch_cover_b64(info.get("pic", ""))
+    html_text, _ = _build_html(info, cover_b64)
+    try:
+        path = await render_html_to_png_async(html_text, "bili", CACHE_DIR, max_age=2 * 60 * 60)
+    except Exception:
+        _logger.warning("B站卡片渲染失败 bvid=%s", bvid, exc_info=True)
+        return None
+    if len(_img_cache) > 100:  # 渲染缓存有界
+        expired = [k for k, (exp, _) in _img_cache.items() if exp <= now]
+        for k in expired:
+            _img_cache.pop(k, None)
+    _img_cache[bvid] = (now + _CACHE_TTL, path)
+    return path
 
 
 def _prune_state(now: float) -> None:
@@ -201,4 +370,9 @@ async def handle_bili_link(event: GroupMessageEvent):
     _group_last[gid] = now
     _recent[(gid, vid)] = now
     _prune_state(now)
-    await bili_matcher.send(build_card(info))
+
+    path = await build_card_image(info)
+    if path:
+        await bili_matcher.send(MessageSegment.image("file://" + path))
+    else:
+        await bili_matcher.send(build_card(info))  # 渲染失败回退文本卡片
