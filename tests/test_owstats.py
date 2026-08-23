@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import pytest
 from conftest import Message, MessageEvent, MessageSegment
@@ -12,6 +13,8 @@ owstats = load_plugin("owstats")
 def _reset_query_state():
     yield
     owstats._last_query.clear()
+    owstats._warmup_state["busy"] = False
+    owstats._warmup_state["deadline"] = 0.0
 
 
 def test_summary_timeouts_cover_cold_cache():
@@ -106,3 +109,24 @@ def test_query_cooldown_blocks_second_call_within_window():
     remain = owstats._check_cooldown("u1")
     assert 0 < remain <= owstats._QUERY_COOLDOWN
     assert owstats._check_cooldown("u2") == 0.0  # 不同用户互不影响
+
+
+def test_warmup_busy_notice_idle_returns_empty():
+    assert owstats._warmup_busy_notice() == ""
+
+
+def test_warmup_busy_notice_reports_minutes_and_seconds():
+    owstats._warmup_state["busy"] = True
+    owstats._warmup_state["deadline"] = time.time() + 130
+    text = owstats._warmup_busy_notice()
+    assert "预热" in text and "分钟" in text
+    owstats._warmup_state["deadline"] = time.time() + 8
+    assert "秒" in owstats._warmup_busy_notice()
+
+
+def test_warmup_busy_notice_expires_automatically():
+    # deadline 已过：即使 busy 标志因异常没被清掉，也不会永久"正忙"
+    owstats._warmup_state["busy"] = True
+    owstats._warmup_state["deadline"] = time.time() - 5
+    assert owstats._warmup_busy_notice() == ""
+    assert owstats._warmup_remaining() == 0.0

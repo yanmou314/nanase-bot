@@ -126,19 +126,28 @@ async def _warmup_player(tag: str) -> bool:
 if scheduler is not None:
     @scheduler.scheduled_job("cron", minute="7", hour="9-23/2", id="owstats_warmup", timezone="Asia/Shanghai")
     async def _warmup_bound_players():
-        """白天每两小时预热所有绑定玩家，让 .总结 查询尽量命中缓存。"""
+        """白天每两小时预热所有绑定玩家，让 .总结 查询尽量命中缓存。
+
+        预热期间用户查询会收到"正忙+预计时长"提示（见 _warmup_busy_notice），
+        不与预热共享并发槽和上游 5 请求/秒配额。
+        """
         if not WARMUP_ENABLED:
             return
         tags = sorted(set(_load_bindings().values()))
         if not tags:
             return
         logger.info(f"owstats 开始预热 {len(tags)} 个绑定玩家")
-        for tag in tags:
-            if OW_LOCK.locked():  # 用户查询优先，本轮预热让位
-                logger.info("owstats 预热检测到用户查询进行中，本轮中止")
-                return
-            await _warmup_player(tag)
-            await asyncio.sleep(WARMUP_GAP_SECONDS)
+        try:
+            for idx, tag in enumerate(tags):
+                if OW_LOCK.locked():  # 预热开始前已有用户查询在跑，本轮让位
+                    logger.info("owstats 预热检测到用户查询进行中，本轮中止")
+                    return
+                _warmup_state["busy"] = True
+                _warmup_state["deadline"] = time.time() + (len(tags) - idx) * WARMUP_PER_PLAYER_BUDGET
+                await _warmup_player(tag)
+                await asyncio.sleep(WARMUP_GAP_SECONDS)
+        finally:
+            _warmup_state["busy"] = False
 
 
 async def _post_json(path: str, payload: dict, timeout: float = 90.0):
@@ -206,6 +215,28 @@ def _check_cooldown(uid: str) -> float:
         return remain
     _last_query[uid] = now
     return 0.0
+
+
+# 预热状态：预热进行中时用户查询直接提示稍后再试，而不是与预热共享并发槽/上游限速。
+# deadline 到点自动视为空闲，即使预热任务异常退出也不会永久"正忙"。
+_warmup_state = {"busy": False, "deadline": 0.0}
+WARMUP_PER_PLAYER_BUDGET = 45  # 单玩家预热+间隔的耗时估算（秒），用于向用户报 ETA
+
+
+def _warmup_remaining() -> float:
+    if not _warmup_state["busy"]:
+        return 0.0
+    return max(0.0, _warmup_state["deadline"] - time.time())
+
+
+def _warmup_busy_notice() -> str:
+    """预热进行中返回带预计等待时长的提示，空闲返回空串。"""
+    remain = _warmup_remaining()
+    if remain <= 0:
+        return ""
+    if remain >= 60:
+        return f"机器人正在后台预热数据，约 {int(remain // 60) + 1} 分钟后完成，请稍后再试～"
+    return f"机器人正在后台预热数据，约 {int(remain) + 1} 秒后完成，请稍后再试～"
 
 
 async def _wait_queue(matcher, event: MessageEvent):
@@ -280,6 +311,9 @@ async def match_report(event: MessageEvent, arg: Message = CommandArg()):
         await matchrep_cmd.finish(at + _BAD_ID_HINT)
     if not tag:
         await matchrep_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.战报 名字#数字")
+    busy = _warmup_busy_notice()
+    if busy:
+        await matchrep_cmd.finish(at + busy)
     remain = _check_cooldown(str(event.user_id))
     if remain > 0:
         await matchrep_cmd.finish(at + f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～")
@@ -314,6 +348,9 @@ async def rank_history(event: MessageEvent, arg: Message = CommandArg()):
         await rankhist_cmd.finish(at + _BAD_ID_HINT)
     if not tag:
         await rankhist_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.段位 名字#数字")
+    busy = _warmup_busy_notice()
+    if busy:
+        await rankhist_cmd.finish(at + busy)
     remain = _check_cooldown(str(event.user_id))
     if remain > 0:
         await rankhist_cmd.finish(at + f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～")
@@ -343,6 +380,9 @@ async def strength(event: MessageEvent, arg: Message = CommandArg()):
         await strength_cmd.finish(at + _BAD_ID_HINT)
     if not tag:
         await strength_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.强度 名字#数字")
+    busy = _warmup_busy_notice()
+    if busy:
+        await strength_cmd.finish(at + busy)
     remain = _check_cooldown(str(event.user_id))
     if remain > 0:
         await strength_cmd.finish(at + f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～")
@@ -384,6 +424,9 @@ async def summary(event: MessageEvent, arg: Message = CommandArg()):
         await summary_cmd.finish(at + _BAD_ID_HINT)
     if not tag:
         await summary_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.总结 名字#数字")
+    busy = _warmup_busy_notice()
+    if busy:
+        await summary_cmd.finish(at + busy)
     remain = _check_cooldown(str(event.user_id))
     if remain > 0:
         await summary_cmd.finish(at + f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～")
