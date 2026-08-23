@@ -79,14 +79,17 @@ def _font(key: str, size: int):
 
 
 def extract_ids(*texts: str) -> list[str]:
-    """从文本中提取去重后的视频/番剧 ID（BV 原样，av/ep/ss 转小写号段）。"""
+    """提取视频/番剧 ID；ep/ss 仅在 B站链接上下文中识别。"""
     found: list[str] = []
     for text in texts:
-        found.extend(_BV_RE.findall(text or ""))
-        found.extend(f"av{n}" for n in _AV_RE.findall(text or ""))
-        found.extend(f"ep{n}" for n in _EP_RE.findall(text or ""))
-        found.extend(f"ss{n}" for n in _SS_RE.findall(text or ""))
+        value = text or ""
+        found.extend(_BV_RE.findall(value))
+        found.extend(f"av{n}" for n in _AV_RE.findall(value))
+        if re.search(r"(?:bilibili\.com|b23\.tv)", value, re.IGNORECASE):
+            found.extend(f"ep{n}" for n in _EP_RE.findall(value))
+            found.extend(f"ss{n}" for n in _SS_RE.findall(value))
     return list(dict.fromkeys(found))
+
 
 
 def _collect_strings(obj) -> list[str]:
@@ -176,6 +179,7 @@ async def _fetch_video_info(vid: str) -> dict | None:
         d = data["data"]
         stat = d.get("stat") or {}
         return {
+            "kind": "video",
             "bvid": d.get("bvid") or vid,
             "title": d.get("title") or "",
             "pic": (d.get("pic") or "").replace("http://", "https://"),
@@ -219,11 +223,12 @@ async def _fetch_bangumi_info(vid: str) -> dict | None:
         if vid.startswith("ep"):
             ep_id = int(vid[2:])
             ep = next((e for e in episodes if e.get("id") == ep_id), None)
-        if ep is None:
-            ep = episodes[-1] if episodes else None  # ss 链接或 ep 未命中时取最新一集
+        requested_ep_missing = vid.startswith("ep") and ep is None
+        if ep is None and vid.startswith("ss"):
+            ep = episodes[-1] if episodes else None
 
         title = r.get("title") or "未知番剧"
-        ep_title = ((ep or {}).get("long_title") or (ep or {}).get("title") or "").strip()
+        ep_title = "" if requested_ep_missing else ((ep or {}).get("long_title") or (ep or {}).get("title") or "").strip()
         if ep_title:
             title = f"{title}｜{ep_title}"
         rating = (media.get("rating") or {}).get("score") or 0
@@ -236,6 +241,7 @@ async def _fetch_bangumi_info(vid: str) -> dict | None:
         if rating:
             stats.append(("评分", f"{rating}"))
         return {
+            "kind": "bangumi",
             "bvid": (ep or {}).get("bvid") or vid,
             "title": title,
             "pic": ((ep or {}).get("cover") or r.get("cover") or "").replace("http://", "https://"),
@@ -244,7 +250,7 @@ async def _fetch_bangumi_info(vid: str) -> dict | None:
             "videos": len(episodes) or 1,
             "desc": _clean_desc(r.get("evaluate")),
             "duration": int((ep or {}).get("duration") or 0) // 1000
-            if (ep or {}).get("duration", 0) and (ep or {}).get("duration", 0) > 10000 else int((ep or {}).get("duration") or 0),
+            if (ep or {}).get("duration", 0) and (ep or {}).get("duration", 0) >= 60000 else int((ep or {}).get("duration") or 0),
             "pubdate": int((ep or {}).get("pub_time") or 0),
             "link": f"https://www.bilibili.com/bangumi/play/{vid}",
             "stats_display": stats,
@@ -278,6 +284,11 @@ def _fmt_desc(desc: str, limit: int = 60) -> str:
     return flat if len(flat) <= limit else flat[:limit] + "…"
 
 
+def _truncate(value: str, limit: int = 20) -> str:
+    value = value or ""
+    return value if len(value) <= limit else value[:limit] + "…"
+
+
 # ---------------- 文本卡片（渲染失败的回退形态） ----------------
 
 def _fmt_stat(value) -> str:
@@ -289,8 +300,10 @@ def build_card(info: dict) -> MessageSegment:
     """封面图 + 信息卡片（文本段包裹，标题/UP主名不会触发 CQ 码解析）。"""
     date = datetime.fromtimestamp(info["pubdate"], _SH).strftime("%Y-%m-%d") \
         if info["pubdate"] else "未知"
-    multi = f"（全{info['videos']}P）" if info.get("videos", 1) > 1 else ""
-    owner_line = f"👤 UP主：{info['owner']}"
+    unit = "话" if info.get("kind") == "bangumi" else "P"
+    multi = f"（全{info['videos']}{unit}）" if info.get("videos", 1) > 1 else ""
+    owner = _truncate(info.get("owner", ""), 20) or "未知UP主"
+    owner_line = f"👤 UP主：{owner}"
     if info.get("tname"):
         owner_line += f" ｜ {info['tname']}"
     desc = _fmt_desc(info.get("desc", ""))
@@ -393,7 +406,8 @@ def _render_card(info: dict, cover_bytes: bytes | None):
 
     # 角标：多P（左上，粉底）与时长（右下，半透明黑底，仅真实封面时）
     if info.get("videos", 1) > 1:
-        tag = f"全{info['videos']}P"
+        unit = "话" if info.get("kind") == "bangumi" else "P"
+        tag = f"全{info['videos']}{unit}"
         tw = draw.textlength(tag, font=meta_font)
         draw.rounded_rectangle([14, 12, 14 + tw + 20, 46], radius=6, fill=_C_PINK)
         draw.text((24, 15), tag, font=meta_font, fill=(255, 255, 255))
@@ -415,7 +429,7 @@ def _render_card(info: dict, cover_bytes: bytes | None):
         draw.text((30, y), line, font=title_font, fill=_C_DARK)
         y += 44
     y += 14
-    owner = info["owner"] or "未知UP主"
+    owner = _truncate(info.get("owner", ""), 20) or "未知UP主"
     draw.text((30, y), owner, font=meta_font, fill=_C_PINK)
     x = 30 + draw.textlength(owner, font=meta_font) + 10
     for part in (info.get("tname", ""), f"发布于 {date}"):
@@ -539,23 +553,31 @@ async def handle_bili_link(event: GroupMessageEvent):
     if not ids:
         return
 
-    # 重复请求：60 秒内已答复过保持静默（防连点刷屏）；之后重发缓存图而非沉默
+    # 重复请求：60 秒内已答复过保持静默（防连点刷屏）；之后重发缓存图而非沉默。
+    # 先扫描完整消息，避免某个旧链接的缓存重发吞掉同消息中的新链接。
+    cached_vid = None
     for v in ids:
         if now - _recent.get((gid, v), 0.0) < 60.0:
-            return
+            continue
         entry = _info_cache.get(v)
         if entry and entry[0] > now:
             img = _img_cache.get(entry[1]["bvid"])
             if img and img[0] > now and os.path.exists(img[1]):
-                _recent[(gid, v)] = now
-                await bili_matcher.send(MessageSegment.image("file://" + img[1]))
-                return
+                cached_vid = (v, img[1])
+                continue
 
     if now - _group_last.get(gid, 0.0) < _GROUP_COOLDOWN:
         return
 
-    # 跳过去重窗口内已解析过的视频，取第一个未解析的
+    # 跳过去重窗口内已解析过的视频，取第一个未解析的；缓存重发仅在没有新链接时执行。
     vid = next((v for v in ids if now - _recent.get((gid, v), 0.0) >= _DUP_WINDOW), None)
+    if vid is None:
+        if cached_vid:
+            v, path = cached_vid
+            _recent[(gid, v)] = now
+            _prune_state(now)
+            await bili_matcher.send(MessageSegment.image("file://" + path))
+        return
     if vid is None:
         return
 
