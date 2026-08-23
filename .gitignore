@@ -11,9 +11,14 @@ plugins/**/push_config.json
 plugins/**/bindings.json
 plugins/**/auto_approve.json
 plugins/**/config.json
+plugins/**/ai_config.json
 plugins/**/repeater_state.json
+plugins/**/join_state.json
 **/stats.db
 **/stats.db-*
+
+# 损坏状态文件的自动备份（含 QQ 号）
+*.corrupt-*
 
 # 备份与临时文件
 *.bak*
@@ -25,10 +30,8 @@ __pycache__/
 *.pyc
 venv/
 .venv/
+.pytest_cache/
 
 # 图片缓存
 plugins/**/cache/
-
-# 关键词触发 + 群成员时长状态（含 QQ 号/群号）
-plugins/keyword_reply/keyword_config.json
-plugins/group_leave/join_state.json
+plugins-disabled/**/cache/

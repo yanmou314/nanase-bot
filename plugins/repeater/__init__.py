@@ -10,11 +10,14 @@ from nonebot import get_driver, on_message
 from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
 
+from common import save_json_state
+
 rep_matcher = on_message(priority=50, block=False)
 
 _track: dict = {}
 _replied_ts: dict = {}
 _replied_fp: dict = {}  # 每个群最近一次已复读的指纹；同一串连续复读只触发一次
+_last_msg_ts: dict = {}  # 每群最近一条消息时间戳（仅内存，作为 _prune 的活动依据）
 
 _COMMAND_START = tuple(s for s in get_driver().config.command_start if s)
 
@@ -57,17 +60,16 @@ def _load_state() -> None:
 
 def _save_state(snapshot: dict | None = None) -> None:
     try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(
-                snapshot or {
-                    # 文本指纹只持久化哈希部分，payload（原文）仅存内存；
-                    # 不可复读消息的指纹为 None，只参与计数不落盘
-                    "track": {str(g): [list(i[:2]) for i in d if i] for g, d in _track.items()},
-                    "replied_ts": {str(g): t for g, t in _replied_ts.items()},
-                },
-                f,
-                ensure_ascii=False,
-            )
+        # 统一走 common 的原子写（tmp + fsync + os.replace），只存哈希，indent=2 带来的体积可接受
+        save_json_state(
+            STATE_FILE,
+            snapshot or {
+                # 文本指纹只持久化哈希部分，payload（原文）仅存内存；
+                # 不可复读消息的指纹为 None，只参与计数不落盘
+                "track": {str(g): [list(i[:2]) for i in d if i] for g, d in _track.items()},
+                "replied_ts": {str(g): t for g, t in _replied_ts.items()},
+            },
+        )
     except Exception:
         pass
 
@@ -89,13 +91,15 @@ async def _save_on_shutdown():
 
 
 def _prune() -> None:
-    """清理 7 天以上无活动的群记录，防止字典无限增长。"""
+    """清理 7 天以上无活动（既没新消息也没复读）的群记录，防止字典无限增长。"""
     cutoff = time.time() - 7 * 86400
     for gid in list(_track):
-        if _replied_ts.get(gid, 0) < cutoff:
+        # 以最近一条消息时间为主；仅从持久化恢复、本进程还没收到过消息的群退回按最后复读时间判断
+        if max(_last_msg_ts.get(gid, 0), _replied_ts.get(gid, 0)) < cutoff:
             _track.pop(gid, None)
             _replied_ts.pop(gid, None)
             _replied_fp.pop(gid, None)
+            _last_msg_ts.pop(gid, None)
 
 
 def _fingerprint(event: GroupMessageEvent):
@@ -115,6 +119,7 @@ async def repeater(bot: Bot, event: GroupMessageEvent):
     if len(_track) > 2000:
         _prune()
     gid = event.group_id
+    _last_msg_ts[gid] = time.time()  # 记录群活动时间（仅内存），供 _prune 判断
     fp = _fingerprint(event)
 
     deq = _track.setdefault(gid, deque(maxlen=3))

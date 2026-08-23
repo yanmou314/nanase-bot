@@ -6,10 +6,11 @@ import os
 import threading
 
 from nonebot import on_command
+from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import MessageEvent, MessageSegment
 from PIL import Image, ImageDraw, ImageFont
 
-from common import FONTS, cleanup_cache, is_owner
+from common import FONTS, OWNER, cleanup_cache, is_owner
 
 _logger = logging.getLogger(__name__)
 _BASE_DIR = os.path.dirname(__file__)
@@ -39,6 +40,7 @@ TEXT = """🤖 机器人指令菜单
 ━━━━━━━━━━━━━━━━━━━━
 🎲 娱乐
   .rp            · 抽签 + 今日运势（别名：抽签、运势、求签）
+  今天吃什么      · 群里聊到“吃什么/吃啥”时随机推荐美食
 
 🎮 守望先锋（国服）
   .绑定 名字#数字  · 绑定你的战网ID（一次即可）
@@ -55,9 +57,6 @@ TEXT = """🤖 机器人指令菜单
 ⏳ 时间提醒
   .倒计时         · 查看下一个周末和节假日倒计时
 
-💸 价格对比
-  .ai            · 主流大模型 API 价格对比图（实时抓取，别名 .价格图）
-
 ━━━━━━━━━━━━━━━━━━━━
 📌 指令均以 . 开头；绑定后 [ID] 可省略"""
 
@@ -68,10 +67,11 @@ OWNER_TEXT = """
   .词云 [N]       · 今日热词（N=1~60，默认40）
 
 📢 每日推送（在哪个群开启就推送到哪个群，可多群）
-  .新闻开启        · 本群开启每日新闻推送（每天 7:00）
-  .新闻关闭        · 本群关闭每日新闻
-  .新闻测试        · 立即发送新闻总结测试
+  .新闻开启        · 本群开启每日晨报推送（每天 7:00，早安问候·农历节气·昨日新闻）
+  .新闻关闭        · 本群关闭每日晨报推送
+  .新闻测试        · 立即发送今日晨报测试
   .新闻状态        · 查看已开启推送的群
+  .新闻key        · 私聊设置晨报AI的免费key（智谱GLM-Flash）
   .词云开启        · 本群开启每日词云推送（每天 00:00）
   .词云关闭        · 本群关闭每日词云推送
   .词云状态        · 查看已开启推送的群
@@ -82,7 +82,6 @@ OWNER_TEXT = """
   .统计开启        · 本群开启每日指令统计（每天 00:00）
   .统计关闭        · 本群关闭指令统计
   .统计状态        · 查看已开启推送的群
-  .ai 更新        · 强制刷新大模型价格并覆盖缓存
 
 💬 随机插话（机器人围观群聊，按概率以人设插话）
   .插话开启        · 本群开启随机插话
@@ -154,11 +153,9 @@ def _render_help_image(text: str, variant: str) -> str:
         if os.path.isfile(path) and os.path.getsize(path) > 0:
             return path
 
-        try:
-            title_font = ImageFont.truetype(FONTS["noto_bold"], 42)
-            body_font = ImageFont.truetype(FONTS["noto_reg"], 27)
-        except OSError:
-            title_font = body_font = ImageFont.load_default()
+        # 字体缺失时直接抛错交给上层走文本回退；load_default 不含 CJK，产出整页乱码
+        title_font = ImageFont.truetype(FONTS["noto_bold"], 42)
+        body_font = ImageFont.truetype(FONTS["noto_reg"], 27)
 
         width = 1080
         margin = 58
@@ -200,15 +197,24 @@ def _render_help_image(text: str, variant: str) -> str:
 
 
 @help_cmd.handle()
-async def handle(event: MessageEvent):
+async def handle(bot: Bot, event: MessageEvent):
     text = TEXT
     variant = "public"
-    if is_owner(event):
+    owner = is_owner(event)
+    if owner:
         text += OWNER_TEXT
         variant = "owner"
     try:
         path = await asyncio.to_thread(_render_help_image, text, variant)
+        content = MessageSegment.image("file://" + path)
     except Exception:
         _logger.exception("帮助图片生成失败，回退发送文本")
-        await help_cmd.finish(text)
-    await help_cmd.finish(MessageSegment.image("file://" + path))
+        content = text
+    # 管理菜单标注「仅你可见」：群聊里不广播，私发给主人后群里只回简短确认
+    if owner and hasattr(event, "group_id"):
+        try:
+            await bot.send_private_msg(user_id=int(OWNER), message=content)
+        except Exception:
+            _logger.warning("主人帮助菜单私发失败", exc_info=True)
+        await help_cmd.finish("📖 完整菜单已私发给你")
+    await help_cmd.finish(content)

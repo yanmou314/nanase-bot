@@ -3,6 +3,7 @@
 必须在任何插件导入前完成 stub 注入（pytest 会在收集测试前先导入本文件）。
 """
 import logging
+import os
 import sys
 import types
 from pathlib import Path
@@ -11,10 +12,15 @@ BOT_ROOT = Path(__file__).resolve().parents[1]
 if str(BOT_ROOT) not in sys.path:
     sys.path.insert(0, str(BOT_ROOT))
 
+# 固定测试用 owner QQ，避免 int(OWNER) 等路径依赖真实环境变量
+os.environ["QQBOT_OWNER"] = "10000"
+
 
 class _Matcher:
     def __init__(self, *args, **kwargs):
         self.handlers = []
+        self.sent = []  # send() 发送过的消息（供断言实际发送内容）
+        self.finished = []  # finish() 结束时带的消息
 
     def handle(self):
         def deco(fn):
@@ -23,9 +29,11 @@ class _Matcher:
         return deco
 
     async def finish(self, message=None, **kwargs):
+        self.finished.append(message)
         raise FinishedException(message)
 
     async def send(self, message=None, **kwargs):
+        self.sent.append(message)
         return None
 
 
@@ -37,10 +45,22 @@ class FinishedException(Exception):
 class _Driver:
     config = types.SimpleNamespace(command_start=(".",))
 
+    def __init__(self):
+        self._on_startup = []
+        self._on_shutdown = []
+        self._on_bot_connect = []
+
     def on_shutdown(self, fn):
+        self._on_shutdown.append(fn)
         return fn
 
     def on_startup(self, fn):
+        self._on_startup.append(fn)
+        return fn
+
+    def on_bot_connect(self, fn):
+        """机器人连接钩子；与 on_startup 同样注册到列表并原样返回（恒等装饰器）。"""
+        self._on_bot_connect.append(fn)
         return fn
 
 
@@ -57,6 +77,8 @@ def get_bot():
 
 class Message:
     def __init__(self, segments=None):
+        if isinstance(segments, MessageSegment):
+            segments = [segments]
         self.segments = list(segments or [])
 
     def __add__(self, other):
@@ -101,6 +123,15 @@ class MessageSegment:
     def reply(cls, mid):
         return cls("reply", {"id": mid})
 
+    def __add__(self, other):
+        if isinstance(other, MessageSegment):
+            return Message([self, other])
+        if isinstance(other, Message):
+            return Message([self] + other.segments)
+        if isinstance(other, str):
+            return Message([self, MessageSegment.text(other)])
+        return NotImplemented
+
     def __str__(self):
         if self.type == "text":
             return self.data.get("text", "")
@@ -134,8 +165,32 @@ class PokeNotifyEvent(Event):
     pass
 
 
+class GroupDecreaseNoticeEvent(Event):
+    """退群通知：group_id/user_id/sub_type（leave|kick）+ operator_id。"""
+
+    def __init__(self, group_id=0, user_id=0, sub_type="leave", operator_id=0, self_id=10000, **kw):
+        super().__init__(group_id=group_id, user_id=user_id, sub_type=sub_type,
+                         operator_id=operator_id, self_id=self_id, **kw)
+
+
+class GroupIncreaseNoticeEvent(Event):
+    """入群通知：group_id/user_id/sub_type。"""
+
+    def __init__(self, group_id=0, user_id=0, sub_type="", operator_id=0, self_id=10000, **kw):
+        super().__init__(group_id=group_id, user_id=user_id, sub_type=sub_type,
+                         operator_id=operator_id, self_id=self_id, **kw)
+
+
 class Bot:
-    pass
+    """可实例化的 Bot stub：send_private_msg 记录到 sent_private 供断言。"""
+
+    def __init__(self, self_id="10000"):
+        self.self_id = str(self_id)
+        self.sent_private = []
+
+    async def send_private_msg(self, user_id=None, message=None, **kwargs):
+        self.sent_private.append({"user_id": user_id, "message": message})
+        return None
 
 
 def _install_stubs():
@@ -168,6 +223,8 @@ def _install_stubs():
     v11.FriendRequestEvent = FriendRequestEvent
     v11.GroupRequestEvent = GroupRequestEvent
     v11.PokeNotifyEvent = PokeNotifyEvent
+    v11.GroupDecreaseNoticeEvent = GroupDecreaseNoticeEvent
+    v11.GroupIncreaseNoticeEvent = GroupIncreaseNoticeEvent
     v11.Bot = Bot
     onebot.v11 = v11
 

@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from nonebot import get_driver
 
-from common import FONTS, close_http_clients, get_http_client, gradient_background, render_html_to_png
+from common import RENDER_SEM, close_http_clients, get_http_client, gradient_background, render_html_to_png
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 _SH = ZoneInfo("Asia/Shanghai")  # 与数据统计口径保持同一时区，避免海外部署时标题日期错一天
@@ -31,9 +31,8 @@ async def _fetch_avatar(user_id: int) -> bytes | None:
     return None
 
 
-def _row_html(rank: int, name: str, cnt: int, max_cnt: int, total: int, av_b64: str | None) -> str:
+def _row_html(rank: int, name: str, cnt: int, max_cnt: int, av_b64: str | None) -> str:
     ratio = max(cnt / max_cnt, 0.02) if max_cnt else 0
-    share = cnt / total * 100 if total else 0
     name_esc = html_mod.escape(name, quote=True)  # 防止昵称注入 HTML
     if av_b64:
         avatar = (
@@ -59,7 +58,7 @@ def _render(rows: list, avatars: dict) -> str:
     total = sum(c for _, _, c in rows)
     max_cnt = max(c for _, _, c in rows) or 1
     body = "".join(
-        _row_html(rank, name, cnt, max_cnt, total,
+        _row_html(rank, name, cnt, max_cnt,
                   base64.b64encode(avatars[uid]).decode() if avatars.get(uid) else None)
         for rank, (uid, name, cnt) in enumerate(rows)
     )
@@ -118,4 +117,6 @@ body {{ width: 900px; height: 800px; font-family: "Noto Sans CJK SC", sans-serif
 async def build_card_async(rows: list) -> str:
     results = await asyncio.gather(*(_fetch_avatar(uid) for uid, _, _ in rows))
     avatars = {uid: data for (uid, _, _), data in zip(rows, results) if data}
-    return await asyncio.to_thread(_render, rows, avatars)
+    # weasyprint 渲染经全局渲染信号量串行化，避免小机器上并发渲染打爆内存
+    async with RENDER_SEM:
+        return await asyncio.to_thread(_render, rows, avatars)

@@ -27,6 +27,7 @@ MIN_BUFFER = 5  # 缓冲至少 5 条消息才考虑插话
 GROUP_CONTEXT_SIZE = 20  # 每个群共同保留最近 20 条消息作为上下文
 BUFFER_SIZE = GROUP_CONTEXT_SIZE  # 保留旧名称，便于状态查询和已有测试复用
 MAX_GROUPS = 200  # 最多为多少个群维护缓冲，防内存增长
+MIN_INTERJECT_INTERVAL = 60  # 同群两次插话的最小间隔秒数，防止活跃群短时连续插话刷屏
 
 _state = {
     "enabled_groups": [],
@@ -35,6 +36,7 @@ _state = {
 
 _buffers: dict[int, deque] = {}  # group_id -> 最近消息文本
 _last_interject: dict[int, float] = {}  # group_id -> 上次插话时间戳
+_last_seen: dict[int, float] = {}  # group_id -> 最近一条消息时间戳（缓冲驱逐依据）
 _inflight: set[int] = set()  # 正在生成插话的群，防止同群并发触发
 
 FALLBACK_LINES = [
@@ -88,11 +90,16 @@ def _is_enabled(gid: int) -> bool:
 
 def _record(gid: int, sender: str, text: str) -> None:
     """把消息写入群级上下文；同一群所有成员共享这一条 20 条消息队列。"""
+    _last_seen[gid] = time.time()
     buf = _buffers.get(gid)
     if buf is None:
         if len(_buffers) >= MAX_GROUPS:
-            stale = min(_buffers, key=lambda g: _last_interject.get(g, 0))
+            # 按最近一条消息的时间驱逐最不活跃的群（从未插话的活跃群不会被误伤），
+            # 并同步清掉对应辅助记录，避免字典泄漏
+            stale = min(_buffers, key=lambda g: _last_seen.get(g, 0))
             _buffers.pop(stale, None)
+            _last_interject.pop(stale, None)
+            _last_seen.pop(stale, None)
         buf = _buffers[gid] = deque(maxlen=GROUP_CONTEXT_SIZE)
     buf.append(f"{sender}: {text}")
 
@@ -145,6 +152,8 @@ async def watch(bot: Bot, event: GroupMessageEvent):
         return
     if gid in _inflight:  # 上一条插话还在生成中，避免同群并发触发
         return
+    if time.time() - _last_interject.get(gid, 0) < MIN_INTERJECT_INTERVAL:
+        return  # 距上次插话不足 60 秒，放弃本次触发，防止活跃群短时连续插话刷屏
     if random.random() >= _state["probability"]:
         return
 
@@ -194,6 +203,8 @@ async def disable(event: GroupMessageEvent):
         _state["enabled_groups"].remove(gid)
     _save_state()
     _buffers.pop(gid, None)
+    _last_interject.pop(gid, None)
+    _last_seen.pop(gid, None)
     logger.info(f"random_chat 主人关闭群 {gid}")
     await off_cmd.finish("已关闭本群随机插话")
 

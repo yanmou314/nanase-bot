@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import pytest
+import httpx
 from conftest import MessageEvent
 
 from helpers import load_plugin
@@ -278,4 +279,125 @@ def test_timeout_notifies_owner_with_cooldown(monkeypatch):
 
     assert len(bot.calls) == 1
     assert bot.calls[0]["user_id"] == 123456
-    assert "超时" in str(bot.calls[0]["message"])
+    # 新文案：说明 AI 接口超时/不可用并提示检查连通性，不再提青云客
+    text = str(bot.calls[0]["message"])
+    assert "超时" in text
+    assert "本次未回复" in text
+    assert "连通性" in text
+    assert "青云客" not in text
+
+
+class _FlakyClient:
+    """前 fail_times 次抛网络异常，之后返回正常 payload。"""
+
+    def __init__(self, fail_times, payload=None):
+        self.fail_times = fail_times
+        self.payload = payload or {"choices": [{"message": {"content": "成功回复"}}]}
+        self.calls = 0
+
+    async def post(self, url, headers=None, json=None, timeout=None):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise httpx.ConnectError("connection refused")
+        return _FakeResponse(self.payload)
+
+
+def test_chat_completion_retries_then_succeeds(monkeypatch):
+    mod = auto_chat
+    client = _FlakyClient(fail_times=2)
+    monkeypatch.setattr(mod, "_load_key", lambda: "test-key")
+    monkeypatch.setattr(mod, "_get_http_client", lambda: client)
+    monkeypatch.setattr(mod, "_RETRY_DELAY", 0)
+
+    out = asyncio.run(mod.chat_completion([{"role": "user", "content": "hi"}]))
+
+    assert out == "成功回复"
+    assert client.calls == 3
+
+
+def test_chat_completion_gives_up_after_three_failures(monkeypatch):
+    mod = auto_chat
+    client = _FlakyClient(fail_times=99)
+    monkeypatch.setattr(mod, "_load_key", lambda: "test-key")
+    monkeypatch.setattr(mod, "_get_http_client", lambda: client)
+    monkeypatch.setattr(mod, "_RETRY_DELAY", 0)
+
+    with pytest.raises(Exception):
+        asyncio.run(mod.chat_completion([{"role": "user", "content": "hi"}]))
+
+    assert client.calls == 3  # 第 3 次失败后不再请求
+
+
+def test_chat_completion_retries_on_empty_content(monkeypatch):
+    mod = auto_chat
+    client = _FlakyClient(fail_times=1, payload={"choices": [{"message": {"content": "  "}}]})
+    # 第 1 次返回空白，第 2 次起返回默认成功 payload
+    client.payloads = [{"choices": [{"message": {"content": "  "}}]}, {"choices": [{"message": {"content": "成功回复"}}]}]
+
+    async def post(url, headers=None, json=None, timeout=None):
+        client.calls += 1
+        return _FakeResponse(client.payloads[min(client.calls - 1, 1)])
+
+    client.post = post
+    monkeypatch.setattr(mod, "_load_key", lambda: "test-key")
+    monkeypatch.setattr(mod, "_get_http_client", lambda: client)
+    monkeypatch.setattr(mod, "_RETRY_DELAY", 0)
+
+    out = asyncio.run(mod.chat_completion([{"role": "user", "content": "hi"}]))
+
+    assert out == "成功回复"
+    assert client.calls == 2
+
+
+class _StatusClient:
+    """按序返回指定状态码的 HTTPStatusError，状态码耗尽后返回成功 payload。"""
+
+    def __init__(self, codes, payload=None):
+        self.codes = list(codes)
+        self.payload = payload or {"choices": [{"message": {"content": "成功回复"}}]}
+        self.calls = 0
+
+    async def post(self, url, headers=None, json=None, timeout=None):
+        self.calls += 1
+        if self.codes:
+            code = self.codes.pop(0)
+            request = httpx.Request("POST", "https://api.test/chat")
+            response = httpx.Response(code, request=request)
+
+            class _Err:
+                def raise_for_status(self):
+                    raise httpx.HTTPStatusError(
+                        f"HTTP {code}", request=request, response=response,
+                    )
+
+            return _Err()
+        return _FakeResponse(self.payload)
+
+
+def test_chat_completion_4xx_not_retried(monkeypatch):
+    # 401 等鉴权/请求格式类错误不可恢复：只请求 1 次即抛，不浪费重试
+    mod = auto_chat
+    client = _StatusClient([401])
+    monkeypatch.setattr(mod, "_load_key", lambda: "test-key")
+    monkeypatch.setattr(mod, "_get_http_client", lambda: client)
+    monkeypatch.setattr(mod, "_RETRY_DELAY", 0)
+
+    with pytest.raises(httpx.HTTPStatusError) as exc:
+        asyncio.run(mod.chat_completion([{"role": "user", "content": "hi"}]))
+
+    assert exc.value.response.status_code == 401
+    assert client.calls == 1
+
+
+def test_chat_completion_5xx_and_429_are_retried(monkeypatch):
+    # 5xx 与 429 属可重试错误：重试后成功
+    mod = auto_chat
+    client = _StatusClient([500, 429])
+    monkeypatch.setattr(mod, "_load_key", lambda: "test-key")
+    monkeypatch.setattr(mod, "_get_http_client", lambda: client)
+    monkeypatch.setattr(mod, "_RETRY_DELAY", 0)
+
+    out = asyncio.run(mod.chat_completion([{"role": "user", "content": "hi"}]))
+
+    assert out == "成功回复"
+    assert client.calls == 3

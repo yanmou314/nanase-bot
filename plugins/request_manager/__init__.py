@@ -4,7 +4,6 @@ import os
 import re
 import threading
 import time
-from datetime import datetime
 
 from nonebot import on_command, on_message, on_request
 from nonebot.adapters import Bot
@@ -15,9 +14,10 @@ from nonebot.adapters.onebot.v11 import (
     MessageEvent,
     MessageSegment,
 )
+from nonebot.matcher import Matcher
 from nonebot.params import CommandArg
 
-from common import OWNER
+from common import OWNER, is_owner, now_str
 
 _logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ async def _owner_decision_rule(event: MessageEvent) -> bool:
     群内（无需@）和私聊均始终识别，反馈只私发给主人、不在群里回话，
     避免审批操作被聊天插件当成聊天公开回复。
     """
-    if str(event.user_id) != OWNER:
+    if not is_owner(event):
         return False
     return event.get_plaintext().strip() in {"同意", "拒绝"}
 
@@ -53,10 +53,6 @@ auto_count_cmd = on_command("自动通过数量", aliases={"自动同意数量",
 _pending: dict[str, dict] = {}
 _save_lock = threading.Lock()
 _PENDING_TTL = 48 * 3600  # 与 QQ 侧 flag 有效期一致
-
-
-def _now() -> str:
-    return datetime.now().strftime("%m-%d %H:%M")
 
 
 def _purge_pending() -> None:
@@ -120,7 +116,7 @@ async def _auto_approve(bot: Bot, event: GroupRequestEvent, comment: str) -> boo
                 message=MessageSegment.text(
                     f"✅ 自动通过进群申请\n"
                     f"🏘 群号：{event.group_id}\n"
-                    f"👤 申请人：{event.user_id}（{_now()}）\n"
+                    f"👤 申请人：{event.user_id}（{now_str()}）\n"
                     f"💬 附言：{comment or '无'}\n"
                     f"🔑 命中关键字：{' / '.join(hit)}"
                 ),
@@ -130,20 +126,31 @@ async def _auto_approve(bot: Bot, event: GroupRequestEvent, comment: str) -> boo
             try:
                 await bot.send_private_msg(user_id=int(OWNER), message=MessageSegment.text(f"⚠️ 自动通过失败：{e}"))
             except Exception:
-                pass
+                _logger.warning("自动通过失败通知发送失败", exc_info=True)
             return False
     return False
 
 
+async def _finish_owner_config(bot: Bot, matcher: Matcher, event: MessageEvent, text: str) -> None:
+    """自动通过配置结果含进群暗号，群聊里不回显：完整结果私发给主人，群里只回简短确认。"""
+    if not hasattr(event, "group_id"):
+        await matcher.finish(text)
+    try:
+        await bot.send_private_msg(user_id=int(OWNER), message=MessageSegment.text(text))
+    except Exception:
+        _logger.warning("自动通过配置结果私发失败", exc_info=True)
+    await matcher.finish("✅ 配置结果已私发给你")
+
+
 # ---------------- 关键字配置（群内或私聊按群号） ----------------
 @auto_on_cmd.handle()
-async def auto_on(event: MessageEvent, arg=CommandArg()):
-    if str(event.user_id) != OWNER:
+async def auto_on(bot: Bot, event: MessageEvent, arg=CommandArg()):
+    if not is_owner(event):
         await auto_on_cmd.finish("❌ 你没有权限使用此功能")
     text = arg.extract_plain_text().strip()
     if not text:
         if hasattr(event, "group_id"):
-            await auto_on_cmd.finish("用法：.自动通过 关键字\n例如：.自动通过 我是老玩家\n多个关键字用空格分隔：.自动通过 关键字1 关键字2")
+            await _finish_owner_config(bot, auto_on_cmd, event, "用法：.自动通过 关键字\n例如：.自动通过 我是老玩家\n多个关键字用空格分隔：.自动通过 关键字1 关键字2")
         await auto_on_cmd.finish("私聊用法：.自动通过 <群号> 关键字\n例如：.自动通过 <群号> 我是老玩家")
     parts = text.split()
     if hasattr(event, "group_id"):
@@ -157,12 +164,12 @@ async def auto_on(event: MessageEvent, arg=CommandArg()):
     if not kws:
         await auto_on_cmd.finish("请提供至少一个关键字")
     merged = _save_keywords(gid, kws, merge=True)
-    await auto_on_cmd.finish(f"✅ 群 {gid} 自动通过已开启\n🔑 关键字：{' / '.join(merged)}\n进群附言包含任一关键字将自动同意（不区分大小写）")
+    await _finish_owner_config(bot, auto_on_cmd, event, f"✅ 群 {gid} 自动通过已开启\n🔑 关键字：{' / '.join(merged)}\n进群附言包含任一关键字将自动同意（不区分大小写）")
 
 
 @auto_off_cmd.handle()
-async def auto_off(event: MessageEvent, arg=CommandArg()):
-    if str(event.user_id) != OWNER:
+async def auto_off(bot: Bot, event: MessageEvent, arg=CommandArg()):
+    if not is_owner(event):
         await auto_off_cmd.finish("❌ 你没有权限使用此功能")
     text = arg.extract_plain_text().strip()
     if hasattr(event, "group_id"):
@@ -172,18 +179,18 @@ async def auto_off(event: MessageEvent, arg=CommandArg()):
             await auto_off_cmd.finish("私聊用法：.自动通过关闭 <群号>\n例如：.自动通过关闭 <群号>")
         gid = int(text)
     _save_keywords(gid, [])
-    await auto_off_cmd.finish(f"✅ 群 {gid} 自动通过已关闭，进群申请将等待手动处理")
+    await _finish_owner_config(bot, auto_off_cmd, event, f"✅ 群 {gid} 自动通过已关闭，进群申请将等待手动处理")
 
 
 @auto_show_cmd.handle()
-async def auto_show(event: MessageEvent):
-    if str(event.user_id) != OWNER:
+async def auto_show(bot: Bot, event: MessageEvent):
+    if not is_owner(event):
         await auto_show_cmd.finish("❌ 你没有权限使用此功能")
     if hasattr(event, "group_id"):
         kws = _load_keywords(event.group_id)
         if kws:
-            await auto_show_cmd.finish(f"🔑 本群自动通过已开启\n🏘 群号：{event.group_id}\n关键字：{' / '.join(kws)}")
-        await auto_show_cmd.finish(f"🔑 本群自动通过未开启（群 {event.group_id}）")
+            await _finish_owner_config(bot, auto_show_cmd, event, f"🔑 本群自动通过已开启\n🏘 群号：{event.group_id}\n关键字：{' / '.join(kws)}")
+        await _finish_owner_config(bot, auto_show_cmd, event, f"🔑 本群自动通过未开启（群 {event.group_id}）")
     data = _load_config()
     lines = ["🔑 已开启自动通过的群："]
     for gid, kws in data.items():
@@ -196,8 +203,8 @@ async def auto_show(event: MessageEvent):
 
 # ---------------- 好友申请 / 加群申请 ----------------
 @auto_count_cmd.handle()
-async def auto_count(event: MessageEvent, arg=CommandArg()):
-    if str(event.user_id) != OWNER:
+async def auto_count(bot: Bot, event: MessageEvent, arg=CommandArg()):
+    if not is_owner(event):
         await auto_count_cmd.finish("❌ 你没有权限使用此功能")
     text = arg.extract_plain_text().strip()
     if hasattr(event, "group_id"):
@@ -208,8 +215,8 @@ async def auto_count(event: MessageEvent, arg=CommandArg()):
         gid = int(text)
     kws = _load_keywords(gid)
     if kws:
-        await auto_count_cmd.finish(f"🔑 群 {gid} 共有 {len(kws)} 个关键字：{' / '.join(kws)}")
-    await auto_count_cmd.finish(f"🔑 群 {gid} 当前没有配置自动通过关键字（共 0 个）")
+        await _finish_owner_config(bot, auto_count_cmd, event, f"🔑 群 {gid} 共有 {len(kws)} 个关键字：{' / '.join(kws)}")
+    await _finish_owner_config(bot, auto_count_cmd, event, f"🔑 群 {gid} 当前没有配置自动通过关键字（共 0 个）")
 
 
 @request_matcher.handle()
@@ -217,7 +224,7 @@ async def handle_request(bot: Bot, event):
     if event.user_id == int(OWNER):
         return
     _purge_pending()
-    ts = _now()
+    ts = now_str()
     if isinstance(event, GroupRequestEvent) and event.sub_type in ("add", "apply"):
         if await _auto_approve(bot, event, event.comment or ""):
             return
@@ -268,7 +275,7 @@ async def handle_request(bot: Bot, event):
         # MessageSegment.text 包裹：附言等申请人可控文本不会被解析为 CQ 码（防注入）
         await bot.send_private_msg(user_id=int(OWNER), message=MessageSegment.text(msg))
     except Exception:
-        pass
+        _logger.warning("申请通知私发失败", exc_info=True)
 
 
 # ---------------- 主人回复 同意/拒绝 ----------------
@@ -332,7 +339,7 @@ async def _process_decision(bot: Bot, event: MessageEvent, action: bool) -> None
                                 target_key = k
                                 break
             except Exception:
-                pass
+                _logger.warning("引用消息解析失败，回退到默认申请选择", exc_info=True)
 
         if target_key is None:
             if len(_pending) == 1:
@@ -344,7 +351,11 @@ async def _process_decision(bot: Bot, event: MessageEvent, action: bool) -> None
                 )
                 return
 
-    val = _pending.pop(target_key)
+    val = _pending.pop(target_key, None)
+    if val is None:
+        # 两例并发「同意」时第二个会取不到目标：第一个已把它处理完
+        await _send_decision_notice(bot, "⚠️ 该申请刚已被处理")
+        return
     kind, flag = val["kind"], val["flag"]
     try:
         if kind == "friend":
@@ -378,7 +389,7 @@ async def owner_decision(bot: Bot, event: MessageEvent):
 # ---------------- 私聊消息转发 ----------------
 @private_matcher.handle()
 async def forward_private(bot: Bot, event: MessageEvent):
-    if str(event.user_id) == OWNER or event.message_type != "private":
+    if is_owner(event) or event.message_type != "private":
         return
     text = event.get_plaintext().strip() or "（非文字消息）"
     name = str(event.user_id)
@@ -389,10 +400,10 @@ async def forward_private(bot: Bot, event: MessageEvent):
         pass
     msg = (
         f"📨 {name}（{event.user_id}）私聊了机器人\n"
-        f"🕐 {_now()}\n"
+        f"🕐 {now_str()}\n"
         f"💬 {text}"
     )
     try:
         await bot.send_private_msg(user_id=int(OWNER), message=MessageSegment.text(msg))
     except Exception:
-        pass
+        _logger.warning("私聊转发通知发送失败", exc_info=True)

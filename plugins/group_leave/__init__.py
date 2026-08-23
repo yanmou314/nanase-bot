@@ -65,11 +65,23 @@ def _load_state() -> None:
             continue
 
 
-def _save_state() -> None:
+def _save_state(snapshot: dict | None = None) -> None:
+    """【同步阻塞】全量落盘；事件循环内请改用 _save_state_async（先快照再进线程）。"""
     try:
-        save_json_state(STATE_FILE, {f"{g}:{u}": t for (g, u), t in _join_ts.items()})
+        data = snapshot if snapshot is not None else _join_ts
+        save_json_state(STATE_FILE, {f"{g}:{u}": t for (g, u), t in data.items()})
     except Exception:
         pass
+
+
+async def _save_state_async() -> None:
+    """事件循环内先做 dict 快照，再交给线程全量写盘。
+
+    入群记录上限 10 万条、全量序列化可达数 MB，直接在事件循环内写会阻塞其他事件；
+    先 copy 再进线程也避免了线程内迭代时字典被并发修改。
+    """
+    snapshot = dict(_join_ts)
+    await asyncio.to_thread(_save_state, snapshot)
 
 
 _load_state()
@@ -77,7 +89,8 @@ _load_state()
 
 @get_driver().on_shutdown
 async def _save_on_shutdown():
-    await asyncio.to_thread(_save_state)
+    # 复用"先快照再进线程"模式，避免线程内迭代 _join_ts 时字典被修改
+    await _save_state_async()
 
 
 def _prune() -> None:
@@ -87,7 +100,7 @@ def _prune() -> None:
     for key in list(_join_ts):
         if _join_ts[key] < cutoff:
             _join_ts.pop(key, None)
-    _save_state()
+    # 落盘由调用方统一执行，避免一次操作触发多次全量写盘
 
 
 def _format_duration(seconds: float) -> str:
@@ -104,10 +117,10 @@ def _format_duration(seconds: float) -> str:
     return f"{days} 天 {hours % 24} 小时"
 
 
-def _record_join(gid: int, uid: int) -> None:
+async def _record_join(gid: int, uid: int) -> None:
     _join_ts[(gid, uid)] = time.time()
     _prune()
-    _save_state()
+    await _save_state_async()  # 写盘放线程，避免全量序列化阻塞事件循环
 
 
 def _pop_join(gid: int, uid: int):
@@ -137,18 +150,19 @@ async def _import_group_members(bot: Bot, gid: int) -> None:
             ts = 0.0
         _join_ts[key] = ts if ts > 0 else now
     _prune()
-    _save_state()
+    # 落盘由 _import_existing_members 在所有群导完后统一执行一次，不再每群写一次盘
 
 
 @get_driver().on_bot_connect
 async def _import_existing_members(bot: Bot):
-    """机器人连上后，一次性导入各群老成员的入群时间（join_time）。"""
+    """机器人连上后，一次性导入各群老成员的入群时间（join_time），全部导完只落盘一次。"""
     try:
         groups = await bot.get_group_list()
     except Exception:
         return
     for g in groups:
         await _import_group_members(bot, g["group_id"])
+    await _save_state_async()
 
 
 async def _get_name(bot: Bot, user_id: int) -> str:
@@ -171,7 +185,7 @@ async def handle(bot: Bot, event: GroupDecreaseNoticeEvent):
     ts = _pop_join(gid, uid)
     if ts is not None:
         dur = _format_duration(time.time() - ts)
-        _save_state()
+        await _save_state_async()
 
     if sub == "leave":
         msg = f"👋 {name}（{uid}）退群了"
@@ -207,7 +221,7 @@ async def handle_welcome(bot: Bot, event: GroupIncreaseNoticeEvent):
         Message(MessageSegment.at(uid))
         + MessageSegment.text(f" 欢迎 {name} 加入本群！\n{random.choice(WELCOME_MESSAGES)}")
     )
-    _record_join(gid, uid)
+    await _record_join(gid, uid)
     try:
         await bot.send_group_msg(group_id=gid, message=msg)
     except Exception:

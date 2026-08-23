@@ -14,7 +14,7 @@ from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
 from nonebot.message import run_postprocessor
 from nonebot_plugin_apscheduler import scheduler
 
-from common import gradient_background, is_owner, load_json_state, render_html_to_png, save_json_state
+from common import RENDER_SEM, gradient_background, is_owner, load_json_state, render_html_to_png, save_json_state
 from plugins.chat_stats.db_pg import exec, write_command as db_write_command
 
 _logger = logging.getLogger(__name__)
@@ -200,12 +200,13 @@ async def _fetch_name(bot, group_id: int, user_id: int) -> str:
 async def _build_stats(day: str) -> dict:
     data = await _collect(day)
     bot = get_bot()
-    users_named = []
-    for uid, cnt in data["users_top"]:
-        gid = data["user_groups"].get(uid)
-        name = await _fetch_name(bot, gid, uid) if gid else str(uid)
-        users_named.append((name, cnt))
-    data["users_named"] = users_named
+    # TOP 用户昵称并行拉取，串行 await 会明显拖慢日报生成
+    top = data["users_top"]
+    names = await asyncio.gather(*(
+        _fetch_name(bot, data["user_groups"][uid], uid) if uid in data["user_groups"] else str(uid)
+        for uid, _ in top
+    ))
+    data["users_named"] = [(name, cnt) for name, (_, cnt) in zip(names, top)]
     return data
 
 
@@ -303,12 +304,14 @@ body {{ width: {w}px; height: {h}px; font-family: "Noto Sans CJK SC", sans-serif
 async def _run_daily() -> str:
     day = _prev_day()
     data = await _build_stats(day)
-    return await asyncio.to_thread(_render, _day_label(day), data)
+    # weasyprint 渲染经全局渲染信号量串行化，避免小机器上并发渲染打爆内存
+    async with RENDER_SEM:
+        return await asyncio.to_thread(_render, _day_label(day), data)
 
 
 
 
-@scheduler.scheduled_job("cron", hour=0, minute=0, id="daily_cmd_stats", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=0, minute=5, id="daily_cmd_stats", timezone="Asia/Shanghai")
 async def daily_cmd_stats_job():
     groups = _target_groups()
     if not groups:
