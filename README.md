@@ -2,6 +2,8 @@
 
 # 🤖 QQ Bot
 
+[![CI](https://github.com/yanmou314/nanase-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/yanmou314/nanase-bot/actions/workflows/ci.yml)
+
 基于 [NoneBot2](https://nonebot.dev/) 的 QQ 群聊机器人，通过 OneBot V11 协议对接 [NapCatQQ](https://github.com/NapNeko/NapCatQQ) 等实现。
 
 **抽签运势 · 守望先锋战绩 · 群聊统计 · 每日晨报 · 节假日倒计时 · AI 聊天 · 申请管理**
@@ -16,9 +18,9 @@
 |------|------|------|
 | 🎲 娱乐 | 抽签 / 今日运势 | 每日每用户固定运势（同人同日结果不变） |
 | 🎮 守望先锋 | 战报 / 段位 / 强度 / 总结 | 国服数据，绑定一次即可查询；查询冷却 + 后台预热 + 排队提示 |
-| 📊 群聊统计 | 龙王 / 词云 | PostgreSQL 统计 + 图片卡片渲染，每日 00:02 自动推送昨日词云 |
+| 📊 群聊统计 | 龙王 / 词云 | PostgreSQL 统计 + 图片卡片渲染，每日 00:02 自动推送昨日词云，每日 03:00 清理过期数据 |
 | 📰 每日晨报 | 早安问候 + 昨日新闻 | 每日 07:00 推送：日期 + 一言 + 农历节气 + 昨日新闻（60秒读懂世界，百度热搜回退），支持配置智谱 API Key 生成 AI 问候 |
-| ⏳ 倒计时 | 周末 / 节假日 | 图片卡片 + 每日 17:00 群推送，内置 2026 全年假期与调休数据 |
+| ⏳ 倒计时 | 周末 / 节假日 | 图片卡片 + 每日 17:00 群推送，内置 2026 年法定假期与调休数据（按年份写在代码里，跨年需补充） |
 | 💬 AI 聊天 | @机器人 对话 / 戳一戳 | 西野七濑人设（[人设表](docs/西野七濑人设表.md)）+ 多用户记忆；群聊携带发言人昵称可分辨多人 |
 | 🔀 随机插话 | 群聊随机回复 | 概率可调、每群 60 秒最小间隔，复用 AI 聊天接口 |
 | 🍚 吃什么 | 被动推荐 | 群里聊到「吃什么 / 吃啥」随机推荐一种食物（带冷却防刷屏） |
@@ -74,11 +76,21 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-编辑 `.env`：
+编辑 `.env`（模板已含以下默认值，通常只需改 QQBOT_OWNER）：
 
 ```ini
+# NoneBot2 驱动配置
+DRIVER=~fastapi+~httpx+~websockets
+HOST=127.0.0.1        # 反向 WebSocket 监听地址（NapCat 连这里）
+PORT=8080
+LOG_LEVEL=INFO
+COMMAND_START=["."]   # 命令前缀，决定用 .帮助 还是 /帮助
+
 # 机器人主人的 QQ 号（拥有全部管理权限）
 QQBOT_OWNER=你的QQ号
+
+# 若 NapCatQQ 侧配置了 access token，需增加：
+# ONEBOT_ACCESS_TOKEN=与NapCat一致
 ```
 
 ### 3. 按需启用插件
@@ -91,17 +103,19 @@ QQBOT_OWNER=你的QQ号
 | `auto_chat` | `plugins/auto_chat/config.json` | `{"api_key": "sk-xxx"}`（opencode.ai） |
 | `news` | `plugins/news/ai_config.json` | `{"api_key": "..."}`（智谱，也可用 `.新闻key` 命令配置） |
 
+其余插件（词云/晨报/倒计时/插话等）用对应的管理命令在群内开关，状态自动持久化。
+
 ### 4. 运行
 
 ```bash
 python bot.py
 ```
 
-启动后连接 OneBot V11 WebSocket（默认 `127.0.0.1:8080`），在群里发送 `.帮助` 查看完整菜单。
+启动后在 `127.0.0.1:8080` 监听反向 WebSocket，NapCatQQ 连接后在群里发送 `.帮助` 查看完整菜单。
 
 ## 🛠 插件命令一览
 
-命令前缀以 NapCatQQ 侧配置为准（下文以 `.` 为例）。
+命令前缀由 `.env` 的 `COMMAND_START` 决定（默认模板为 `.`，下文以 `.` 为例）。
 
 ### 公开命令（所有群成员）
 
@@ -136,7 +150,7 @@ python bot.py
 | 🔀 插话 | `.插话开启`（`.插话on`）`.插话关闭`（`.插话off`）`.插话状态` `.插话概率` |
 | 🛡 进群 | `.自动通过 关键字`（`.自动同意`）`.自动通过关闭/查看/数量`；申请审批直接回复「同意/拒绝」 |
 
-> 管理类结果（含进群暗号）会自动**私发**主人，不在群内回显。
+> 管理命令与帮助菜单的完整版会自动**私发**主人（含进群暗号），不在群内回显。
 
 ## 🗂 目录结构
 
@@ -146,6 +160,7 @@ common.py                   公共工具（权限、原子状态读写、图片�
 pyproject.toml              NoneBot2 插件注册 + ruff/pytest 配置
 requirements.txt            依赖清单
 .env.example                环境变量模板
+docs/                       附加文档（AI 人设表等）
 plugins/
   ├── auto_chat/            AI 聊天（角色扮演 + 多用户记忆）
   ├── chat_stats/           群聊统计（龙王/词云）+ PostgreSQL 存储层
@@ -174,7 +189,7 @@ pip install pytest
 python -m pytest -q
 ```
 
-测试使用内置 stub 模拟 NoneBot 环境，无需安装真实 NoneBot、数据库或 NapCat。推送到 GitHub 后 Actions 会在 Python 3.10/3.12 的干净环境自动安装依赖并跑测试 + ruff 检查（见 `.github/workflows/ci.yml`）。
+测试使用内置 stub 模拟 NoneBot 环境（当前 149 项），无需安装真实 NoneBot、数据库或 NapCat。推送到 GitHub 后 Actions 会在 Python 3.10/3.12 的干净环境自动安装依赖并跑测试 + ruff 检查（见 `.github/workflows/ci.yml`）。
 
 ## 🚢 生产部署
 
@@ -207,6 +222,7 @@ journalctl -u qqbot -f    # 查看日志
 
 - 本仓库**仅包含代码**，不含任何运行配置
 - `.gitignore` 已排除全部敏感文件：`.env`、`db.json`、`config.json`、`ai_config.json`、`bindings.json`、各类 `state.json` 等（含 QQ 号 / 群号 / 密钥 / 聊天记录）
+- 状态文件损坏时自动备份为 `.corrupt-*` 再重建，不会静默清空配置
 - 部署时请自行保管好配置文件，不要提交到仓库
 - 所有 HTML 渲染已做转义与外部资源拦截（防 XSS / SSRF）
 - 一言 / 新闻 / AI 生成等外部内容发送时一律以纯文本段发送（防 CQ 码注入）
