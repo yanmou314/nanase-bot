@@ -7,6 +7,5 @@ psycopg[binary]==3.3.4
 psycopg-pool==3.3.1
 weasyprint==62.3
 cnlunar==0.2.4
-nonebot-plugin-parser==2.6.8
 python-dotenv>=1.0,<2
 tzdata>=2024.1
