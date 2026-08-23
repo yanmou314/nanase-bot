@@ -23,3 +23,4 @@ ignore = [
 
 [tool.nonebot]
 plugin_dirs = ["plugins"]
+plugins = ["nonebot_plugin_parser"]
