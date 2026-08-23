@@ -16,15 +16,13 @@ _INFO = {
     "tname": "音乐综合",
     "videos": 1,
     "desc": "1987年经典单曲 Official MV",
-    "view": 12345678,
-    "danmaku": 40210,
-    "like": 999999,
-    "coin": 8800,
-    "favorite": 56000,
-    "reply": 4300,
-    "share": 12345,
     "duration": 213,
     "pubdate": 1577835803,
+    "link": "https://www.bilibili.com/video/BV1GJ411x7h7",
+    "stats_display": [
+        ("播放", 12345678), ("弹幕", 40210), ("点赞", 999999),
+        ("投币", 8800), ("收藏", 56000), ("评论", 4300), ("分享", 12345),
+    ],
 }
 
 
@@ -322,3 +320,95 @@ def test_handler_stays_silent_within_60s_double_tap(tmp_path, monkeypatch):
     monkeypatch.setattr(bili, "fetch_info", lambda vid: called.append(vid))
     asyncio.run(bili.bili_matcher.handlers[0](_ev("BV1GJ411x7h7")))
     assert not called and not bili.bili_matcher.sent
+
+
+# ---------------- 番剧与分享卡片解析 ----------------
+
+def test_extract_ids_bangumi_ep_ss():
+    assert bili.extract_ids("https://www.bilibili.com/bangumi/play/ep123456") == ["ep123456"]
+    assert bili.extract_ids("追番 ss456789 不错") == ["ss456789"]
+    for text in ("episodes123456", "EPIC 2024", "慢速ss了123", "ess12345"):
+        assert bili.extract_ids(text) == []
+
+
+def test_extract_source_text_from_json_card():
+    from conftest import MessageSegment
+    raw_json = r'{"app":"com.tencent.structmsg","meta":{"news":{"jumpUrl":"https:\/\/b23.tv\/BV1GJ411x7h7?seid=1"}}}'
+    ev = GroupMessageEvent(plain="", user_id=1, group_id=100,
+                           message=[MessageSegment("json", {"data": raw_json})])
+    assert bili.extract_ids(bili.extract_source_text(ev)) == ["BV1GJ411x7h7"]
+
+    # JSON 解析失败时也至少还原 \/ 转义
+    ev2 = GroupMessageEvent(plain="", user_id=1, group_id=100,
+                           message=[MessageSegment("json", {"data": r"not-json https:\/\/b23.tv\/BV1fsk1v7pvX"})])
+    assert bili.extract_ids(bili.extract_source_text(ev2)) == ["BV1fsk1v7pvX"]
+
+    # 纯文本段照常工作
+    ev3 = GroupMessageEvent(plain="看 BV1GJ411x7h7", user_id=1, group_id=100,
+                            message=[MessageSegment("text", {"text": "看 BV1GJ411x7h7"})])
+    assert bili.extract_ids(bili.extract_source_text(ev3)) == ["BV1GJ411x7h7"]
+
+
+_PGC_RESULT = {
+    "code": 0,
+    "result": {
+        "title": "BLEACH 死神 千年血战篇",
+        "evaluate": "最终季 祸进谭",
+        "cover": "http://i0.hdslb.com/bfs/archive/season.jpg",
+        "stat": {"views": 12345678, "follow": 456789, "danmus": 98765},
+        "media_info": {"title": "BLEACH", "rating": {"score": 9.5}},
+        "episodes": [
+            {"id": 898989, "bvid": "BV1fsk1v7pvX", "title": "第4话", "long_title": "上集",
+             "cover": "http://i0.hdslb.com/bfs/archive/ep4.jpg", "duration": 1420000,
+             "pub_time": 1700000000},
+            {"id": 898990, "bvid": "BV1fsk1v7pvY", "title": "第5话", "long_title": "祸进谭",
+             "cover": "http://i0.hdslb.com/bfs/archive/ep5.jpg", "duration": 1420000,
+             "pub_time": 1700086400},
+        ],
+    },
+}
+
+
+def test_fetch_bangumi_info_ep(monkeypatch):
+    class _Resp:
+        def json(self):
+            return _PGC_RESULT
+
+    class _Client:
+        async def get(self, url, **kw):
+            assert "pgc/view/web/season" in url and kw["params"]["ep_id"] == "898990"
+            return _Resp()
+
+    monkeypatch.setattr(bili, "get_http_client", lambda t: _Client())
+    info = asyncio.run(bili._fetch_bangumi_info("ep898990"))
+    assert "BLEACH" in info["title"] and "祸进谭" in info["title"]
+    assert info["bvid"] == "BV1fsk1v7pvY"
+    assert info["pic"].startswith("https://") and "ep5.jpg" in info["pic"]
+    assert info["duration"] == 1420                       # 毫秒转秒
+    assert info["link"] == "https://www.bilibili.com/bangumi/play/ep898990"
+    labels = [k for k, _ in info["stats_display"]]
+    assert labels == ["播放", "追番", "弹幕", "集数", "评分"]
+    assert dict(info["stats_display"])["评分"] == "9.5"    # 字符串评分原样
+    assert dict(info["stats_display"])["追番"] == 456789
+
+
+def test_fetch_bangumi_info_ss_takes_newest_episode(monkeypatch):
+    class _Resp:
+        def json(self):
+            return _PGC_RESULT
+
+    class _Client:
+        async def get(self, url, **kw):
+            assert kw["params"]["season_id"] == "45678"
+            return _Resp()
+
+    monkeypatch.setattr(bili, "get_http_client", lambda t: _Client())
+    info = asyncio.run(bili._fetch_bangumi_info("ss45678"))
+    assert info["bvid"] == "BV1fsk1v7pvY"                 # 最新一集
+
+
+def test_build_card_uses_stats_display():
+    info = dict(_INFO, stats_display=[("播放", 100), ("追番", 200), ("评分", "9.5")], duration=0)
+    text = str(list(bili.build_card(info))[1])
+    assert "播放 100" in text and "追番 200" in text and "评分 9.5" in text
+    assert "0:00" not in text                              # 无时长不再显示 0:00

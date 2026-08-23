@@ -1,4 +1,5 @@
-"""B站视频链接解析：群里出现 B站链接 / BV号 / av号 时，自动回复封面图与视频信息。
+"""B站链接解析：群里出现 B站链接 / BV号 / av号 / 番剧ep·ss号 / QQ分享卡片时，
+自动回复封面图与视频/番剧信息卡片。
 
 只调用 B站查询 API 解析元信息，不下载视频。卡片用 PIL 整体渲染为一张图片
 （B站粉主题；weasyprint 在本机解析 CJK 字体需约 10 秒，PIL 仅需数百毫秒）；
@@ -7,6 +8,7 @@
 """
 import asyncio
 import io
+import json as json_mod
 import logging
 import os
 import re
@@ -31,9 +33,11 @@ _HEADERS = {
     "Referer": "https://www.bilibili.com/",
 }
 
-# BV 号固定 1+10 位；av 号至少 5 位数字且前一个字符不能是字母数字（避免误伤普通文本）
+# BV 号固定 1+10 位；av/ep/ss 号前置断言避免误伤普通文本（后接字母数字不算）
 _BV_RE = re.compile(r"BV[0-9A-Za-z]{10}")
 _AV_RE = re.compile(r"(?<![0-9A-Za-z])av(\d{5,})", re.IGNORECASE)
+_EP_RE = re.compile(r"(?<![0-9A-Za-z])ep(\d{4,})", re.IGNORECASE)
+_SS_RE = re.compile(r"(?<![0-9A-Za-z])ss(\d{4,})", re.IGNORECASE)
 _B23_RE = re.compile(r"https?://b23\.tv/[0-9A-Za-z]+")
 _CMD_PREFIXES = (".", "/", "。")
 
@@ -75,12 +79,53 @@ def _font(key: str, size: int):
 
 
 def extract_ids(*texts: str) -> list[str]:
-    """从文本中提取去重后的视频 ID 列表（BV 原样，av 转小写号段）。"""
+    """从文本中提取去重后的视频/番剧 ID（BV 原样，av/ep/ss 转小写号段）。"""
     found: list[str] = []
     for text in texts:
         found.extend(_BV_RE.findall(text or ""))
         found.extend(f"av{n}" for n in _AV_RE.findall(text or ""))
+        found.extend(f"ep{n}" for n in _EP_RE.findall(text or ""))
+        found.extend(f"ss{n}" for n in _SS_RE.findall(text or ""))
     return list(dict.fromkeys(found))
+
+
+def _collect_strings(obj) -> list[str]:
+    """递归收集 JSON 结构里的所有字符串值（jumpUrl/qqdocurl 等藏在任意层级）。"""
+    if isinstance(obj, str):
+        return [obj]
+    if isinstance(obj, dict):
+        out: list[str] = []
+        for v in obj.values():
+            out.extend(_collect_strings(v))
+        return out
+    if isinstance(obj, list):
+        out = []
+        for v in obj:
+            out.extend(_collect_strings(v))
+        return out
+    return []
+
+
+def extract_source_text(event) -> str:
+    """收集消息里所有可能藏链接的文本：纯文本 + json/xml 卡片内容。
+
+    QQ 分享的 B站视频是 json 卡片（小程序/结构化消息），链接在 jumpUrl 等字段里
+    且带 \\/ 转义，纯文本与 str(message) 都匹配不到，需解析 JSON 后逐字段提取。
+    """
+    parts = [event.get_plaintext()]
+    try:
+        for seg in event.message:
+            if seg.type == "text":
+                parts.append(str(seg.data.get("text", "")))
+            elif seg.type in ("json", "xml"):
+                raw = str(seg.data.get("data", ""))
+                try:
+                    parts.extend(_collect_strings(json_mod.loads(raw)))
+                except ValueError:
+                    parts.append(raw.replace("\\/", "/"))  # JSON 解析失败至少还原转义斜杠
+    except Exception:
+        parts.append(str(event.message).replace("\\/", "/"))
+    return "\n".join(p for p in parts if p)
 
 
 async def resolve_b23(url: str) -> str | None:
@@ -96,11 +141,27 @@ async def resolve_b23(url: str) -> str | None:
 
 
 async def fetch_info(vid: str) -> dict | None:
-    """查询视频信息；返回 None 表示查询失败（调用方静默跳过即可）。"""
+    """查询视频/番剧信息；返回 None 表示查询失败（调用方静默跳过即可）。"""
     now = time.time()
     cached = _info_cache.get(vid)
     if cached and cached[0] > now:
         return cached[1]
+    if vid.startswith(("ep", "ss")):
+        info = await _fetch_bangumi_info(vid)
+    else:
+        info = await _fetch_video_info(vid)
+    if info is None:
+        return None
+    # 缓存有界：超过 200 条时先清掉已过期项
+    if len(_info_cache) > 200:
+        expired = [k for k, (exp, _) in _info_cache.items() if exp <= now]
+        for k in expired:
+            _info_cache.pop(k, None)
+    _info_cache[vid] = (now + _CACHE_TTL, info)
+    return info
+
+
+async def _fetch_video_info(vid: str) -> dict | None:
     params = {"bvid": vid[2:]} if vid.startswith("BV") else {"aid": vid[2:]}
     try:
         client = get_http_client(10.0)
@@ -114,7 +175,7 @@ async def fetch_info(vid: str) -> dict | None:
             return None
         d = data["data"]
         stat = d.get("stat") or {}
-        info = {
+        return {
             "bvid": d.get("bvid") or vid,
             "title": d.get("title") or "",
             "pic": (d.get("pic") or "").replace("http://", "https://"),
@@ -122,26 +183,75 @@ async def fetch_info(vid: str) -> dict | None:
             "tname": d.get("tname") or "",
             "videos": d.get("videos", 1) or 1,
             "desc": _clean_desc(d.get("desc")),
-            "view": stat.get("view", 0),
-            "danmaku": stat.get("danmaku", 0),
-            "like": stat.get("like", 0),
-            "coin": stat.get("coin", 0),
-            "favorite": stat.get("favorite", 0),
-            "reply": stat.get("reply", 0),
-            "share": stat.get("share", 0),
             "duration": d.get("duration", 0),
             "pubdate": d.get("pubdate", 0),
+            "link": f"https://www.bilibili.com/video/{d.get('bvid') or vid}",
+            "stats_display": [
+                ("播放", stat.get("view", 0)), ("弹幕", stat.get("danmaku", 0)),
+                ("点赞", stat.get("like", 0)), ("投币", stat.get("coin", 0)),
+                ("收藏", stat.get("favorite", 0)), ("评论", stat.get("reply", 0)),
+                ("分享", stat.get("share", 0)),
+            ],
         }
     except (httpx.HTTPError, ValueError, KeyError):
         _logger.warning("B站视频信息请求异常 vid=%s", vid, exc_info=True)
         return None
-    # 缓存有界：超过 200 条时先清掉已过期项
-    if len(_info_cache) > 200:
-        expired = [k for k, (exp, _) in _info_cache.items() if exp <= now]
-        for k in expired:
-            _info_cache.pop(k, None)
-    _info_cache[vid] = (now + _CACHE_TTL, info)
-    return info
+
+
+async def _fetch_bangumi_info(vid: str) -> dict | None:
+    """番剧/影视（ep/ss 链接）：查 pgc season 接口，定位到具体一集。"""
+    params = {"ep_id": vid[2:]} if vid.startswith("ep") else {"season_id": vid[2:]}
+    try:
+        client = get_http_client(10.0)
+        resp = await client.get(
+            "https://api.bilibili.com/pgc/view/web/season",
+            params=params, headers=_HEADERS,
+        )
+        data = resp.json()
+        if data.get("code") != 0 or not isinstance(data.get("result"), dict):
+            _logger.warning("B站番剧信息查询失败 vid=%s code=%s", vid, data.get("code"))
+            return None
+        r = data["result"]
+        stat = r.get("stat") or {}
+        media = r.get("media_info") or {}
+        episodes = r.get("episodes") or []
+        ep = None
+        if vid.startswith("ep"):
+            ep_id = int(vid[2:])
+            ep = next((e for e in episodes if e.get("id") == ep_id), None)
+        if ep is None:
+            ep = episodes[-1] if episodes else None  # ss 链接或 ep 未命中时取最新一集
+
+        title = r.get("title") or "未知番剧"
+        ep_title = ((ep or {}).get("long_title") or (ep or {}).get("title") or "").strip()
+        if ep_title:
+            title = f"{title}｜{ep_title}"
+        rating = (media.get("rating") or {}).get("score") or 0
+        stats = [
+            ("播放", stat.get("views", 0)), ("追番", stat.get("follow", 0)),
+            ("弹幕", stat.get("danmus", 0)),
+        ]
+        if episodes:
+            stats.append(("集数", len(episodes)))
+        if rating:
+            stats.append(("评分", f"{rating}"))
+        return {
+            "bvid": (ep or {}).get("bvid") or vid,
+            "title": title,
+            "pic": ((ep or {}).get("cover") or r.get("cover") or "").replace("http://", "https://"),
+            "owner": media.get("title") or "番剧",
+            "tname": "番剧",
+            "videos": len(episodes) or 1,
+            "desc": _clean_desc(r.get("evaluate")),
+            "duration": int((ep or {}).get("duration") or 0) // 1000
+            if (ep or {}).get("duration", 0) and (ep or {}).get("duration", 0) > 10000 else int((ep or {}).get("duration") or 0),
+            "pubdate": int((ep or {}).get("pub_time") or 0),
+            "link": f"https://www.bilibili.com/bangumi/play/{vid}",
+            "stats_display": stats,
+        }
+    except (httpx.HTTPError, ValueError, KeyError):
+        _logger.warning("B站番剧信息请求异常 vid=%s", vid, exc_info=True)
+        return None
 
 
 def _clean_desc(raw: str | None) -> str:
@@ -170,6 +280,11 @@ def _fmt_desc(desc: str, limit: int = 60) -> str:
 
 # ---------------- 文本卡片（渲染失败的回退形态） ----------------
 
+def _fmt_stat(value) -> str:
+    """stats_display 数值格式化：评分等字符串原样，数字走万计数。"""
+    return value if isinstance(value, str) else _fmt_count(value)
+
+
 def build_card(info: dict) -> MessageSegment:
     """封面图 + 信息卡片（文本段包裹，标题/UP主名不会触发 CQ 码解析）。"""
     date = datetime.fromtimestamp(info["pubdate"], _SH).strftime("%Y-%m-%d") \
@@ -179,18 +294,17 @@ def build_card(info: dict) -> MessageSegment:
     if info.get("tname"):
         owner_line += f" ｜ {info['tname']}"
     desc = _fmt_desc(info.get("desc", ""))
-    lines = [
-        f"🎬 {info['title']}{multi}",
-        owner_line,
-        f"▶ 播放 {_fmt_count(info['view'])} · 弹幕 {_fmt_count(info['danmaku'])}"
-        f" · 点赞 {_fmt_count(info['like'])} · ↗ 分享 {_fmt_count(info['share'])}",
-        f"🪙 投币 {_fmt_count(info['coin'])} · ⭐ 收藏 {_fmt_count(info['favorite'])}"
-        f" · 💬 评论 {_fmt_count(info['reply'])}",
-        f"⏱ {_fmt_duration(info['duration'])} · 📅 {date}",
-    ]
+    stats = info.get("stats_display") or []
+    stat_lines = [" · ".join(f"{k} {_fmt_stat(v)}" for k, v in stats[i:i + 4])
+                  for i in range(0, len(stats), 4)]
+    time_line = " · ".join(filter(None, [
+        _fmt_duration(info["duration"]) if info.get("duration") else "",
+        f"📅 {date}",
+    ]))
+    lines = [f"🎬 {info['title']}{multi}", owner_line, *stat_lines, time_line]
     if desc:
         lines.append(f"📝 简介：{desc}")
-    lines.append(f"🔗 https://www.bilibili.com/video/{info['bvid']}")
+    lines.append(f"🔗 {info.get('link') or 'https://www.bilibili.com/video/' + info['bvid']}")
     text = "\n".join(lines)
     parts = []
     if info["pic"]:
@@ -283,7 +397,7 @@ def _render_card(info: dict, cover_bytes: bytes | None):
         tw = draw.textlength(tag, font=meta_font)
         draw.rounded_rectangle([14, 12, 14 + tw + 20, 46], radius=6, fill=_C_PINK)
         draw.text((24, 15), tag, font=meta_font, fill=(255, 255, 255))
-    if cover_img is not None:
+    if cover_img is not None and info.get("duration"):
         dur = _fmt_duration(info["duration"])
         dw = draw.textlength(dur, font=meta_font)
         box = [_CARD_W - 24 - dw - 20, _COVER_H - 38, _CARD_W - 24, _COVER_H - 10]
@@ -315,15 +429,11 @@ def _render_card(info: dict, cover_bytes: bytes | None):
     y += 25 + 20
     draw.line([(30, y), (_CARD_W - 30, y)], fill=_C_LINE, width=1)
     y += 18
-    stats = [
-        ("播放", info["view"]), ("弹幕", info["danmaku"]), ("点赞", info["like"]),
-        ("投币", info["coin"]), ("收藏", info["favorite"]),
-        ("评论", info["reply"]), ("分享", info["share"]),
-    ]
-    col_w = (_CARD_W - 60) / len(stats)
+    stats = info.get("stats_display") or []
+    col_w = (_CARD_W - 60) / max(len(stats), 1)
     for i, (label, val) in enumerate(stats):
         cx = 30 + col_w * (i + 0.5)
-        num = _fmt_count(val)
+        num = _fmt_stat(val)
         draw.text((cx - draw.textlength(num, font=num_font) / 2, y), num,
                   font=num_font, fill=_C_DARK)
         draw.text((cx - draw.textlength(label, font=label_font) / 2, y + 32), label,
@@ -412,11 +522,11 @@ def _prune_state(now: float) -> None:
 
 @bili_matcher.handle()
 async def handle_bili_link(event: GroupMessageEvent):
-    # 原文取纯文本 + 消息字符串（CQ 卡片 JSON 里的链接只出现在后者）
+    # 提取所有可能藏链接的文本（纯文本 + json/xml 分享卡片，指令前缀跳过）
     text = event.get_plaintext()
     if text.lstrip().startswith(_CMD_PREFIXES):
         return  # 指令消息（如 .战报 BVxxx）不触发被动解析
-    raw = f"{text}\n{event.message}"
+    raw = extract_source_text(event)
 
     now = time.time()
     gid = str(event.group_id)
