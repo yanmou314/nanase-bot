@@ -14,6 +14,7 @@ _INFO = {
     "pic": "https://i0.hdslb.com/bfs/archive/abc.jpg",
     "owner": "RickAstleyVEVO",
     "tname": "音乐综合",
+    "kind": "video",
     "videos": 1,
     "desc": "1987年经典单曲 Official MV",
     "duration": 213,
@@ -324,9 +325,10 @@ def test_handler_stays_silent_within_60s_double_tap(tmp_path, monkeypatch):
 
 # ---------------- 番剧与分享卡片解析 ----------------
 
-def test_extract_ids_bangumi_ep_ss():
+def test_extract_ids_bangumi_ep_ss_requires_domain_context():
     assert bili.extract_ids("https://www.bilibili.com/bangumi/play/ep123456") == ["ep123456"]
-    assert bili.extract_ids("追番 ss456789 不错") == ["ss456789"]
+    assert bili.extract_ids("https://b23.tv/ss456789") == ["ss456789"]
+    assert bili.extract_ids("追番 ss456789 不错") == []
     for text in ("episodes123456", "EPIC 2024", "慢速ss了123", "ess12345"):
         assert bili.extract_ids(text) == []
 
@@ -382,6 +384,7 @@ def test_fetch_bangumi_info_ep(monkeypatch):
     monkeypatch.setattr(bili, "get_http_client", lambda t: _Client())
     info = asyncio.run(bili._fetch_bangumi_info("ep898990"))
     assert "BLEACH" in info["title"] and "祸进谭" in info["title"]
+    assert info["kind"] == "bangumi"
     assert info["bvid"] == "BV1fsk1v7pvY"
     assert info["pic"].startswith("https://") and "ep5.jpg" in info["pic"]
     assert info["duration"] == 1420                       # 毫秒转秒
@@ -412,3 +415,61 @@ def test_build_card_uses_stats_display():
     text = str(list(bili.build_card(info))[1])
     assert "播放 100" in text and "追番 200" in text and "评分 9.5" in text
     assert "0:00" not in text                              # 无时长不再显示 0:00
+
+
+def test_build_card_bangumi_uses_episode_unit_and_truncates_owner():
+    info = dict(_INFO, kind="bangumi", videos=12, owner="超长番剧名称" * 4, duration=0)
+    text = str(list(bili.build_card(info))[1])
+    assert "（全12话）" in text and "全12P" not in text
+    owner_line = text.split("UP主：", 1)[1].split("\n", 1)[0].split(" ｜ ", 1)[0]
+    assert len(owner_line) <= 21
+
+
+def test_fetch_bangumi_ep_missing_does_not_use_latest_title(monkeypatch):
+    class _Resp:
+        def json(self):
+            return _PGC_RESULT
+    class _Client:
+        async def get(self, url, **kw):
+            return _Resp()
+    monkeypatch.setattr(bili, "get_http_client", lambda t: _Client())
+    info = asyncio.run(bili._fetch_bangumi_info("ep123456"))
+    assert info["title"] == "BLEACH 死神 千年血战篇"
+
+
+def test_handler_processes_new_link_after_recent_link(monkeypatch):
+    calls = []
+    async def fake_fetch(vid):
+        calls.append(vid)
+        return dict(_INFO, bvid=vid)
+    async def fake_image(info):
+        return "/tmp/bili_card.png"
+    import time
+    bili._recent[("100", "BV1GJ411x7h7")] = time.time()
+    monkeypatch.setattr(bili, "fetch_info", fake_fetch)
+    monkeypatch.setattr(bili, "build_card_image", fake_image)
+    asyncio.run(bili.bili_matcher.handlers[0](_ev("BV1GJ411x7h7 BV1fsk1v7pvX")))
+    assert calls == ["BV1fsk1v7pvX"]
+
+
+def test_handler_parses_json_card(monkeypatch):
+    from conftest import MessageSegment
+    calls = []
+    async def fake_fetch(vid):
+        calls.append(vid)
+        return dict(_INFO)
+    async def fake_image(info):
+        return "/tmp/bili_card.png"
+    raw = r'{"meta":{"news":{"jumpUrl":"https:\/\/www.bilibili.com\/bangumi\/play\/ep123456"}}}'
+    event = GroupMessageEvent(plain="", user_id=1, group_id=100, message=[MessageSegment("json", {"data": raw})])
+    monkeypatch.setattr(bili, "fetch_info", fake_fetch)
+    monkeypatch.setattr(bili, "build_card_image", fake_image)
+    asyncio.run(bili.bili_matcher.handlers[0](event))
+    assert calls == ["ep123456"]
+
+
+def test_bangumi_render_uses_episode_badge_without_duration():
+    from PIL import Image
+    info = dict(_INFO, kind="bangumi", videos=3, duration=0)
+    image = bili._render_card(info, None)
+    assert isinstance(image, Image.Image) and image.width == 900
