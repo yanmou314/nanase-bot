@@ -30,6 +30,7 @@
 | 📈 指令统计 | 每日使用报告 | 每日 00:05 定时生成统计图推送 |
 | 🚪 进出群播报 | 欢迎 / 退群通知 | 入群欢迎、退群随机文案并播报逗留时长 |
 | ❓ 帮助菜单 | 命令总览 | 公开菜单全群可见；主人完整菜单自动私发，不在群内暴露管理命令 |
+| 📺 链接解析 | 分享链接自动解析 | 检测消息中的 B站（BV号/链接/短链/小程序卡片）/抖音/微博等分享，自动下载发送视频/图集/音频（[nonebot-plugin-parser](https://github.com/fllesser/nonebot-plugin-parser)），单资源默认上限 50MB |
 | 💸 价格对比 | 大模型价格图 | 主流大模型 API 价格实时对比（OpenRouter）*（插件当前已停用，见 `plugins-disabled/`）* |
 
 ## 🏗 架构
@@ -91,6 +92,10 @@ QQBOT_OWNER=你的QQ号
 
 # 若 NapCatQQ 侧配置了 access token，需增加：
 # ONEBOT_ACCESS_TOKEN=与NapCat一致
+
+# 链接解析插件（nonebot-plugin-parser）可选：
+# PARSER_MAX_SIZE=50   # 单个资源最大 MB
+# PARSER_BILI_CK=      # B站 Cookie（解锁高清晰度与 AI 总结）
 ```
 
 ### 3. 按需启用插件
@@ -139,6 +144,7 @@ python bot.py
 | 群内连续相同消息 | 概率复读 |
 | 戳一戳机器人 | AI 上下文回复 |
 | 入群 / 退群 | 欢迎语 / 退群播报（含逗留时长） |
+| 消息含 B站 / 抖音 / 微博等分享链接或 BV 号 | 自动解析并发送视频 / 图集 / 音频 |
 
 ### 管理命令（仅主人）
 
@@ -178,6 +184,7 @@ plugins/
   └── what_to_eat/          今天吃什么（被动触发）
 
 plugins-disabled/           已停用插件（不会被加载；含 llm_price 大模型价格对比）
+（第三方插件如 nonebot-plugin-parser 经 pip 安装，在 pyproject.toml 注册）
 tests/                      测试（stub 模拟 NoneBot，无需真实环境）
 ```
 

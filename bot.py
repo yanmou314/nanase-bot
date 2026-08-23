@@ -25,6 +25,10 @@ nonebot.init(
 driver = nonebot.get_driver()
 driver.register_adapter(OneBotV11Adapter)
 
+# 先把 apscheduler 注册为正式插件：plugins/ 内插件直接 import 它，
+# 第三方插件（如 nonebot_plugin_parser）则 require 它，要求其已完成插件注册
+nonebot.load_plugin("nonebot_plugin_apscheduler")
+
 nonebot.load_from_toml(os.path.join(_BOT_ROOT, "pyproject.toml"))
 
 if __name__ == "__main__":
