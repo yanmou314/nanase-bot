@@ -420,8 +420,6 @@ async def handle_bili_link(event: GroupMessageEvent):
 
     now = time.time()
     gid = str(event.group_id)
-    if now - _group_last.get(gid, 0.0) < _GROUP_COOLDOWN:
-        return
 
     ids = extract_ids(raw)
     for url in _B23_RE.findall(raw):
@@ -429,6 +427,21 @@ async def handle_bili_link(event: GroupMessageEvent):
         if resolved and resolved not in ids:
             ids.append(resolved)
     if not ids:
+        return
+
+    # 重复请求：60 秒内已答复过保持静默（防连点刷屏）；之后重发缓存图而非沉默
+    for v in ids:
+        if now - _recent.get((gid, v), 0.0) < 60.0:
+            return
+        entry = _info_cache.get(v)
+        if entry and entry[0] > now:
+            img = _img_cache.get(entry[1]["bvid"])
+            if img and img[0] > now and os.path.exists(img[1]):
+                _recent[(gid, v)] = now
+                await bili_matcher.send(MessageSegment.image("file://" + img[1]))
+                return
+
+    if now - _group_last.get(gid, 0.0) < _GROUP_COOLDOWN:
         return
 
     # 跳过去重窗口内已解析过的视频，取第一个未解析的
