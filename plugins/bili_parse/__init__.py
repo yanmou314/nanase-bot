@@ -85,12 +85,16 @@ async def fetch_info(vid: str) -> dict | None:
             "title": d.get("title") or "",
             "pic": (d.get("pic") or "").replace("http://", "https://"),
             "owner": (d.get("owner") or {}).get("name") or "",
+            "tname": d.get("tname") or "",
+            "videos": d.get("videos", 1) or 1,
+            "desc": " ".join((d.get("desc") or "").split()),
             "view": stat.get("view", 0),
             "danmaku": stat.get("danmaku", 0),
             "like": stat.get("like", 0),
             "coin": stat.get("coin", 0),
             "favorite": stat.get("favorite", 0),
             "reply": stat.get("reply", 0),
+            "share": stat.get("share", 0),
             "duration": d.get("duration", 0),
             "pubdate": d.get("pubdate", 0),
         }
@@ -116,20 +120,36 @@ def _fmt_duration(seconds: int) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
+def _fmt_desc(desc: str, limit: int = 60) -> str:
+    """简介压成单行并截断；空简介返回空串。"""
+    if not desc:
+        return ""
+    flat = " ".join(desc.split())
+    return flat if len(flat) <= limit else flat[:limit] + "…"
+
+
 def build_card(info: dict) -> MessageSegment:
     """封面图 + 信息卡片（文本段包裹，标题/UP主名不会触发 CQ 码解析）。"""
     date = datetime.fromtimestamp(info["pubdate"], _SH).strftime("%Y-%m-%d") \
         if info["pubdate"] else "未知"
-    text = (
-        f"🎬 {info['title']}\n"
-        f"👤 UP主：{info['owner']}\n"
+    multi = f"（全{info['videos']}P）" if info.get("videos", 1) > 1 else ""
+    owner_line = f"👤 UP主：{info['owner']}"
+    if info.get("tname"):
+        owner_line += f" ｜ {info['tname']}"
+    desc = _fmt_desc(info.get("desc", ""))
+    lines = [
+        f"🎬 {info['title']}{multi}",
+        owner_line,
         f"▶ 播放 {_fmt_count(info['view'])} · 弹幕 {_fmt_count(info['danmaku'])}"
-        f" · 点赞 {_fmt_count(info['like'])}\n"
+        f" · 点赞 {_fmt_count(info['like'])} · ↗ 分享 {_fmt_count(info['share'])}",
         f"🪙 投币 {_fmt_count(info['coin'])} · ⭐ 收藏 {_fmt_count(info['favorite'])}"
-        f" · 💬 评论 {_fmt_count(info['reply'])}\n"
-        f"⏱ {_fmt_duration(info['duration'])} · 📅 {date}\n"
-        f"🔗 https://www.bilibili.com/video/{info['bvid']}"
-    )
+        f" · 💬 评论 {_fmt_count(info['reply'])}",
+        f"⏱ {_fmt_duration(info['duration'])} · 📅 {date}",
+    ]
+    if desc:
+        lines.append(f"📝 简介：{desc}")
+    lines.append(f"🔗 https://www.bilibili.com/video/{info['bvid']}")
+    text = "\n".join(lines)
     parts = []
     if info["pic"]:
         parts.append(MessageSegment.image(info["pic"]))

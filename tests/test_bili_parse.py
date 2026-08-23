@@ -12,12 +12,16 @@ _INFO = {
     "title": "【官方 MV】Never Gonna Give You Up",
     "pic": "https://i0.hdslb.com/bfs/archive/abc.jpg",
     "owner": "RickAstleyVEVO",
+    "tname": "音乐综合",
+    "videos": 1,
+    "desc": "1987年经典单曲 Official MV",
     "view": 12345678,
     "danmaku": 40210,
     "like": 999999,
     "coin": 8800,
     "favorite": 56000,
     "reply": 4300,
+    "share": 12345,
     "duration": 213,
     "pubdate": 1577835803,
 }
@@ -59,9 +63,26 @@ def test_build_card_contains_info_and_image():
     text = str(segs[1])
     assert _INFO["title"] in text
     assert _INFO["owner"] in text
-    assert "1234.6万" in text       # 播放数
-    assert "3:33" in text           # 时长
-    assert "2020-01-01" in text     # 发布日期（Asia/Shanghai）
+    assert _INFO["tname"] in text          # 分区
+    assert "1.2万" in text                  # 分享数
+    assert "1234.6万" in text               # 播放数
+    assert "3:33" in text                   # 时长
+    assert "2020-01-01" in text             # 发布日期（Asia/Shanghai）
+    assert _INFO["desc"] in text            # 简介
+    assert "全2P" not in text               # 单P不显示多P标记
+
+
+def test_build_card_multi_part_and_long_desc():
+    multi = dict(_INFO, videos=3, desc="第一行\n第二行 " + "很长的简介" * 30)
+    text = str(list(bili.build_card(multi))[1])
+    assert "（全3P）" in text
+    desc_line = text.split("简介：")[1].split("\n")[0]
+    assert "很长的简介" in desc_line and "…" in desc_line  # 压单行 + 截断
+    assert len(desc_line) <= 70
+
+    no_desc = dict(_INFO, desc="", tname="")
+    text2 = str(list(bili.build_card(no_desc))[1])
+    assert "简介" not in text2 and "｜" not in text2  # 空简介/空分区整行省略
 
 
 def _ev(text, group=100):
