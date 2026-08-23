@@ -102,6 +102,11 @@ def _render(counter: Counter, n: int, msg_count: int) -> str:
         draw.text(((box[0] + box[2]) / 2, (box[1] + box[3]) / 2), word, font=font,
                   fill=color, anchor="mm")
 
+    # 消息总数展示在左上角（msg_count 由调用方传入，在此消费）
+    if msg_count:
+        draw.text((14, 10), f"共 {msg_count} 条消息", font=_font(22),
+                  fill=(165, 161, 171), anchor="lt")
+
     os.makedirs(CACHE_DIR, exist_ok=True)
     path = os.path.join(CACHE_DIR, f"words_{int(time.time() * 1000)}.png")
     img.save(path, "PNG")

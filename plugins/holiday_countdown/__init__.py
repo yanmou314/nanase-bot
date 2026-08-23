@@ -9,8 +9,8 @@ import time as system_time
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from nonebot import get_bot, on_command
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageEvent, MessageSegment
+from nonebot import get_bot, get_driver, on_command
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageEvent, MessageSegment
 from nonebot_plugin_apscheduler import scheduler
 from PIL import Image, ImageDraw, ImageFont
 
@@ -26,6 +26,7 @@ WEEKDAYS = ("一", "二", "三", "四", "五", "六", "日")
 CARD_WIDTH = 1080
 CARD_HEIGHT = 840
 WORK_START = time(8, 0)  # 上班时间（放假/周末时倒计时到此时间）
+PUSH_TIME = time(17, 0)  # 每日推送时刻（与 daily_holiday_countdown_job 的 cron 保持一致）
 
 # 放假区间表：(名称, 放假首日, 放假末日)。
 # 2026 为国务院办公厅官方安排；2027-2030 为按近年惯例推算的基线
@@ -115,7 +116,10 @@ def _load_groups() -> set[int]:
 
 
 def _save_groups(groups: set[int]) -> None:
-    save_json_state(STATE_FILE, {"groups": sorted(groups)}, STATE_LOCK)
+    # 只更新 groups，保留同文件里的其他键（如 last_push_date）
+    data = load_json_state(STATE_FILE, STATE_LOCK)
+    data["groups"] = sorted(groups)
+    save_json_state(STATE_FILE, data, STATE_LOCK)
 
 
 def _enabled_groups() -> set[int]:
@@ -134,6 +138,20 @@ def _change_group(group_id: int, enabled: bool) -> bool:
         if changed:
             _save_groups(groups)
         return changed
+
+
+def _last_push_date() -> str:
+    """读取最近一次倒计时推送日期（YYYY-MM-DD，上海时区）；从未推送返回空串。"""
+    with STATE_LOCK:
+        return str(load_json_state(STATE_FILE, STATE_LOCK).get("last_push_date") or "")
+
+
+def _mark_pushed(day: date) -> None:
+    """记录当日倒计时已推送完成，用于防重复推送与启动补发判断。"""
+    with STATE_LOCK:
+        data = load_json_state(STATE_FILE, STATE_LOCK)
+        data["last_push_date"] = day.isoformat()
+        save_json_state(STATE_FILE, data, STATE_LOCK)
 
 
 def _last_workday_before(value: date) -> date:
@@ -393,24 +411,70 @@ async def test(event: MessageEvent):
     await test_cmd.finish(await _build_image_message())
 
 
-@scheduler.scheduled_job("cron", hour=17, minute=0, id="daily_holiday_countdown", timezone="Asia/Shanghai")
-async def daily_holiday_countdown_job():
-    groups = _enabled_groups()
-    if not groups:
-        return
+_push_running = False  # 推送进行中标记：定时触发与启动补发恰好并发时只跑一路
+
+
+async def _push_daily_countdown() -> bool:
+    """推送当日倒计时到所有开启群；至少一个群送达才记录 last_push_date 并返回 True。"""
+    global _push_running
+    today = _now().date().isoformat()
+    if _last_push_date() == today:
+        return True  # 今日已推送（定时与补发共用此标记，防重复）
+    if _push_running:  # 另一路正在推送本次倒计时，无需重复
+        return False
+    _push_running = True
     try:
-        message = await _build_image_message()
-    except Exception:
-        _logger.exception("倒计时每日消息构建失败")
-        return
-    try:
-        bot = get_bot()
-    except Exception:
-        _logger.warning("倒计时推送时机器人未连接，本次跳过")
-        return
-    for group_id in groups:
+        if _last_push_date() == today:  # 双重检查：进入前另一路可能刚好推完
+            return True
+        groups = _enabled_groups()
+        if not groups:
+            return False
         try:
-            await bot.send_group_msg(group_id=group_id, message=message)
+            message = await _build_image_message()
         except Exception:
-            _logger.warning("倒计时推送到群 %s 失败", group_id, exc_info=True)
-            continue
+            _logger.exception("倒计时每日消息构建失败")
+            return False
+        try:
+            bot = get_bot()
+        except Exception:
+            _logger.warning("倒计时推送时机器人未连接，本次跳过")
+            return False
+        # 并发发送：单个群失败不影响其他群
+        results = await asyncio.gather(
+            *(bot.send_group_msg(group_id=gid, message=message) for gid in groups),
+            return_exceptions=True,
+        )
+        sent = 0
+        for gid, result in zip(groups, results):
+            if isinstance(result, BaseException):
+                _logger.warning("倒计时推送到群 %s 失败", gid, exc_info=result)
+            else:
+                sent += 1
+        if sent:
+            _mark_pushed(_now().date())  # 有群成功送达才记录，全失败保留补发机会
+        return bool(sent)
+    finally:
+        _push_running = False
+
+
+@scheduler.scheduled_job("cron", hour=PUSH_TIME.hour, minute=PUSH_TIME.minute, id="daily_holiday_countdown", timezone="Asia/Shanghai")
+async def daily_holiday_countdown_job():
+    if _last_push_date() == _now().date().isoformat():
+        return  # 今日已推送（如启动补发已执行过），防重复
+    await _push_daily_countdown()
+
+
+# 启动补发：APScheduler 用内存 jobstore，进程重启后错过的当日推送静默丢失，
+# bot 连上后检查"已过推送时刻且今日未推送"则立即补发一次。
+# 优先 on_bot_connect（此时 get_bot 可用）；无该钩子的环境（旧版 nonebot / 测试 stub）回退 on_startup。
+_register_catchup = getattr(get_driver(), "on_bot_connect", get_driver().on_startup)
+
+
+@_register_catchup
+async def _countdown_catchup(bot: Bot) -> None:
+    now = _now()
+    if (now.hour, now.minute) < (PUSH_TIME.hour, PUSH_TIME.minute):
+        return  # 还没到当日推送时刻，交给定时任务
+    if _last_push_date() >= now.date().isoformat():
+        return  # 今日已推送（last_push_date 为今天或更晚），不重复
+    await _push_daily_countdown()

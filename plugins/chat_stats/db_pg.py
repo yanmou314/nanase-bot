@@ -3,6 +3,8 @@ import asyncio
 import json
 import logging
 import os
+import uuid
+from collections.abc import AsyncIterator
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -42,41 +44,52 @@ async def get_pool() -> AsyncConnectionPool:
     if _pool is None:
         async with _pool_lock:
             if _pool is None:
-                _pool = AsyncConnectionPool(load_dsn(), min_size=1, max_size=5, open=False)
-                await _pool.open()
-                async with _pool.connection() as conn:
-                    await conn.execute(
-                        """CREATE TABLE IF NOT EXISTS messages (
-                            id BIGSERIAL PRIMARY KEY,
-                            group_id BIGINT NOT NULL,
-                            user_id BIGINT NOT NULL,
-                            msg_type TEXT NOT NULL DEFAULT 'text',
-                            day DATE NOT NULL,
-                            hour INT NOT NULL,
-                            text TEXT NOT NULL DEFAULT ''
-                        )"""
-                    )
-                    await conn.execute("CREATE INDEX IF NOT EXISTS idx_day ON messages(day)")
-                    await conn.execute("CREATE INDEX IF NOT EXISTS idx_gday ON messages(group_id, day)")
-                    await conn.execute("CREATE INDEX IF NOT EXISTS idx_guday ON messages(group_id, user_id, day)")
-                    await conn.execute(
-                        """CREATE TABLE IF NOT EXISTS command_usages (
-                            id BIGSERIAL PRIMARY KEY,
-                            group_id BIGINT NOT NULL,
-                            user_id BIGINT NOT NULL,
-                            day DATE NOT NULL,
-                            hour INT NOT NULL,
-                            command TEXT NOT NULL
-                        )"""
-                    )
-                    await conn.execute("CREATE INDEX IF NOT EXISTS idx_cmd_day ON command_usages(day)")
-                    await conn.execute(
-                        "CREATE INDEX IF NOT EXISTS idx_cmd_gday ON command_usages(group_id, day)"
-                    )
-                    await conn.execute(
-                        "CREATE INDEX IF NOT EXISTS idx_cmd_uday ON command_usages(user_id, day)"
-                    )
-                    await conn.commit()
+                # 先在局部变量上完成 open + 建表，全部成功后才发布到 _pool；
+                # 中途任何失败都关闭半初始化的池并抛出，让下次调用能重试，
+                # 避免残留坏池导致后续查询每次都挂到 PoolTimeout。
+                pool = AsyncConnectionPool(load_dsn(), min_size=1, max_size=5, open=False)
+                try:
+                    await pool.open()
+                    async with pool.connection() as conn:
+                        await conn.execute(
+                            """CREATE TABLE IF NOT EXISTS messages (
+                                id BIGSERIAL PRIMARY KEY,
+                                group_id BIGINT NOT NULL,
+                                user_id BIGINT NOT NULL,
+                                msg_type TEXT NOT NULL DEFAULT 'text',
+                                day DATE NOT NULL,
+                                hour INT NOT NULL,
+                                text TEXT NOT NULL DEFAULT ''
+                            )"""
+                        )
+                        await conn.execute("CREATE INDEX IF NOT EXISTS idx_day ON messages(day)")
+                        await conn.execute("CREATE INDEX IF NOT EXISTS idx_gday ON messages(group_id, day)")
+                        await conn.execute("CREATE INDEX IF NOT EXISTS idx_guday ON messages(group_id, user_id, day)")
+                        await conn.execute(
+                            """CREATE TABLE IF NOT EXISTS command_usages (
+                                id BIGSERIAL PRIMARY KEY,
+                                group_id BIGINT NOT NULL,
+                                user_id BIGINT NOT NULL,
+                                day DATE NOT NULL,
+                                hour INT NOT NULL,
+                                command TEXT NOT NULL
+                            )"""
+                        )
+                        await conn.execute("CREATE INDEX IF NOT EXISTS idx_cmd_day ON command_usages(day)")
+                        await conn.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_cmd_gday ON command_usages(group_id, day)"
+                        )
+                        await conn.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_cmd_uday ON command_usages(user_id, day)"
+                        )
+                        await conn.commit()
+                except Exception:
+                    try:
+                        await pool.close()  # best-effort 清理，失败只记日志
+                    except Exception:
+                        _logger.exception("关闭初始化失败的连接池时出错（忽略）")
+                    raise
+                _pool = pool
     return _pool
 
 
@@ -103,15 +116,38 @@ async def close_pool() -> None:
 
 
 async def exec(sql: str, params: tuple = ()) -> list:
+    """执行查询并一次性返回全部行；异常直接向上抛，由调用方决定如何提示/记录。"""
     pool = await get_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(sql, params)
-            try:
-                return await cur.fetchall()
-            except Exception:
-                _logger.exception("查询失败: %s", sql)
-                return []
+            return await cur.fetchall()
+
+
+async def iter_rows(sql: str, params: tuple = ()) -> AsyncIterator[tuple]:
+    """流式查询：服务端命名游标逐行产出，避免大结果集一次性载入内存。
+
+    命名游标必须在事务内运行（池连接默认非 autocommit，execute 即开事务）；
+    正常耗尽后由池的 connection() 上下文统一 commit、异常时 rollback，
+    连接总能干净归还。调用方应完整消费，或用 contextlib.aclosing 包住以防提前退出。
+    """
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        async with conn.cursor(name=f"iter_{uuid.uuid4().hex[:8]}") as cur:
+            await cur.execute(sql, params)
+            async for row in cur:
+                yield row
+
+
+async def wait_writes_drained(timeout: float = 30.0) -> None:
+    """等待消息写队列清空（带超时兜底）；供日报任务在统计前等 0.5s flush 窗口的消息落库。"""
+    queue = _write_queue
+    if queue is None:
+        return
+    try:
+        await asyncio.wait_for(queue.join(), timeout)
+    except asyncio.TimeoutError:
+        _logger.warning("等待消息写队列清空超时（%.0f 秒），继续执行", timeout)
 
 
 async def _ensure_writer() -> asyncio.Queue:

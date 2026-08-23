@@ -64,6 +64,7 @@ _MEMORY_MAX_KEYS = 500
 _MEMORY_TTL = 24 * 60 * 60
 _cached_key = ""
 _cached_key_mtime = -1.0
+_key_load_warned = False  # 配置读取失败只警告一次，成功后重置，避免每条消息刷日志
 _last_timeout_notice = 0.0
 _TIMEOUT_NOTICE_COOLDOWN = 10 * 60
 
@@ -90,16 +91,6 @@ POKE_REPLIES = [
     "もう～…再戳的话…就用画笔反击了哦…！",
 ]
 
-FALLBACKS = [
-    "えっと…ななせ在听哦…（小声）",
-    "唔…嗯嗯，然后呢？",
-    "そうだね…ななせ也这么觉得…",
-    "诶嘿…这个ななせ不太懂，但是觉得好厉害！",
-    "好、好哦！",
-    "（歪头）ん？…什么什么？",
-    "在、在呢！",
-    "这个话题…有点意思…えへへ，展开说说？",
-]
 
 def _get_http_client() -> httpx.AsyncClient:
     # 统一走 common 的按超时缓存单例，由 owstats 注册的 on_shutdown 统一关闭
@@ -107,7 +98,7 @@ def _get_http_client() -> httpx.AsyncClient:
 
 
 def _load_key() -> str:
-    global _cached_key, _cached_key_mtime
+    global _cached_key, _cached_key_mtime, _key_load_warned
     try:
         mtime = os.path.getmtime(CFG_FILE)
         if mtime == _cached_key_mtime:
@@ -115,10 +106,14 @@ def _load_key() -> str:
         with open(CFG_FILE, "r", encoding="utf-8") as f:
             _cached_key = (json.load(f).get("api_key") or "").strip()
         _cached_key_mtime = mtime
+        _key_load_warned = False  # 读取成功，重置标记，下次失败可再警告
         return _cached_key
     except Exception:
         _cached_key = ""
         _cached_key_mtime = -1.0
+        if not _key_load_warned:
+            _key_load_warned = True
+            logger.warning(f"auto_chat 读取 api_key 配置失败（{CFG_FILE}），本次按未配置处理")
         return ""
 
 
@@ -127,27 +122,61 @@ def get_api_key() -> str:
     return _load_key()
 
 
+_MAX_ATTEMPTS = 3  # AI 请求失败后的总尝试次数，全部失败则放弃且不回复
+_RETRY_DELAY = 1.0  # 重试基础间隔秒数，指数退避：1s / 2s
+
+
 async def chat_completion(messages: list, max_tokens: int = 300, timeout: float = 30) -> str:
-    """公开接口：统一 AI 调用入口（自动读 key、受全局并发信号量限制），返回回复文本，失败抛异常。"""
+    """公开接口：统一 AI 调用入口（自动读 key、受全局并发信号量限制）。
+
+    失败自动重试，共尝试 _MAX_ATTEMPTS 次，间隔指数退避；
+    4xx（429 除外）属不可恢复错误，直接抛出不重试；全部失败抛出最后一次的异常。
+    """
     key = _load_key()
     if not key:
         raise RuntimeError("auto_chat 未配置 api_key")
     client = _get_http_client()
-    async with _AI_SEM:
-        r = await client.post(
-            API_URL,
-            headers={"Authorization": f"Bearer {key}"},
-            json={
-                "model": MODEL,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "thinking": {"type": "disabled"},  # 关闭思考：防止 token 被思考过程吃光导致空回复
-            },
-            timeout=timeout,
-        )
-    r.raise_for_status()
-    data = r.json()
-    return (data["choices"][0]["message"]["content"] or "").strip()
+    last_exc: Exception | None = None
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            async with _AI_SEM:
+                r = await client.post(
+                    API_URL,
+                    headers={"Authorization": f"Bearer {key}"},
+                    json={
+                        "model": MODEL,
+                        "messages": messages,
+                        "max_tokens": max_tokens,
+                        "thinking": {"type": "disabled"},  # 关闭思考：防止 token 被思考过程吃光导致空回复
+                    },
+                    # 精细超时：连接 10s / 读 timeout / 写 10s / 池等待 5s，
+                    # 代理失效时尽快在连接阶段失败，而不是等满整体超时
+                    timeout=httpx.Timeout(connect=10, read=timeout, write=10, pool=5),
+                )
+            r.raise_for_status()
+            data = r.json()
+            content = (data["choices"][0]["message"]["content"] or "").strip()
+            if content:
+                return content
+            raise ValueError("AI 返回空回复")
+        except httpx.HTTPStatusError as e:
+            # 4xx（429 限流除外）是鉴权/请求格式等不可恢复错误，
+            # 重试只会白占 _AI_SEM 并发槽，直接抛出交由调用方处理
+            code = e.response.status_code
+            if 400 <= code < 500 and code != 429:
+                logger.warning(f"auto_chat AI 请求失败（第 {attempt}/{_MAX_ATTEMPTS} 次）：HTTP {code}，不可重试")
+                raise
+            last_exc = e
+            logger.warning(f"auto_chat AI 请求失败（第 {attempt}/{_MAX_ATTEMPTS} 次）：{e!r}")
+            if attempt < _MAX_ATTEMPTS:
+                await asyncio.sleep(_RETRY_DELAY * (2 ** (attempt - 1)))
+        except Exception as e:
+            last_exc = e
+            logger.warning(f"auto_chat AI 请求失败（第 {attempt}/{_MAX_ATTEMPTS} 次）：{e!r}")
+            if attempt < _MAX_ATTEMPTS:
+                await asyncio.sleep(_RETRY_DELAY * (2 ** (attempt - 1)))
+    assert last_exc is not None
+    raise last_exc
 
 
 def _clean_msg(event: MessageEvent) -> str:
@@ -239,8 +268,7 @@ async def _notify_owner_timeout(bot: Bot) -> None:
         await bot.send_private_msg(
             user_id=int(_OWNER),
             message=MessageSegment.text(
-                "⚠️ @机器人主 AI 请求超时，已切换到青云客备用接口；"
-                "备用接口不使用完整人设提示词，回复风格可能不稳定。"
+                "⚠️ @机器人主 AI 接口超时/不可用，本次未回复，请检查 API 连通性"
             ),
         )
     except Exception as notify_error:
@@ -271,33 +299,18 @@ async def chat(bot: Bot, event: MessageEvent):
             # 群聊时把发言人昵称拼进上下文；私聊本来就一对一，无需前缀
             sender = _sender_name(event) if gid and gid != "0" else ""
             reply = await _ai_reply(key, uid, gid, msg[:200], sender)
-        except httpx.ReadTimeout as e:
-            logger.warning(f"auto_chat AI 请求超时（{e!r}），尝试备用源")
+        except httpx.TimeoutException as e:
+            # 覆盖 connect/read/write/pool 四类超时：代理失效时最常见的是
+            # ConnectTimeout（继承 ConnectError + TimeoutException），捕 ReadTimeout 会漏掉
+            logger.warning(f"auto_chat AI 请求超时（{e!r}），{_MAX_ATTEMPTS} 次尝试均失败，本次不回复")
             await _notify_owner_timeout(bot)
-            reply = ""
+            return
         except Exception as e:
-            logger.warning(f"auto_chat AI 生成失败（{e!r}），尝试备用源")
-            reply = ""
+            logger.warning(f"auto_chat AI 生成失败（{e!r}），{_MAX_ATTEMPTS} 次尝试均失败，本次不回复")
+            return
 
     if not reply:
-        try:
-            # qingyunke 免费接口不支持 HTTPS（TLS 握手失败），只能明文 HTTP；
-            # 仅发送前 60 字符、严格校验 JSON 结构，回复长度截断。
-            client = _get_http_client()
-            r = await client.get(
-                "http://api.qingyunke.com/api.php",
-                params={"key": "free", "appid": 0, "msg": msg[:60]},
-                timeout=8,
-            )
-            r.raise_for_status()
-            data = r.json()
-            if isinstance(data, dict) and data.get("result") == 0 and isinstance(data.get("content"), str):
-                reply = data["content"].replace("{br}", "\n").strip()[:300]
-        except Exception:
-            pass
-
-    if not reply:
-        reply = random.choice(FALLBACKS)
+        return  # 未配置 key 或未取得回复：只用 deepseek，不走备用源，也不再回复
 
     # MessageSegment.text 包裹：第三方/AI 返回的文本不会被解析为 CQ 码（防注入）
     await chat_matcher.finish(MessageSegment.reply(event.message_id) + MessageSegment.text(reply))

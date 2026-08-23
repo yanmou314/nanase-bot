@@ -10,7 +10,7 @@ from nonebot import get_driver, logger, on_command
 from nonebot.adapters.onebot.v11 import Message, MessageEvent, MessageSegment
 from nonebot.params import CommandArg
 
-from common import at_prefix, close_http_clients, get_http_client, parse_tag, save_json_state, save_image as save_img
+from common import at_prefix, close_http_clients, get_http_client, parse_tag, save_image_async, save_json_state
 
 try:
     from nonebot_plugin_apscheduler import scheduler
@@ -137,14 +137,17 @@ if scheduler is not None:
         if not tags:
             return
         logger.info(f"owstats 开始预热 {len(tags)} 个绑定玩家")
+        _warmup_state["busy"] = True  # 先亮正忙标志再逐个玩家抢锁，压缩用户查询与预热抢跑的窗口
         try:
             for idx, tag in enumerate(tags):
-                if OW_LOCK.locked():  # 预热开始前已有用户查询在跑，本轮让位
+                _warmup_state["deadline"] = time.time() + (len(tags) - idx) * WARMUP_PER_PLAYER_BUDGET
+                if OW_LOCK.locked():  # 有用户查询正在跑，本轮让位（与原语义一致）
                     logger.info("owstats 预热检测到用户查询进行中，本轮中止")
                     return
-                _warmup_state["busy"] = True
-                _warmup_state["deadline"] = time.time() + (len(tags) - idx) * WARMUP_PER_PLAYER_BUDGET
-                await _warmup_player(tag)
+                # 抢到锁并全程持有到该玩家预热结束：上游请求绝不与用户查询并发挤占 5 请求/秒配额。
+                # 即使上面检查后恰有用户查询抢先拿到锁，这里也只会排队等它完成，而不是并发执行。
+                async with OW_LOCK:
+                    await _warmup_player(tag)
                 await asyncio.sleep(WARMUP_GAP_SECONDS)
         finally:
             _warmup_state["busy"] = False
@@ -363,7 +366,7 @@ async def rank_history(event: MessageEvent, arg: Message = CommandArg()):
         except httpx.HTTPError:
             await rankhist_cmd.finish(at + "查询失败：请求超时，请稍后再试")
         if data.get("_image"):
-            path = save_img(data["bytes"], data["content_type"], "rank", CACHE)
+            path = await save_image_async(data["bytes"], data["content_type"], "rank", CACHE)
             await rankhist_cmd.finish(_done(Message(MessageSegment.image(Path(path).as_uri())), at, time.monotonic() - t0))
         await rankhist_cmd.finish(at + _friendly_error(data))
     finally:
@@ -395,7 +398,7 @@ async def strength(event: MessageEvent, arg: Message = CommandArg()):
         except httpx.HTTPError:
             await strength_cmd.finish(at + "查询失败：请求超时，请稍后再试")
         if data.get("_image"):
-            path = save_img(data["bytes"], data["content_type"], "strength", CACHE)
+            path = await save_image_async(data["bytes"], data["content_type"], "strength", CACHE)
             await strength_cmd.finish(_done(Message(MessageSegment.image(Path(path).as_uri())), at, time.monotonic() - t0))
         await strength_cmd.finish(at + _friendly_error(data))
     finally:
@@ -441,7 +444,7 @@ async def summary(event: MessageEvent, arg: Message = CommandArg()):
         except httpx.HTTPError:
             await summary_cmd.finish(at + "生成失败：超时，请稍后再试")
         if data.get("_image"):
-            path = save_img(data["bytes"], data["content_type"], "summary", CACHE)
+            path = await save_image_async(data["bytes"], data["content_type"], "summary", CACHE)
             await summary_cmd.finish(_done(Message(MessageSegment.image(Path(path).as_uri())), at, time.monotonic() - t0))
         await summary_cmd.finish(at + _friendly_error(data, scope))
     finally:

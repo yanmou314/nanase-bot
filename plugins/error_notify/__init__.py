@@ -81,6 +81,13 @@ async def _send_notice(text: str) -> None:
     await bot.send_private_msg(user_id=int(OWNER), message=MessageSegment.text(text))
 
 
+def _log_notice_result(fut) -> None:
+    """run_coroutine_threadsafe 的 future 无人 await，异常需在此显式记日志而不是等 GC 报警。"""
+    exc = fut.exception()
+    if exc is not None:
+        logger.opt(exception=exc).warning("定时任务报错通知发送失败")
+
+
 @run_postprocessor
 async def notify_plugin_error(matcher: Matcher, exception: Optional[Exception]) -> None:
     # finish()/skip() 等流程控制异常不是真报错
@@ -130,7 +137,7 @@ def _on_job_error(event) -> None:
             return
         text = _build_message(label, exc, loc)
         if _loop is not None and not _loop.is_closed():
-            asyncio.run_coroutine_threadsafe(_send_notice(text), _loop)
+            asyncio.run_coroutine_threadsafe(_send_notice(text), _loop).add_done_callback(_log_notice_result)
         else:
             logger.error("定时任务报错但事件循环未就绪，无法私发通知：%s", text)
     except Exception:

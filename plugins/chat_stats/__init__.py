@@ -5,6 +5,7 @@ import re
 import threading
 import time
 from collections import Counter, OrderedDict
+from contextlib import aclosing
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -14,8 +15,8 @@ from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegme
 from nonebot.params import CommandArg
 from nonebot_plugin_apscheduler import scheduler
 
-from common import cleanup_cache, is_owner, load_json_state, save_json_state
-from .db_pg import exec, write as db_write
+from common import RENDER_SEM, cleanup_cache, is_owner, load_json_state, save_json_state
+from .db_pg import exec, iter_rows, wait_writes_drained, write as db_write
 
 _logger = logging.getLogger(__name__)
 _SH = ZoneInfo("Asia/Shanghai")
@@ -67,12 +68,8 @@ async def purge_old_stats():
 
 @record_matcher.handle()
 async def record(event: GroupMessageEvent):
-    mtype = "text"
-    for seg in event.message:
-        if seg.type != "text":
-            mtype = seg.type
-            break
-    await db_write(event.group_id, event.user_id, mtype, event.get_plaintext())
+    # msg_type 探测结果无任何查询消费方，已删除；统一按列默认值 "text" 记录
+    await db_write(event.group_id, event.user_id, "text", event.get_plaintext())
 
 
 # ---------------- 工具 ----------------
@@ -102,32 +99,42 @@ async def _build_word_image(group_id: int, n: int) -> str | None:
     # 词云窗口：昨天 00:00 至今天 00:00（按上海时区计算，不依赖数据库时区）
     today = _sh_today()
     yesterday = (today - timedelta(days=1)).isoformat()
-    today_s = today.isoformat()
-    rows = await exec(
-        "SELECT text FROM messages WHERE group_id=%s AND "
-        "((day=%s AND hour>=%s) OR (day=%s AND hour<%s)) AND text!=''",
-        (group_id, yesterday, WORDS_CUTOFF_HOUR, today_s, WORDS_CUTOFF_HOUR),
-    )
+    if WORDS_CUTOFF_HOUR == 0:
+        # 截止 0 点时窗口恰为"昨天一整天"，day=昨天 与原条件等价且无恒假分支
+        sql = "SELECT text FROM messages WHERE group_id=%s AND day=%s AND text!=''"
+        args: tuple = (group_id, yesterday)
+    else:
+        sql = (
+            "SELECT text FROM messages WHERE group_id=%s AND "
+            "((day=%s AND hour>=%s) OR (day=%s AND hour<%s)) AND text!=''"
+        )
+        args = (group_id, yesterday, WORDS_CUTOFF_HOUR, today.isoformat(), WORDS_CUTOFF_HOUR)
     counter: Counter = Counter()
     normal_message_count = 0
-    for (text,) in rows:
-        if text.startswith(_COMMAND_START):
-            continue
-        normal_message_count += 1
-        for seg in re.findall(r"[\u4e00-\u9fff]{2,}", text):
-            if len(seg) > 8:
-                # 超长连续文本按 4 字滑动窗口切词，避免整段作为一个"词"无法排版
-                segs = [seg[i:i + 4] for i in range(0, len(seg) - 3, 4)]
-            else:
-                segs = [seg]
-            for s in segs:
-                if s not in STOPWORDS:
-                    counter[s] += 1
+    # 流式逐行消费：活跃大群的全天文本不再一次性载入内存；
+    # aclosing 保证循环体异常时也能立即释放游标与池连接
+    async with aclosing(iter_rows(sql, args)) as rows:
+        async for (text,) in rows:
+            if text.startswith(_COMMAND_START):
+                continue
+            normal_message_count += 1
+            for seg in re.findall(r"[\u4e00-\u9fff]{2,}", text):
+                if len(seg) > 8:
+                    # 超长连续文本按 4 字非重叠分块切词（尾部不足 4 字的残余丢弃），
+                    # 避免整段作为一个"词"无法排版
+                    segs = [seg[i:i + 4] for i in range(0, len(seg) - 3, 4)]
+                else:
+                    segs = [seg]
+                for s in segs:
+                    if s not in STOPWORDS:
+                        counter[s] += 1
     if not counter:
         return None
     cleanup_cache(WORD_CACHE)
     from .wordcloud_card import _render as render_cloud
-    return await asyncio.to_thread(render_cloud, counter, min(n, len(counter)), normal_message_count)
+    # PIL 渲染经全局渲染信号量串行化，避免小机器上并发渲染打爆内存
+    async with RENDER_SEM:
+        return await asyncio.to_thread(render_cloud, counter, min(n, len(counter)), normal_message_count)
 
 
 # ---------------- 龙王 ----------------
@@ -136,11 +143,15 @@ async def _build_word_image(group_id: int, n: int) -> str | None:
 async def dragon(bot: Bot, event: GroupMessageEvent):
     if not is_owner(event):
         await dragon_cmd.finish("❌ 你没有权限使用此功能")
-    rows = await exec(
-        "SELECT user_id, COUNT(*) c FROM messages WHERE group_id=%s AND day=%s "
-        "GROUP BY user_id ORDER BY c DESC LIMIT 3",
-        (event.group_id, _sh_today().isoformat()),
-    )
+    try:
+        rows = await exec(
+            "SELECT user_id, COUNT(*) c FROM messages WHERE group_id=%s AND day=%s "
+            "GROUP BY user_id ORDER BY c DESC LIMIT 3",
+            (event.group_id, _sh_today().isoformat()),
+        )
+    except Exception:
+        _logger.exception("龙王统计查询失败")
+        await dragon_cmd.finish(MessageSegment.text("统计服务暂时不可用，请稍后再试"))
     if not rows:
         await dragon_cmd.finish("今天还没有人发言哦～")
     names = {r[0]: await _get_name(bot, event.group_id, r[0]) for r in rows}
@@ -209,11 +220,14 @@ async def words_status(event: GroupMessageEvent):
     await words_status_cmd.finish("📊 每日词云推送：未开启")
 
 
-@scheduler.scheduled_job("cron", hour=0, minute=0, id="daily_words", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=0, minute=2, id="daily_words", timezone="Asia/Shanghai")
 async def daily_words_job():
     groups = _words_groups()
     if not groups:
         return
+    # 写路径有 0.5 秒批量 flush 窗口，先等队列清空再统计，避免漏掉临界消息；
+    # 30 秒超时兜底防止数据库异常时任务卡死
+    await wait_writes_drained(30)
     try:
         bot = get_bot()
     except Exception:
@@ -239,7 +253,11 @@ async def words(event: GroupMessageEvent, arg: Message = CommandArg()):
         n = max(1, min(int(arg.extract_plain_text().strip() or 40), 60))
     except ValueError:
         n = 20
-    path = await _build_word_image(event.group_id, n)
+    try:
+        path = await _build_word_image(event.group_id, n)
+    except Exception:
+        _logger.exception("词云统计查询失败")
+        await words_cmd.finish(MessageSegment.text("统计服务暂时不可用，请稍后再试"))
     if not path:
         await words_cmd.finish("前一天还没有可统计的文字内容～")
     await words_cmd.finish(MessageSegment.image("file://" + path))
