@@ -165,7 +165,8 @@ def save_json_state(path: str, data: dict, lock=None) -> None:
 
 # ---------------- 图片渲染（weasyprint → PDF → pdftoppm → PNG） ----------------
 
-def render_html_to_png(html: str, prefix: str, cache_dir: str, max_age: int = 24 * 60 * 60) -> str:
+def render_html_to_png(html: str, prefix: str, cache_dir: str, max_age: int = 24 * 60 * 60,
+                        dpi: int = 144) -> str:
     """HTML 渲染为 PNG 的通用管线；资源加载仅允许 data: URL，阻止外部请求（防 SSRF）。
 
     【同步阻塞，几秒级】禁止直接在事件循环内调用，请使用 render_html_to_png_async。
@@ -185,7 +186,7 @@ def render_html_to_png(html: str, prefix: str, cache_dir: str, max_age: int = 24
     try:
         HTML(string=html, url_fetcher=_local_only_fetcher).write_pdf(tmp_pdf)
         subprocess.run(
-            ["pdftoppm", "-png", "-r", "144", "-singlefile", tmp_pdf, path[:-4]],
+            ["pdftoppm", "-png", "-r", str(dpi), "-singlefile", tmp_pdf, path[:-4]],
             check=True, capture_output=True,
         )
     finally:
@@ -195,10 +196,10 @@ def render_html_to_png(html: str, prefix: str, cache_dir: str, max_age: int = 24
 
 
 async def render_html_to_png_async(html: str, prefix: str, cache_dir: str,
-                                    max_age: int = 24 * 60 * 60) -> str:
+                                    max_age: int = 24 * 60 * 60, dpi: int = 144) -> str:
     """render_html_to_png 的异步封装：经 RENDER_SEM 全局串行化后在线程池执行。"""
     async with RENDER_SEM:
-        return await asyncio.to_thread(render_html_to_png, html, prefix, cache_dir, max_age)
+        return await asyncio.to_thread(render_html_to_png, html, prefix, cache_dir, max_age, dpi)
 
 
 def gradient_background(w: int, h: int, top=(249, 248, 250), bottom=(243, 241, 246)) -> str:
