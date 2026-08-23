@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 import pytest
 
@@ -200,45 +201,51 @@ def test_resolve_b23_extracts_from_final_url(monkeypatch):
     assert asyncio.run(bili.resolve_b23("https://b23.tv/abc123")) == "BV1GJ411x7h7"
 
 
-# ---------------- 图片卡片渲染 ----------------
+# ---------------- 图片卡片渲染（PIL） ----------------
 
-def test_build_html_contains_info_and_escapes():
-    info = dict(_INFO, title='恶意<script>alert(1)</script>标题')
-    page, height = bili._build_html(info, "data:image/jpeg;base64,QUJD")
-    assert "<script>alert(1)</script>" not in page   # 标题被转义
-    assert "&lt;script&gt;" in page
-    assert 'src="data:image/jpeg;base64,QUJD"' in page
-    assert _INFO["owner"] in page and "1234.6万" in page
-    assert "简介：" in page and "3:33" in page
-    assert f"size: 900px {height}px" in page
+def test_resized_cover_url_appends_cdn_param():
+    assert bili._resized_cover_url("https://i0.hdslb.com/bfs/archive/abc.jpg")         == "https://i0.hdslb.com/bfs/archive/abc.jpg@900w_506h_1c.jpg"
+    assert bili._resized_cover_url("https://i0.hdslb.com/a.jpg@600w.webp")         == "https://i0.hdslb.com/a.jpg@600w.webp"  # 已带参数不重复追加
+    assert bili._resized_cover_url("") == ""
 
 
-def test_build_html_without_cover_uses_placeholder():
-    page, height = bili._build_html(dict(_INFO), None)
-    assert "no-cover" in page and "<img" not in page
-    assert bili._build_html(dict(_INFO), None)[1] < bili._build_html(dict(_INFO), "data:image/jpeg;base64,QUJD")[1]
+def test_wrap_text_wraps_and_ellipsizes():
+    from PIL import ImageFont
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 30)
+    except OSError:
+        font = ImageFont.load_default(30)
+    lines = bili._wrap_text("短标题", font, 840, 2)
+    assert lines == ["短标题"]
+    lines = bili._wrap_text("字" * 200, font, 300, 2)
+    assert len(lines) == 2 and lines[1].endswith("…")
 
 
-def test_build_html_multi_p_badge_and_no_desc():
-    page, _ = bili._build_html(dict(_INFO, videos=3), None)
-    assert "全3P" in page
-    page2, _ = bili._build_html(dict(_INFO, desc=""), None)
-    assert "简介" not in page2
+def test_render_and_save_produces_png():
+    bili._img_cache.clear()
+    path = bili._render_and_save(dict(_INFO), None)  # 无封面走渐变占位头
+    assert os.path.exists(path) and path.endswith(".png")
+    from PIL import Image
+    with Image.open(path) as img:
+        assert img.width == 900
+        assert img.height > 700  # 封面506 + 正文分区
+    # 多P + 有简介不影响渲染
+    path2 = bili._render_and_save(dict(_INFO, videos=4), b"")
+    assert os.path.exists(path2)
 
 
-def test_fetch_cover_b64(monkeypatch):
+def test_fetch_cover_bytes(monkeypatch):
     class _Resp:
-        content = b"ABC"
+        content = b"PNGDATA"
         headers = {"content-type": "image/jpeg"}
 
     class _Client:
         async def get(self, url, **kw):
-            assert url.startswith("https://i")
+            assert url.endswith("@900w_506h_1c.jpg")
             return _Resp()
 
     monkeypatch.setattr(bili, "get_http_client", lambda t: _Client())
-    out = asyncio.run(bili._fetch_cover_b64(_INFO["pic"]))
-    assert out == "data:image/jpeg;base64,QUJD"
+    assert asyncio.run(bili._fetch_cover_bytes(_INFO["pic"])) == b"PNGDATA"
 
     class _Big(_Resp):
         content = b"x" * (bili._MAX_COVER_BYTES + 1)
@@ -248,39 +255,38 @@ def test_fetch_cover_b64(monkeypatch):
             return _Big()
 
     monkeypatch.setattr(bili, "get_http_client", lambda t: _BigClient())
-    assert asyncio.run(bili._fetch_cover_b64(_INFO["pic"])) is None
+    assert asyncio.run(bili._fetch_cover_bytes(_INFO["pic"])) is None
 
 
 def test_build_card_image_caches_render(tmp_path, monkeypatch):
     rendered = []
 
-    async def fake_render(html, prefix, cache_dir, max_age=0):
-        rendered.append(prefix)
+    def fake_render(info, cover):
+        rendered.append(1)
         p = tmp_path / f"card{len(rendered)}.png"
         p.write_bytes(b"png")
         return str(p)
 
     async def fake_cover(url):
-        return "data:image/jpeg;base64,QUJD"
+        return b"COVER"
 
-    monkeypatch.setattr(bili, "render_html_to_png_async", fake_render)
-    monkeypatch.setattr(bili, "_fetch_cover_b64", fake_cover)
+    monkeypatch.setattr(bili, "_render_and_save", fake_render)
+    monkeypatch.setattr(bili, "_fetch_cover_bytes", fake_cover)
     bili._img_cache.clear()
 
     p1 = asyncio.run(bili.build_card_image(dict(_INFO)))
     p2 = asyncio.run(bili.build_card_image(dict(_INFO)))  # 命中缓存，不重渲染
     assert p1 == p2 and len(rendered) == 1
-    assert p1.endswith(".png")
 
 
 def test_build_card_image_render_failure_returns_none(monkeypatch):
-    async def boom(html, prefix, cache_dir, max_age=0):
-        raise RuntimeError("weasyprint missing")
+    def boom(info, cover):
+        raise RuntimeError("pil broken")
 
     async def fake_cover(url):
         return None
 
-    monkeypatch.setattr(bili, "render_html_to_png_async", boom)
-    monkeypatch.setattr(bili, "_fetch_cover_b64", fake_cover)
+    monkeypatch.setattr(bili, "_render_and_save", boom)
+    monkeypatch.setattr(bili, "_fetch_cover_bytes", fake_cover)
     bili._img_cache.clear()
     assert asyncio.run(bili.build_card_image(dict(_INFO))) is None

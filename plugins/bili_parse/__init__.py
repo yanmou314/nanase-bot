@@ -1,11 +1,12 @@
 """B站视频链接解析：群里出现 B站链接 / BV号 / av号 时，自动回复封面图与视频信息。
 
-只调用 B站查询 API 解析元信息，不下载视频。卡片整体渲染为一张图片
-（weasyprint HTML→PNG，B站粉主题模板）；渲染失败时回退"封面+文本"卡片。
-同群 30 秒冷却 + 同视频 10 分钟去重防刷屏，信息与渲染结果各缓存 30 分钟。
+只调用 B站查询 API 解析元信息，不下载视频。卡片用 PIL 整体渲染为一张图片
+（B站粉主题；weasyprint 在本机解析 CJK 字体需约 10 秒，PIL 仅需数百毫秒）；
+渲染失败时回退"封面+文本"卡片。同群 30 秒冷却 + 同视频 10 分钟去重防刷屏，
+信息与渲染结果各缓存 30 分钟。
 """
-import base64
-import html as html_mod
+import asyncio
+import io
 import logging
 import os
 import re
@@ -17,7 +18,7 @@ import httpx
 from nonebot import on_message
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
 
-from common import get_http_client, render_html_to_png_async
+from common import FONTS, RENDER_SEM, get_http_client, save_image
 
 _logger = logging.getLogger(__name__)
 _SH = ZoneInfo("Asia/Shanghai")
@@ -36,15 +37,41 @@ _AV_RE = re.compile(r"(?<![0-9A-Za-z])av(\d{5,})", re.IGNORECASE)
 _B23_RE = re.compile(r"https?://b23\.tv/[0-9A-Za-z]+")
 _CMD_PREFIXES = (".", "/", "。")
 
+_CARD_W = 900
+_COVER_H = 506
 _GROUP_COOLDOWN = 30.0        # 同群两次解析的最小间隔
 _DUP_WINDOW = 10 * 60.0       # 同群同一视频的去重窗口
 _CACHE_TTL = 30 * 60.0        # 视频信息/渲染卡片缓存
 _MAX_COVER_BYTES = 8 * 1024 * 1024  # 封面大小上限，防异常大图耗内存
 
+# B站粉主题配色
+_C_PINK = (251, 114, 153)     # #fb7299
+_C_DARK = (24, 25, 28)        # #18191c
+_C_GRAY = (97, 102, 109)      # #61666d
+_C_LIGHT = (148, 153, 160)    # #9499a0
+_C_LINE = (240, 241, 242)     # #f0f1f2
+_C_BG_GRAY = (246, 247, 248)  # #f6f7f8
+
 _group_last: dict[str, float] = {}                # group_id -> 上次解析时间
 _recent: dict[tuple[str, str], float] = {}        # (group_id, vid) -> 上次解析时间
 _info_cache: dict[str, tuple[float, dict]] = {}   # vid -> (过期时间, 信息)
 _img_cache: dict[str, tuple[float, str]] = {}     # bvid -> (过期时间, 渲染图路径)
+_font_cache: dict[tuple[str, int], object] = {}   # (字体名, 字号) -> ImageFont
+
+
+def _font(key: str, size: int):
+    """按 (字体, 字号) 缓存字体对象；生产用 Noto CJK，缺失环境回退默认字体。"""
+    cache_key = (key, size)
+    if cache_key in _font_cache:
+        return _font_cache[cache_key]
+    from PIL import ImageFont
+
+    try:
+        font = ImageFont.truetype(FONTS[key], size)
+    except OSError:
+        font = ImageFont.load_default(size)
+    _font_cache[cache_key] = font
+    return font
 
 
 def extract_ids(*texts: str) -> list[str]:
@@ -172,133 +199,178 @@ def build_card(info: dict) -> MessageSegment:
     return sum(parts[1:], parts[0])
 
 
-# ---------------- 图片卡片（HTML 模板 → weasyprint 渲染） ----------------
+# ---------------- 图片卡片（PIL 渲染） ----------------
 
-_CSS = """
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { width: 900px; font-family: "Noto Sans CJK SC", sans-serif;
-       background: #ffffff; color: #18191c; }
-.cover { position: relative; width: 900px; height: 506px; overflow: hidden;
-         border-radius: 18px 18px 0 0; background: #ffe4ee; }
-.cover img { width: 900px; height: 506px; object-fit: cover; }
-.no-cover { width: 900px; height: 150px; border-radius: 18px 18px 0 0;
-            background: linear-gradient(135deg, #fb7299 0%, #ff9db8 60%, #ffc6d9 100%); }
-.badge-duration { position: absolute; right: 14px; bottom: 12px;
-                  background: rgba(0,0,0,0.65); color: #fff; font-size: 16px;
-                  padding: 3px 10px; border-radius: 6px; }
-.badge-multi { position: absolute; left: 14px; top: 12px;
-               background: #fb7299; color: #fff; font-size: 15px;
-               padding: 3px 10px; border-radius: 6px; }
-.body { padding: 26px 30px 24px; }
-.title { font-size: 30px; font-weight: 700; line-height: 1.45; overflow: hidden; }
-.meta { margin-top: 14px; font-size: 17px; color: #61666d; }
-.meta .owner { color: #fb7299; font-weight: 700; }
-.meta .sep { color: #e3e5e7; margin: 0 10px; }
-.stats { margin-top: 20px; padding-top: 18px; border-top: 1px solid #f0f1f2;
-         display: flex; justify-content: space-between; }
-.stat { width: 118px; text-align: center; }
-.stat .num { font-size: 21px; font-weight: 700; color: #18191c; }
-.stat .label { margin-top: 4px; font-size: 13px; color: #9499a0; }
-.desc { margin-top: 18px; background: #f6f7f8; border-radius: 10px;
-        padding: 12px 16px; font-size: 15px; color: #61666d;
-        line-height: 1.55; overflow: hidden; }
-.footer { margin-top: 18px; display: flex; justify-content: space-between;
-          align-items: center; font-size: 14px; color: #9499a0; }
-.footer .brand { color: #fb7299; font-weight: 700; }
-.footer .link { color: #9499a0; }
-"""
+def _wrap_text(text: str, font, max_width: int, max_lines: int) -> list[str]:
+    """CJK 逐字贪心换行；超出行数时末行截断加省略号。"""
+    lines: list[str] = []
+    cur = ""
+    for ch in text:
+        if font.getlength(cur + ch) <= max_width:
+            cur += ch
+        else:
+            lines.append(cur)
+            cur = ch
+            if len(lines) == max_lines:
+                tail = lines[-1]
+                while tail and font.getlength(tail + "…") > max_width:
+                    tail = tail[:-1]
+                lines[-1] = tail + "…"
+                return lines
+    if cur:
+        lines.append(cur)
+    return lines
 
 
 def _page_height(head_h: int, title_h: int, has_desc: bool) -> int:
     """按分区高度累加：封面 + 标题 + meta + 数据行 + 简介块 + 页脚 + 内边距。"""
     h = head_h + 26 + title_h      # 顶部内边距 + 标题
     h += 14 + 25                    # meta（上间距 + 行高）
-    h += 20 + 18 + 43               # stats（上间距 + 分隔线内边距 + 行高）
+    h += 20 + 70                    # stats（上间距 + 分隔线内边距 + 数字/标签两行）
     if has_desc:
-        h += 18 + 47                # 简介（两行以内）
+        h += 18 + 70                # 简介（两行以内，含内边距）
     h += 18 + 21 + 24               # 页脚（上间距 + 行高 + 底部内边距）
     return h
 
 
-def _build_html(info: dict, cover_b64: str | None) -> tuple[str, int]:
-    """构建卡片 HTML；返回 (html, 页面总高度px)。文本先截断保证高度确定。"""
-    esc = html_mod.escape
-    title = info["title"] or "未知标题"
-    if len(title) > 56:  # 标题最多两行，每行约 28 字
-        title = title[:56] + "…"
-    title_h = 44 if len(title) <= 28 else 88
+def _render_card(info: dict, cover_bytes: bytes | None):
+    """渲染卡片为 PIL Image（同步阻塞，调用方须在 to_thread 中执行）。"""
+    from PIL import Image, ImageDraw, ImageOps
+
+    title_font = _font("noto_bold", 30)
+    meta_font = _font("noto_reg", 17)
+    num_font = _font("noto_bold", 21)
+    label_font = _font("noto_reg", 13)
+    desc_font = _font("noto_reg", 15)
+    foot_font = _font("noto_reg", 14)
+
+    title_lines = _wrap_text(info["title"] or "未知标题", title_font, _CARD_W - 60, 2)
+    title_h = 44 * len(title_lines)
     desc = _fmt_desc(info.get("desc", ""), limit=80)
-
-    multi = f'<div class="badge-multi">全{info["videos"]}P</div>' \
-        if info.get("videos", 1) > 1 else ""
-    if cover_b64:
-        cover_html = (
-            f'<div class="cover"><img src="{cover_b64}">{multi}'
-            f'<div class="badge-duration">{_fmt_duration(info["duration"])}</div></div>'
-        )
-        head_h = 506
-    else:
-        cover_html = f'<div class="no-cover">{multi}</div>'
-        head_h = 150
-
-    owner = esc(info["owner"]) or "未知UP主"
-    tname = esc(info.get("tname", ""))
     date = datetime.fromtimestamp(info["pubdate"], _SH).strftime("%Y-%m-%d") \
         if info["pubdate"] else "未知"
-    meta = f'<span class="owner">{owner}</span>'
-    if tname:
-        meta += f'<span class="sep">|</span>{tname}'
-    meta += f'<span class="sep">|</span>发布于 {date}'
 
+    height = _page_height(_COVER_H, title_h, bool(desc))
+    canvas = Image.new("RGB", (_CARD_W, height), (255, 255, 255))
+
+    # 封面区（或无封面时的粉色渐变占位头）
+    cover_img = None
+    if cover_bytes:
+        try:
+            cover_img = ImageOps.fit(
+                Image.open(io.BytesIO(cover_bytes)).convert("RGB"),
+                (_CARD_W, _COVER_H), Image.Resampling.LANCZOS,
+            )
+        except Exception:
+            _logger.warning("封面解码失败，使用占位头", exc_info=True)
+    if cover_img is not None:
+        mask = Image.new("L", (_CARD_W, _COVER_H), 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            [0, 0, _CARD_W - 1, _COVER_H + 18], radius=18, fill=255)
+        canvas.paste(cover_img, (0, 0), mask)
+    else:
+        strip = Image.new("RGB", (1, _COVER_H))
+        for y in range(_COVER_H):
+            t = y / _COVER_H
+            strip.putpixel((0, y), tuple(int(255 - (255 - c) * t) for c in _C_PINK))
+        canvas.paste(strip.resize((_CARD_W, _COVER_H)), (0, 0))
+
+    draw = ImageDraw.Draw(canvas)
+
+    # 角标：多P（左上，粉底）与时长（右下，半透明黑底，仅真实封面时）
+    if info.get("videos", 1) > 1:
+        tag = f"全{info['videos']}P"
+        tw = draw.textlength(tag, font=meta_font)
+        draw.rounded_rectangle([14, 12, 14 + tw + 20, 46], radius=6, fill=_C_PINK)
+        draw.text((24, 15), tag, font=meta_font, fill=(255, 255, 255))
+    if cover_img is not None:
+        dur = _fmt_duration(info["duration"])
+        dw = draw.textlength(dur, font=meta_font)
+        box = [_CARD_W - 24 - dw - 20, _COVER_H - 38, _CARD_W - 24, _COVER_H - 10]
+        overlay = Image.new("RGBA", (_CARD_W, _COVER_H), (0, 0, 0, 0))
+        ImageDraw.Draw(overlay).rounded_rectangle(box, radius=6, fill=(0, 0, 0, 165))
+        canvas.paste(Image.alpha_composite(
+            canvas.crop((0, 0, _CARD_W, _COVER_H)).convert("RGBA"),
+            overlay).convert("RGB"), (0, 0))
+        draw = ImageDraw.Draw(canvas)
+        draw.text((box[0] + 10, box[1] + 3), dur, font=meta_font, fill=(255, 255, 255))
+
+    # 正文
+    y = _COVER_H + 26
+    for line in title_lines:
+        draw.text((30, y), line, font=title_font, fill=_C_DARK)
+        y += 44
+    y += 14
+    owner = info["owner"] or "未知UP主"
+    draw.text((30, y), owner, font=meta_font, fill=_C_PINK)
+    x = 30 + draw.textlength(owner, font=meta_font) + 10
+    for part in (info.get("tname", ""), f"发布于 {date}"):
+        if not part:
+            continue
+        draw.text((x, y), "|", font=meta_font, fill=_C_LINE)
+        x += draw.textlength("|", font=meta_font) + 10
+        draw.text((x, y), part, font=meta_font, fill=_C_GRAY)
+        x += draw.textlength(part, font=meta_font) + 10
+
+    y += 25 + 20
+    draw.line([(30, y), (_CARD_W - 30, y)], fill=_C_LINE, width=1)
+    y += 18
     stats = [
         ("播放", info["view"]), ("弹幕", info["danmaku"]), ("点赞", info["like"]),
         ("投币", info["coin"]), ("收藏", info["favorite"]),
         ("评论", info["reply"]), ("分享", info["share"]),
     ]
-    stats_html = "".join(
-        f'<div class="stat"><div class="num">{_fmt_count(v)}</div>'
-        f'<div class="label">{k}</div></div>'
-        for k, v in stats
-    )
+    col_w = (_CARD_W - 60) / len(stats)
+    for i, (label, val) in enumerate(stats):
+        cx = 30 + col_w * (i + 0.5)
+        num = _fmt_count(val)
+        draw.text((cx - draw.textlength(num, font=num_font) / 2, y), num,
+                  font=num_font, fill=_C_DARK)
+        draw.text((cx - draw.textlength(label, font=label_font) / 2, y + 32), label,
+                  font=label_font, fill=_C_LIGHT)
+    y += 70
 
-    desc_html = f'<div class="desc">简介：{esc(desc)}</div>' if desc else ""
-    bvid = esc(info["bvid"])
-    height = _page_height(head_h, title_h, bool(desc))
+    if desc:
+        y += 18
+        draw.rounded_rectangle([30, y, _CARD_W - 30, y + 70], radius=10, fill=_C_BG_GRAY)
+        for i, line in enumerate(_wrap_text(f"简介：{desc}", desc_font, _CARD_W - 92, 2)):
+            draw.text((46, y + 12 + i * 23), line, font=desc_font, fill=_C_GRAY)
+        y += 70
 
-    body = f"""
-<div class="body">
-  <div class="title">{esc(title)}</div>
-  <div class="meta">{meta}</div>
-  <div class="stats">{stats_html}</div>
-  {desc_html}
-  <div class="footer">
-    <span class="brand">哔哩哔哩 bilibili.com</span>
-    <span class="link">{bvid}</span>
-  </div>
-</div>"""
-
-    page = (
-        '<!DOCTYPE html><html><head><meta charset="utf-8">'
-        f"<style>{_CSS}@page {{ size: 900px {height}px; margin: 0; }}</style>"
-        "</head><body>" + cover_html + body + "</body></html>"
-    )
-    return page, height
+    y += 18
+    draw.text((30, y), "哔哩哔哩 bilibili.com", font=foot_font, fill=_C_PINK)
+    bvid = info["bvid"]
+    draw.text((_CARD_W - 30 - draw.textlength(bvid, font=foot_font), y), bvid,
+              font=foot_font, fill=_C_LIGHT)
+    return canvas
 
 
-async def _fetch_cover_b64(pic_url: str) -> str | None:
-    """下载封面并转为 data: URL 内嵌（weasyprint 只允许 data: 资源，防 SSRF）。"""
+def _render_and_save(info: dict, cover_bytes: bytes | None) -> str:
+    """渲染卡片并落盘缓存目录，返回 PNG 路径。"""
+    img = _render_card(info, cover_bytes)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return save_image(buf.getvalue(), "image/png", "bili", CACHE_DIR)
+
+
+def _resized_cover_url(pic_url: str) -> str:
+    """hdslb 封面追加 CDN 缩放参数（原图几百KB → 约30KB），加速下载与渲染。"""
+    if not pic_url or "@" in pic_url:
+        return pic_url
+    return pic_url + "@900w_506h_1c.jpg"
+
+
+async def _fetch_cover_bytes(pic_url: str) -> bytes | None:
+    """下载（缩放后的）封面字节；失败或超限返回 None。"""
     if not pic_url:
         return None
     try:
         client = get_http_client(10.0)
-        resp = await client.get(pic_url, headers=_HEADERS)
-        data = resp.content
-        if len(data) > _MAX_COVER_BYTES:
-            _logger.warning("封面图异常大(%d bytes)已跳过: %s", len(data), pic_url)
+        resp = await client.get(_resized_cover_url(pic_url), headers=_HEADERS)
+        if len(resp.content) > _MAX_COVER_BYTES:
+            _logger.warning("封面图异常大(%d bytes)已跳过: %s", len(resp.content), pic_url)
             return None
-        mime = (resp.headers.get("content-type") or "image/jpeg").split(";")[0].strip()
-        b64 = base64.b64encode(data).decode()
-        return f"data:{mime};base64,{b64}"
+        return resp.content
     except httpx.HTTPError:
         _logger.warning("封面下载失败: %s", pic_url)
         return None
@@ -311,10 +383,10 @@ async def build_card_image(info: dict) -> str | None:
     cached = _img_cache.get(bvid)
     if cached and cached[0] > now and os.path.exists(cached[1]):
         return cached[1]
-    cover_b64 = await _fetch_cover_b64(info.get("pic", ""))
-    html_text, _ = _build_html(info, cover_b64)
+    cover_bytes = await _fetch_cover_bytes(info.get("pic", ""))
     try:
-        path = await render_html_to_png_async(html_text, "bili", CACHE_DIR, max_age=2 * 60 * 60)
+        async with RENDER_SEM:  # 与其他 PIL/weasyprint 卡片渲染全局串行化
+            path = await asyncio.to_thread(_render_and_save, info, cover_bytes)
     except Exception:
         _logger.warning("B站卡片渲染失败 bvid=%s", bvid, exc_info=True)
         return None
