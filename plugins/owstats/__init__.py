@@ -173,7 +173,8 @@ async def _post_json_with_notice(matcher, at: Message, notice: str, path: str, p
             await asyncio.wait_for(done.wait(), timeout=remind_after)
         except asyncio.TimeoutError:
             try:
-                await matcher.send(at + Message(f"⏳ {notice}（已等待 {int(remind_after)} 秒，数据量较大请再耐心等待...）"))
+                # notice 含用户输入的 tag（防 CQ 码注入）：外部文本一律 MessageSegment.text 包裹后发送
+                await matcher.send(at + MessageSegment.text(f"⏳ {notice}（已等待 {int(remind_after)} 秒，数据量较大请再耐心等待...）"))
             except Exception:
                 pass
 
@@ -286,7 +287,8 @@ async def bind(event: MessageEvent, arg: Message = CommandArg()):
     if not tag:
         await bind_cmd.finish(at_prefix(event) + "用法：.绑定 名字#数字\n例如：.绑定 Yanmou#51293")
     _bind(str(event.user_id), tag)
-    await bind_cmd.finish(at_prefix(event) + f"✅ 绑定成功：{tag}\n之后直接发 .战报、.段位、.强度、.总结 即可查询；加 ID 可查别人，如 .战报 其他人#1234")
+    # tag 为用户自由输入（防 CQ 码注入）：回显一律 MessageSegment.text 包裹
+    await bind_cmd.finish(at_prefix(event) + MessageSegment.text(f"✅ 绑定成功：{tag}") + "\n之后直接发 .战报、.段位、.强度、.总结 即可查询；加 ID 可查别人，如 .战报 其他人#1234")
 
 
 @unbind_cmd.handle()
@@ -300,7 +302,7 @@ async def unbind(event: MessageEvent):
 async def myid(event: MessageEvent):
     tag = _get_bound(str(event.user_id))
     if tag:
-        await myid_cmd.finish(at_prefix(event) + f"🎮 当前绑定：{tag}\n如需更换请用 .绑定 新ID")
+        await myid_cmd.finish(at_prefix(event) + MessageSegment.text(f"🎮 当前绑定：{tag}") + "\n如需更换请用 .绑定 新ID")
     await myid_cmd.finish(at_prefix(event) + "你还没有绑定 ID，用 .绑定 名字#数字 绑定")
 
 
@@ -322,14 +324,14 @@ async def match_report(event: MessageEvent, arg: Message = CommandArg()):
         await matchrep_cmd.finish(at + f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～")
     await _wait_queue(matchrep_cmd, event)
     try:
-        await matchrep_cmd.send(at + f"⏳ 正在生成 {tag} 的战绩图...")
+        await matchrep_cmd.send(at + MessageSegment.text(f"⏳ 正在生成 {tag} 的战绩图..."))
         try:
             data = await _post_json_with_notice(matchrep_cmd, at, f"正在生成 {tag} 的战绩图",
                                                 "/api/v2/dashen-match/replies", {"bnet_id": tag, "limit": 5}, timeout=90)
         except httpx.HTTPError:
             await matchrep_cmd.finish(at + "查询失败：请求超时，请稍后再试")
         if not data.get("ok"):
-            await matchrep_cmd.finish(at + _friendly_error(data))
+            await matchrep_cmd.finish(at + MessageSegment.text(_friendly_error(data)))
         segments = []
         for rep in data.get("replies") or []:
             if rep.get("type") == "image" and rep.get("base64"):
@@ -359,16 +361,16 @@ async def rank_history(event: MessageEvent, arg: Message = CommandArg()):
         await rankhist_cmd.finish(at + f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～")
     await _wait_queue(rankhist_cmd, event)
     try:
-        await rankhist_cmd.send(at + f"⏳ 正在查询 {tag} 的段位历史...")
+        await rankhist_cmd.send(at + MessageSegment.text(f"⏳ 正在查询 {tag} 的段位历史..."))
         try:
             data = await _post_json_with_notice(rankhist_cmd, at, f"正在查询 {tag} 的段位历史",
                                                 "/api/v2/dashen-rank-history/image", {"bnet_id": tag}, timeout=120)
         except httpx.HTTPError:
             await rankhist_cmd.finish(at + "查询失败：请求超时，请稍后再试")
-        if data.get("_image"):
+        if data.get("_image") and isinstance(data.get("bytes"), bytes):
             path = await save_image_async(data["bytes"], data["content_type"], "rank", CACHE)
             await rankhist_cmd.finish(_done(Message(MessageSegment.image(Path(path).as_uri())), at, time.monotonic() - t0))
-        await rankhist_cmd.finish(at + _friendly_error(data))
+        await rankhist_cmd.finish(at + MessageSegment.text(_friendly_error(data)))
     finally:
         OW_LOCK.release()
 
@@ -391,16 +393,16 @@ async def strength(event: MessageEvent, arg: Message = CommandArg()):
         await strength_cmd.finish(at + f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～")
     await _wait_queue(strength_cmd, event)
     try:
-        await strength_cmd.send(at + f"⏳ 正在分析 {tag} 的强度...")
+        await strength_cmd.send(at + MessageSegment.text(f"⏳ 正在分析 {tag} 的强度..."))
         try:
             data = await _post_json_with_notice(strength_cmd, at, f"正在分析 {tag} 的强度",
                                                 "/api/v2/dashen-quick-strength/image", {"bnet_id": tag, "limit": 12}, timeout=120)
         except httpx.HTTPError:
             await strength_cmd.finish(at + "查询失败：请求超时，请稍后再试")
-        if data.get("_image"):
+        if data.get("_image") and isinstance(data.get("bytes"), bytes):
             path = await save_image_async(data["bytes"], data["content_type"], "strength", CACHE)
             await strength_cmd.finish(_done(Message(MessageSegment.image(Path(path).as_uri())), at, time.monotonic() - t0))
-        await strength_cmd.finish(at + _friendly_error(data))
+        await strength_cmd.finish(at + MessageSegment.text(_friendly_error(data)))
     finally:
         OW_LOCK.release()
 
@@ -437,15 +439,15 @@ async def summary(event: MessageEvent, arg: Message = CommandArg()):
     try:
         timeout = SUMMARY_TIMEOUTS.get(scope, SUMMARY_TIMEOUTS["today"])
         labels = {"today": "今日", "yesterday": "昨日", "week": "本周"}
-        await summary_cmd.send(at + f"⏳ 正在生成 {tag} 的{labels[scope]}总结，数据量大请稍候...")
+        await summary_cmd.send(at + MessageSegment.text(f"⏳ 正在生成 {tag} 的{labels[scope]}总结，数据量大请稍候..."))
         try:
             data = await _post_json_with_notice(summary_cmd, at, f"正在生成 {tag} 的{labels[scope]}总结",
                                                 f"/api/v2/dashen-summary/{scope}/image", {"bnet_id": tag}, timeout=timeout)
         except httpx.HTTPError:
             await summary_cmd.finish(at + "生成失败：超时，请稍后再试")
-        if data.get("_image"):
+        if data.get("_image") and isinstance(data.get("bytes"), bytes):
             path = await save_image_async(data["bytes"], data["content_type"], "summary", CACHE)
             await summary_cmd.finish(_done(Message(MessageSegment.image(Path(path).as_uri())), at, time.monotonic() - t0))
-        await summary_cmd.finish(at + _friendly_error(data, scope))
+        await summary_cmd.finish(at + MessageSegment.text(_friendly_error(data, scope)))
     finally:
         OW_LOCK.release()

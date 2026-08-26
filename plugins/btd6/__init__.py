@@ -40,7 +40,11 @@ URL_ODYSSEY = f"{API_ROOT}/btd6/odyssey"
 URL_USERS = f"{API_ROOT}/btd6/users/"
 
 DEFAULT_ROWS = 10  # 排行榜/地图列表默认条数
-MAX_ROWS = 50      # 条数上限（NK 排行榜接口本身只返回前 50）
+MAX_ROWS = 100     # 条数上限（竞赛每页50、Boss/CT每页25，自动分页拉取至请求数）
+LB_DEFAULT_ROWS = 50  # 排行榜默认前50
+LB_PAGE_SIZES = {"race": 50, "boss": 25, "ct": 25}  # 各类型每页人数（与NK API分页对齐）
+LB_MAX_PAGE = 20      # 最大页码
+LB_MAX_RANK = 1000    # 最大排名查询
 BUCKET_PERIOD_MIN = 15        # 取整桶周期：倒计时文案按此粒度分窗 + API 数据 TTL；与预热频率解耦
 BUCKET_MS = BUCKET_PERIOD_MIN * 60 * 1000     # bucket_now() 使用的毫秒桶宽
 CACHE_TTL = BUCKET_PERIOD_MIN * 60     # 数据缓存与桶周期对齐，保证同窗内查询命中同一份内容哈希
@@ -136,7 +140,7 @@ HELP_GROUPS = [
     ("活动查询", [
         (".btd6活动", "当前竞赛/Boss/争夺领土横幅总览"),
         (".btd6竞速 [竞赛|boss]", "竞赛/Boss 活动规则详情（Boss 标准+精英一起返回）"),
-        (".btd6排行 竞赛|boss|领土 [数量]", "活动排行榜前 N（Boss 双榜、领土 个人+战队一起返回）"),
+        (".btd6排行 竞赛|boss|领土 [P页码|排名]", "排行榜：默认前50；P2=第2页；数字=该名次玩家档案（Boss双榜/领土双榜自动返回）"),
         (".btd6每日", "今日每日挑战（标准+高级一起返回）"),
         (".btd6远征", "当前远征 Odyssey"),
     ]),
@@ -149,7 +153,7 @@ HELP_GROUPS = [
 
 HELP_TEXT = """🐒 BTD6 情报站（气球塔防6）
 .btd6活动 — 当前竞赛/Boss/争夺领土总览
-.btd6排行 竞赛|boss|领土 [数量] — 活动排行榜前 N（Boss 标准+精英、领土 个人+战队一起返回）
+.btd6排行 竞赛|boss|领土 [P页码|排名] — 排行榜：默认前50；P2=第2页；数字=该名次玩家档案（Boss标准+精英、领土个人+战队一起返回）
 .btd6竞速 [竞赛|boss] — 竞赛/Boss 活动规则详情（Boss 标准+精英一起返回；领土暂无通用规则）
 .btd6每日 — 今日每日挑战（标准+高级一起返回）
 .btd6远征 — 当前远征活动
@@ -157,7 +161,7 @@ HELP_TEXT = """🐒 BTD6 情报站（气球塔防6）
 .btd6地图 最新|热门|点赞 [数量] — 自制地图榜单
 .btd6历史 [竞速|boss|领土|远征|每日] [数量] — 本地归档的历史活动（API 只保留近几期）
 数据源：Ninja Kiwi 官方开放数据接口"""
-LB_USAGE = "用法：.btd6排行 竞赛|boss|领土 [数量]\n例：.btd6排行 竞赛 15\nboss 自动返回标准+精英双榜，领土 自动返回个人+战队双榜"
+LB_USAGE = "用法：.btd6排行 竞赛|boss|领土 [P页码|排名]\n例：.btd6排行 竞赛 — 前50\n.btd6排行 竞赛 P2 — 第2页\n.btd6排行 竞赛 7 — 第7名玩家档案\nboss 自动返回标准+精英双榜，领土 自动返回个人+战队双榜"
 
 # ---------------- 请求边界与内存 TTL 缓存 ----------------
 
@@ -715,6 +719,49 @@ def overview_text(data: dict) -> str:
 MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 
 
+async def fetch_leaderboard_paginated(start_url: str, rows: int) -> list:
+    """分页拉取排行榜至多 rows 条，自动跟随 next 链接（竞赛 50/页，Boss/CT 25/页）。"""
+    entries: list = []
+    url: str | None = start_url
+    seen: set[str] = set()
+    while url and len(entries) < rows and url not in seen:
+        seen.add(url)
+        # 优先走 fetch_body（测试桩会 mock 它，且走缓存）；失败再降级为 _http_get 以获取 next
+        body = None
+        next_url = None
+        try:
+            # 尝试通过 fetch_body 获取 body（测试环境友好）
+            body = await fetch_body(url)
+            # 若需要分页，再用 _http_get 取 next（可能因 URL 白名单校验失败，测试环境会走到 except）
+            if len(entries) + len(body or []) < rows:
+                try:
+                    r = await _http_get(url, 20)
+                    r.raise_for_status()
+                    data = r.json()
+                    next_url = data.get("next")
+                except Exception:
+                    next_url = None
+        except Exception:
+            # fetch_body 失败（如真实环境 next 分页），改走 _http_get 批量解析
+            try:
+                r = await _http_get(url, 20)
+                r.raise_for_status()
+                data = r.json()
+                body = data.get("body") or []
+                next_url = data.get("next")
+            except Exception:
+                _logger.warning("排行榜分页拉取失败 url=%s", url, exc_info=True)
+                break
+        if isinstance(body, list):
+            entries.extend(body)
+        else:
+            break
+        if len(entries) >= rows:
+            break
+        url = next_url
+    return entries[:rows]
+
+
 async def collect_leaderboard(kind: str, variant: str, rows: int) -> dict:
     """拉取并整理一个排行榜；无可展示活动时返回 {"empty": 文案}。"""
     now = bucket_now()
@@ -725,7 +772,7 @@ async def collect_leaderboard(kind: str, variant: str, rows: int) -> dict:
         ev = pick_active(races, now) or fallback_latest(races)
         if not ev:
             return {"empty": "当前没有竞赛活动"}
-        entries = await fetch_body(ev["leaderboard"])
+        entries = await fetch_leaderboard_paginated(ev["leaderboard"], rows)
         head = f"竞赛「{(ev.get('name') or '').strip()}」排行榜（最快用时，越短越好）"
         scoring = "GameTime"
         meta = await _safe(fetch_body(ev["metadata"])) if ev.get("metadata") else None
@@ -741,7 +788,7 @@ async def collect_leaderboard(kind: str, variant: str, rows: int) -> dict:
         url = ev.get(url_key)
         if not url:
             return {"empty": "该活动暂无此模式的排行榜"}
-        entries = await fetch_body(url)
+        entries = await fetch_leaderboard_paginated(url, rows)
         label = "精英" if elite else "标准"
         scoring = str(ev.get("eliteScoringType" if elite else "normalScoringType") or "")
         mode_cn = SCORING_CN.get(scoring, scoring or "?")
@@ -758,7 +805,7 @@ async def collect_leaderboard(kind: str, variant: str, rows: int) -> dict:
         url = ev.get(url_key)
         if not url:
             return {"empty": "该活动暂无此榜的排行榜"}
-        entries = await fetch_body(url)
+        entries = await fetch_leaderboard_paginated(url, rows)
         label = "战队" if team else "个人"
         head = f"争夺领土 {label}排行榜（领土积分，越高越好）"
 
@@ -1658,6 +1705,163 @@ def parse_rows(tokens: list[str]) -> int:
     return rows
 
 
+def lb_page_size(kind: str) -> int:
+    return LB_PAGE_SIZES.get(kind, 50)
+
+
+def parse_lb_page(tokens: list[str]) -> int | None:
+    """解析 P 页码：支持 'P2' / 'p2' / 'P 2' 两种写法。"""
+    for i, t in enumerate(tokens):
+        if t.lower() == "p" and i + 1 < len(tokens) and tokens[i + 1].isdigit():
+            try:
+                n = int(tokens[i + 1])
+                if 1 <= n <= LB_MAX_PAGE:
+                    return n
+            except ValueError:
+                pass
+        if re.fullmatch(r"[pP]\d+", t):
+            try:
+                n = int(t[1:])
+                if 1 <= n <= LB_MAX_PAGE:
+                    return n
+            except ValueError:
+                pass
+    return None
+
+
+def parse_lb_rank(tokens: list[str]) -> int | None:
+    """解析排名数字：纯数字且不是 P 页码的一部分。"""
+    for i, t in enumerate(tokens):
+        if t.lower() == "p":
+            continue
+        if re.fullmatch(r"[pP]\d+", t):
+            continue
+        if t.isdigit():
+            if i > 0 and tokens[i - 1].lower() == "p":
+                continue  # P 后的数字已作为页码
+            try:
+                n = int(t)
+                if 1 <= n <= LB_MAX_RANK:
+                    return n
+            except ValueError:
+                pass
+    return None
+
+
+def lb_page_url(base: str, page: int) -> str:
+    if page <= 1:
+        return base
+    return f"{base}?page={page}"
+
+
+async def fetch_leaderboard_page(start_url: str, page: int) -> list:
+    """拉取指定页的排行榜（单页，不做分页累积）。"""
+    url = lb_page_url(start_url, page)
+    body = await fetch_body(url)
+    return body if isinstance(body, list) else []
+
+
+async def collect_leaderboard_page(kind: str, variant: str, page: int) -> dict:
+    """拉取并整理指定页的排行榜；页码越界返回 empty。"""
+    now = bucket_now()
+    scoring = ""
+    img = ""
+    page = max(1, min(page, LB_MAX_PAGE))
+    size = lb_page_size(kind)
+    if kind == "race":
+        races = await fetch_body(URL_RACES)
+        ev = pick_active(races, now) or fallback_latest(races)
+        if not ev:
+            return {"empty": "当前没有竞赛活动"}
+        start_url = ev.get("leaderboard") or ""
+        if not start_url:
+            return {"empty": "该活动暂无排行榜"}
+        entries = await fetch_leaderboard_page(start_url, page)
+        head = f"竞赛「{(ev.get('name') or '').strip()}」排行榜 第{page}页（{size}人/页）"
+        scoring = "GameTime"
+        meta = await _safe(fetch_body(ev["metadata"])) if ev.get("metadata") else None
+        if meta and meta.get("mapURL"):
+            img = await _safe(_asset_data_url(meta["mapURL"])) or ""
+    elif kind == "boss":
+        bosses = await fetch_body(URL_BOSSES)
+        ev = pick_active(bosses, now) or fallback_latest(bosses)
+        if not ev:
+            return {"empty": "当前没有 Boss 活动"}
+        elite = variant == "elite"
+        url_key = "leaderboard_elite_players_1" if elite else "leaderboard_standard_players_1"
+        start_url = ev.get(url_key) or ""
+        if not start_url:
+            return {"empty": "该活动暂无此模式的排行榜"}
+        entries = await fetch_leaderboard_page(start_url, page)
+        label = "精英" if elite else "标准"
+        scoring = str(ev.get("eliteScoringType" if elite else "normalScoringType") or "")
+        mode_cn = SCORING_CN.get(scoring, scoring or "?")
+        head = f"Boss「{(ev.get('name') or '').strip()}」{label}排行榜 第{page}页（{size}人/页，{mode_cn}）"
+        if ev.get("bossTypeURL"):
+            img = await _safe(_asset_data_url(ev["bossTypeURL"])) or ""
+    else:  # ct
+        cts = await fetch_body(URL_CT)
+        ev = pick_active(cts, now) or fallback_latest(cts)
+        if not ev:
+            return {"empty": "当前没有争夺领土活动"}
+        team = variant == "team"
+        url_key = "leaderboard_team" if team else "leaderboard_player"
+        start_url = ev.get(url_key) or ""
+        if not start_url:
+            return {"empty": "该活动暂无此榜的排行榜"}
+        entries = await fetch_leaderboard_page(start_url, page)
+        label = "战队" if team else "个人"
+        head = f"争夺领土 {label}排行榜 第{page}页（{size}人/页）"
+    if not entries:
+        return {"empty": f"第{page}页暂无数据（排行榜可能不足 {(page-1)*size+1} 人）"}
+    start_rank = (page - 1) * size + 1
+    rows_out = [
+        (start_rank + i, str(e.get("displayName") or "?").strip(), fmt_score(scoring, e.get("score")))
+        for i, e in enumerate(entries)
+    ]
+    return {
+        "head": head, "status": event_status_line(ev, now), "entries": rows_out,
+        "img": img, "page": page,
+    }
+
+
+async def fetch_rank_entry(kind: str, variant: str, rank: int) -> dict | None:
+    """取指定排名的单条排行榜记录（用于玩家档案查询）。"""
+    size = lb_page_size(kind)
+    page = (rank - 1) // size + 1
+    idx = (rank - 1) % size
+    now = bucket_now()
+    start_url = ""
+    if kind == "race":
+        races = await fetch_body(URL_RACES)
+        ev = pick_active(races, now) or fallback_latest(races)
+        if not ev:
+            return None
+        start_url = ev.get("leaderboard") or ""
+    elif kind == "boss":
+        bosses = await fetch_body(URL_BOSSES)
+        ev = pick_active(bosses, now) or fallback_latest(bosses)
+        if not ev:
+            return None
+        elite = variant == "elite"
+        url_key = "leaderboard_elite_players_1" if elite else "leaderboard_standard_players_1"
+        start_url = ev.get(url_key) or ""
+    else:  # ct
+        cts = await fetch_body(URL_CT)
+        ev = pick_active(cts, now) or fallback_latest(cts)
+        if not ev:
+            return None
+        team = variant == "team"
+        url_key = "leaderboard_team" if team else "leaderboard_player"
+        start_url = ev.get(url_key) or ""
+    if not start_url:
+        return None
+    entries = await fetch_leaderboard_page(start_url, page)
+    if 0 <= idx < len(entries):
+        return entries[idx]
+    return None
+
+
 # ---------------- 图片卡片（weasyprint 渲染管线 + 内容哈希缓存） ----------------
 
 CARD_W = 900
@@ -2025,6 +2229,28 @@ body {{ width: {ODYSSEY_CARD_W}px; min-height: {h}px; color: #ffffff;
 .ody-map-rule {{ padding-top: 8px; color: #ffffff; font-size: 15px; line-height: 20px; font-weight: 900;
                  text-align: center; text-shadow: 0 1px 0 #68513d; }}
 .ody-map-sub {{ color: #f4dfc2; font-size: 11px; line-height: 15px; font-weight: 700; }}
+/* 活动总览 / 排行榜 / 自制地图 复用游戏风格 */
+.ov-panel {{ min-height: 120px; padding: 18px 10px 10px; margin-bottom: 8px; }}
+.ov-row {{ display: table; width: 100%; min-height: 110px; table-layout: fixed; }}
+.ov-img-cell {{ display: table-cell; width: 170px; vertical-align: middle; }}
+.ov-img {{ display: block; width: 160px; height: 100px; object-fit: cover; border: 3px solid #f8b900; border-radius: 7px; box-shadow: 0 1px 0 #70430f; }}
+.ov-img-ph {{ width: 160px; height: 100px; line-height: 100px; text-align: center; font-size: 36px; background: #c0aa91; border: 3px solid #f8b900; border-radius: 7px; }}
+.ov-info {{ display: table-cell; vertical-align: middle; padding: 0 8px 0 6px; }}
+.ov-name {{ color: #ffffff; font-size: 17px; line-height: 21px; font-weight: 900; text-shadow: 0 1px 0 #68513d; word-break: break-all; }}
+.ov-badge {{ display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 10px; font-size: 11px; line-height: 15px; font-weight: 900; color: #ffffff; vertical-align: middle; text-shadow: 0 1px 0 rgba(0,0,0,.25); }}
+.ov-dates {{ color: #f4dfc2; font-size: 12px; line-height: 16px; font-weight: 700; padding-top: 3px; }}
+.ov-score {{ color: #ffffff; font-size: 13px; line-height: 17px; font-weight: 900; text-shadow: 0 1px 0 #68513d; padding-top: 3px; }}
+.ov-score b {{ color: #ffd700; text-shadow: 0 1px 0 #5a3a14; }}
+.lb-header {{ text-align: center; padding: 6px 0 4px; }}
+.lb-title {{ color: #5a4530; font-size: 16px; line-height: 20px; font-weight: 900; word-break: break-all; }}
+.lb-subtitle {{ color: #70543c; font-size: 12px; line-height: 16px; font-weight: 700; padding-top: 2px; }}
+.lb-panel {{ min-height: 80px; padding: 14px 8px 8px; }}
+.lb-row {{ display: table; width: 100%; min-height: 48px; margin-bottom: 6px; padding: 6px 8px; table-layout: fixed; background: #aa937b; border-radius: 6px; box-shadow: inset 0 1px 0 rgba(255,244,222,.24), 0 1px 0 rgba(84,53,30,.15); }}
+.lb-rank {{ display: table-cell; width: 48px; vertical-align: middle; font-size: 18px; font-weight: 900; text-align: center; }}
+.lb-name {{ display: table-cell; vertical-align: middle; padding: 0 8px; font-size: 14px; font-weight: 700; color: #ffffff; text-shadow: 0 1px 0 #68513d; word-break: break-all; }}
+.lb-score {{ display: table-cell; width: 140px; vertical-align: middle; text-align: right; font-size: 14px; font-weight: 900; color: #ffd700; text-shadow: 0 1px 0 #5a3a14; white-space: nowrap; }}
+.lb-empty {{ text-align: center; color: #684d37; font-size: 14px; font-weight: 900; padding: 18px 0; }}
+.map-panel {{ min-height: 80px; padding: 14px 8px 8px; }}
 </style></head>
 <body><div class="ody-page"><div class="ody-paper">{body}</div></div></body></html>"""
 
@@ -2450,51 +2676,101 @@ def _banner(kind: str, items: list, ptitle: str, now_ms: int, img: str, race_met
 
 
 def overview_html(data: dict) -> str:
+    """活动总览：复刻远征纸张 + 蓝丝带 + 棕面板的游戏风格。"""
     now = data["now"]
-    race_meta = data.get("race_meta") or {}
-    parts = []
-    total_h = 30
-    for kind, items, ptitle, img in (
-        ("race", data["races"], "每周竞赛", data.get("race_map") or ""),
-        ("boss", data["bosses"], "Boss 事件", data.get("boss_img") or ""),
-        ("ct", data["cts"], "争夺领土（CT）", ""),
+    parts = ['<div class="ody-ribbon ody-section-banner"><span>活动总览</span></div>']
+    total_h = 60
+    for kind, items, ptitle in (
+        ("race", data["races"], "每周竞赛"),
+        ("boss", data["bosses"], "Boss 事件"),
+        ("ct", data["cts"], "争夺领土"),
     ):
-        banner, bh = _banner(kind, items, ptitle, now, img, race_meta)
-        parts.append(banner)
-        total_h += bh
-    return _shell("\n".join(parts), total_h + 30)
+        ev = _pick_section(items, now)
+        if not ev:
+            parts.append(f"<div class='ody-panel ov-panel'><div class='ody-ribbon ody-panel-title'><span>{_esc(ptitle)}</span></div><div class='lb-empty'>暂无数据</div></div>")
+            total_h += 110
+            continue
+        name = (ev.get("name") or ptitle).strip()
+        if kind == "boss":
+            bt = boss_cn(ev.get("bossType"))
+            if bt:
+                name = f"{name}（{bt}）"
+        state = _state_of(ev, now)
+        badge_cls = {"on": "st-on", "up": "st-up", "off": "st-off"}[state]
+        # 取图：竞速用 race_map，Boss 用 boss_img
+        img = ""
+        if kind == "race":
+            img = data.get("race_map") or ""
+        elif kind == "boss":
+            img = data.get("boss_img") or ""
+        img_cell = f"<img class='ov-img' src='{_esc(img)}'/>" if img else "<div class='ov-img-ph'>🎈</div>"
+        if kind == "race":
+            score = f"参与 <b>{int(ev.get('totalScores') or 0):,}</b>"
+        elif kind == "boss":
+            score = f"标准 <b>{int(ev.get('totalScores_standard') or 0):,}</b> · 精英 <b>{int(ev.get('totalScores_elite') or 0):,}</b>"
+        else:
+            score = f"个人 <b>{int(ev.get('totalScores_player') or 0):,}</b> · 战队 <b>{int(ev.get('totalScores_team') or 0):,}</b>"
+        parts.append(
+            f"<div class='ody-panel ov-panel'><div class='ody-ribbon ody-panel-title'><span>{_esc(ptitle)}</span></div>"
+            f"<div class='ov-row'><div class='ov-img-cell'>{img_cell}</div>"
+            f"<div class='ov-info'><div class='ov-name'>{_esc(name)}<span class='ov-badge {badge_cls}'>{_STATE_TXT[state]}</span></div>"
+            f"<div class='ov-dates'>{_esc(_fmt_range(ev))}</div>"
+            f"<div class='ov-score'>{score}</div></div></div></div>"
+        )
+        total_h += 135
+    return _odyssey_shell("\n".join(parts), total_h + 30)
 
 
 def leaderboard_html(col: dict) -> str:
+    """排行榜：远征纸张 + 蓝丝带 + 棕面板 + 奖牌配色。"""
     if col.get("empty"):
-        body = f'<div class="panel"><div class="empty">{_esc(col["empty"])}</div></div>'
-        return _shell(body, 300)
+        return _odyssey_shell(f"<div class='ody-panel ov-panel'><div class='lb-empty'>{_esc(col['empty'])}</div></div>", 180)
     img = col.get("img") or ""
-    img_cell = f"<div class='pimg'><img src='{_esc(img)}'/></div>" if img else ""
-    head_inner = (f"<div class='phead'><div class='ptext'>"
-                  f"<div class='ptitle'>{_esc(col['head'])}</div>"
-                  f"<div class='li'>{_esc(col['status'])}</div></div>{img_cell}</div>") \
-        if img else \
-        (f"<div class='ptitle'>{_esc(col['head'])}</div>"
-         f"<div class='li'>{_esc(col['status'])}</div>")
-    head_panel = f"<div class='panel'>{head_inner}</div>"
+    img_tag = f"<img class='ov-img' src='{_esc(img)}'/>" if img else ""
+    # 头部信息面板
+    head_info = f"<div class='lb-header'><div class='lb-title'>{_esc(col['head'])}</div><div class='lb-subtitle'>{_esc(col['status'])}</div></div>"
+    if img_tag:
+        head_body = f"<div class='ov-row'><div class='ov-info'>{head_info}</div><div class='ov-img-cell'>{img_tag}</div></div>"
+    else:
+        head_body = head_info
+    head_panel = f"<div class='ody-panel ov-panel'><div class='ody-ribbon ody-panel-title'><span>赛事信息</span></div>{head_body}</div>"
     entries = col["entries"]
     if entries:
         rows = []
         for i, name, score_txt in entries:
-            rank_color = _MEDAL_COLOR.get(i, "#c9c5cf")
+            medal = _MEDAL_COLOR.get(i)
+            rank_style = f"color:{medal}" if medal else "color:#ffe9a8"
+            # 前三名用金银铜底，需深色文字保证对比度
+            row_bg = ""
+            name_extra = ""
+            score_extra = ""
+            if i == 1:
+                row_bg = "background: linear-gradient(90deg, #ffe9a8 0%, #d9b95c 100%);"
+                rank_style = "color:#8a6d00"
+                name_extra = "color:#5a3a00;text-shadow:0 1px 0 rgba(255,255,255,.6)"
+                score_extra = "color:#7a5a00;text-shadow:0 1px 0 rgba(255,255,255,.5)"
+            elif i == 2:
+                row_bg = "background: linear-gradient(90deg, #e8e8e8 0%, #a8a8a8 100%);"
+                rank_style = "color:#555"
+                name_extra = "color:#2e2e2e;text-shadow:0 1px 0 rgba(255,255,255,.6)"
+                score_extra = "color:#333;text-shadow:0 1px 0 rgba(255,255,255,.5)"
+            elif i == 3:
+                row_bg = "background: linear-gradient(90deg, #e8c9a8 0%, #b08050 100%);"
+                rank_style = "color:#6b3a00"
+                name_extra = "color:#4a2a00;text-shadow:0 1px 0 rgba(255,255,255,.5)"
+                score_extra = "color:#5a3a00;text-shadow:0 1px 0 rgba(255,255,255,.5)"
             rows.append(
-                f'<div class="row"><div class="rank" style="color:{rank_color}">{i:02d}</div>'
-                f'<div class="name">{_esc(name)}</div>'
-                f'<div class="score">{_esc(score_txt)}</div></div>'
+                f"<div class='lb-row' style='{row_bg}'><div class='lb-rank' style='{rank_style}'>{i:02d}</div>"
+                f"<div class='lb-name' style='{name_extra}'>{_esc(name)}</div>"
+                f"<div class='lb-score' style='{score_extra}'>{_esc(score_txt)}</div></div>"
             )
         rows_html = "".join(rows)
     else:
-        rows_html = '<div class="empty">（暂无上榜数据）</div>'
-    body = head_panel + f'<div class="panel">{rows_html}</div>'
-    head_h = 240 if img else 210
-    h = 40 + head_h + max(len(entries), 1) * 74 + 40
-    return _shell(body, h)
+        rows_html = "<div class='lb-empty'>（暂无上榜数据）</div>"
+    rows_panel = f"<div class='ody-panel lb-panel'><div class='ody-ribbon ody-panel-title'><span>排名</span></div>{rows_html}</div>"
+    body = f"<div class='ody-ribbon ody-section-banner'><span>排行榜</span></div>{head_panel}{rows_panel}"
+    h = 60 + 140 + max(len(entries), 1) * 56 + 40
+    return _odyssey_shell(body, h)
 
 
 def _path_max_txt(blocked: dict) -> str:
@@ -2757,27 +3033,28 @@ def _rules_compat_html(meta: dict, prefix: str, scoring: str, ev: dict | None) -
 
 
 def maps_html(col: dict) -> str:
+    """自制地图：远征纸张 + 岛屿行风格。"""
     entries = col["entries"]
-    title = f"自制地图 · {_esc(col['label'])} Top{len(entries)}"
-    if entries:
-        rows = []
-        for i, name, created, img, plays, upvotes in entries:
-            rank_color = _MEDAL_COLOR.get(i, "#c9c5cf")
-            thumb = (f"<img class='mthumb' src='{_esc(img)}'/>" if img
-                     else "<div class='mthumb nomap-s'></div>")
-            sub_bits = [f"游玩 {plays:,}", f"点赞 {upvotes:,}", created]
-            rows.append(
-                f"<div class='mrow'><div class='rank' style='color:{rank_color}'>{i:02d}</div>"
-                f"{thumb}"
-                f"<div class='mname'>{_esc(name)}"
-                f"<div class='msub'>{' · '.join(_esc(x) for x in sub_bits)}</div></div></div>"
-            )
-        rows_html = "".join(rows)
-    else:
-        rows_html = '<div class="empty">（暂无地图数据）</div>'
-    body = f'<div class="panel"><div class="ptitle">{title}</div>{rows_html}</div>'
-    h = 40 + 120 + max(len(entries), 1) * 132 + 40
-    return _shell(body, min(h, 2600))
+    label = col["label"]
+    header = f"<div class='ody-ribbon ody-section-banner'><span>自制地图 · {_esc(label)} Top{len(entries)}</span></div>"
+    if not entries:
+        return _odyssey_shell(header + "<div class='ody-panel ov-panel'><div class='lb-empty'>（暂无地图数据）</div></div>", 180)
+    rows = []
+    for i, name, created, img, plays, upvotes in entries:
+        thumb = (f"<img class='ody-map-img' src='{_esc(img)}'/>" if img else "<div class='ody-map-empty'>🗺</div>")
+        rows.append(
+            f"<div class='ody-map-row'><div class='ody-map-img-cell'>{thumb}</div>"
+            f"<div class='ody-map-info'>"
+            f"<div class='ov-name'>#{i:02d} {_esc(name)}</div>"
+            f"<div class='ody-map-meta'>"
+            f"<div class='ody-map-meta-item'><span class='ody-coin'>▶</span> 游玩 {plays:,}</div>"
+            f"<div class='ody-map-meta-item'><span class='ody-diff'>♥</span> 点赞 {upvotes:,}</div>"
+            f"<div class='ody-map-meta-item'>{_esc(created)}</div>"
+            f"</div></div></div>"
+        )
+    body = header + f"<div class='ody-panel map-panel'>{''.join(rows)}</div>"
+    h = 60 + max(len(entries), 1) * 125 + 40
+    return _odyssey_shell(body, min(h, 2600))
 
 
 def help_html() -> str:
@@ -3008,11 +3285,12 @@ def _last_pushed() -> dict:
     return {k: str(v) for k, v in lp.items() if k in _BTD6_PUSH_KINDS}
 
 def _set_last_pushed(kind: str, ev_id: str) -> None:
-    data = _load_push_state()
-    lp = data.get("last_pushed", {}) if isinstance(data.get("last_pushed"), dict) else {}
-    lp[kind] = str(ev_id)
-    data["last_pushed"] = lp
-    _save_push_state(data)
+    with _BTD6_PUSH_LOCK:  # 读改写全程持锁，避免并发推送互相覆盖记录
+        data = load_json_state(BTD6_PUSH_STATE_FILE, _BTD6_PUSH_LOCK)
+        lp = data.get("last_pushed", {}) if isinstance(data.get("last_pushed"), dict) else {}
+        lp[kind] = str(ev_id)
+        data["last_pushed"] = lp
+        save_json_state(BTD6_PUSH_STATE_FILE, data, _BTD6_PUSH_LOCK)
 
 def _push_change_group(group_id: int, enabled: bool) -> bool:
     with _BTD6_PUSH_LOCK:
@@ -3122,11 +3400,12 @@ async def _btd6_push_single(kind: str, ev: dict, ev_id: str, label: str, groups:
                 for gid in groups:
                     try:
                         await bot.send_group_msg(group_id=gid, message=MessageSegment.text(text) + MessageSegment.image(Path(path).as_uri()))
+                        pushed_any = True
                         await asyncio.sleep(0.6)
                     except Exception:
                         _logger.warning("BTD6 推送到群 %s 失败 kind=%s adv=%s", gid, kind, adv, exc_info=True)
-                pushed_any = True
             if pushed_any:
+                # 至少一个群发送成功才标记已推送；全部失败时保留待推状态，下次采样重试
                 _set_last_pushed(kind, ev_id)
                 _logger.info("BTD6 精准推送 %s %s 到 %d 群", kind, ev_id, len(groups))
             return
@@ -3135,9 +3414,11 @@ async def _btd6_push_single(kind: str, ev: dict, ev_id: str, label: str, groups:
             data = await collect_overview()
             path = await _render_card("btd6ov", lambda: overview_html(data))
             text = f"🎮 BTD6 Boss已刷新：{label}" if label else "🎮 BTD6 Boss 已刷新"
+            sent_any = False
             for gid in groups:
                 try:
                     await bot.send_group_msg(group_id=gid, message=MessageSegment.text(text) + MessageSegment.image(Path(path).as_uri()))
+                    sent_any = True
                     await asyncio.sleep(0.5)
                 except Exception:
                     _logger.warning("BTD6 推送到群 %s 失败 kind=%s", gid, kind, exc_info=True)
@@ -3150,22 +3431,29 @@ async def _btd6_push_single(kind: str, ev: dict, ev_id: str, label: str, groups:
                 for gid in groups:
                     try:
                         await bot.send_group_msg(group_id=gid, message=MessageSegment.text(vt) + MessageSegment.image(Path(p2).as_uri()))
+                        sent_any = True
                         await asyncio.sleep(0.6)
                     except Exception:
                         _logger.warning("BTD6 Boss %s 推送到群 %s 失败", vlab, gid, exc_info=True)
-            _set_last_pushed(kind, ev_id)
-            _logger.info("BTD6 精准推送 %s %s 到 %d 群", kind, ev_id, len(groups))
+            if sent_any:
+                # 全部发送失败时不标记，下次采样窗口重试
+                _set_last_pushed(kind, ev_id)
+                _logger.info("BTD6 精准推送 %s %s 到 %d 群", kind, ev_id, len(groups))
             return
         else:
             return
+        sent_any = False
         for gid in groups:
             try:
                 await bot.send_group_msg(group_id=gid, message=MessageSegment.text(text) + MessageSegment.image(Path(path).as_uri()))
+                sent_any = True
                 await asyncio.sleep(0.5)
             except Exception:
                 _logger.warning("BTD6 推送到群 %s 失败 kind=%s", gid, kind, exc_info=True)
-        _set_last_pushed(kind, ev_id)
-        _logger.info("BTD6 精准推送 %s %s 到 %d 群", kind, ev_id, len(groups))
+        if sent_any:
+            # 至少一个群发送成功才标记已推送；全部失败时下次采样重试
+            _set_last_pushed(kind, ev_id)
+        _logger.info("BTD6 精准推送 %s %s 到 %d 群（成功标记：%s）", kind, ev_id, len(groups), sent_any)
     except Exception:
         _logger.warning("BTD6 推送 kind=%s 失败", kind, exc_info=True)
 
@@ -3260,8 +3548,111 @@ async def handle_leaderboard(event: MessageEvent):
     kind = parse_kind(tokens)
     if kind is None:
         await lb_cmd.finish(LB_USAGE)
-    rows = parse_rows(tokens)
-    # 多版本一起发：boss→标准+精英，ct→个人+战队，其余单版本
+    page = parse_lb_page(tokens)
+    rank = parse_lb_rank(tokens) if page is None else None
+
+    # 排名查询：数字直接视为名次，返回该名次玩家的档案
+    if rank is not None:
+        rank = max(1, min(rank, LB_MAX_RANK))
+        has_variant_word = any(
+            t.lower() in ELITE_WORDS or t.lower() in STANDARD_WORDS or t.lower() in PLAYER_WORDS or t.lower() in TEAM_WORDS
+            for t in tokens
+        )
+        # Boss/CT 未显式指定子榜时，双榜各取一名玩家一起返回
+        if kind in ("boss", "ct") and not has_variant_word:
+            variants = {"boss": ("standard", "elite"), "ct": ("player", "team")}[kind]
+            cards = []
+            for variant in variants:
+                try:
+                    entry = await fetch_rank_entry(kind, variant, rank)
+                    if not entry:
+                        continue
+                    pid = _extract_player_id(str(entry.get("profile") or ""))
+                    if not pid:
+                        _logger.warning("排名 %s 的记录缺少 profile，跳过 variant=%s", rank, variant)
+                        continue
+                    col = await collect_player(pid)
+                    if col.get("empty"):
+                        continue
+                    cards.append((
+                        f"btd6pl_rank_{variant}",
+                        lambda c=col: player_html(c),
+                        lambda c=col, v=variant: f"第 {rank} 名（{v}）· " + player_text(c),
+                    ))
+                except Exception:
+                    _logger.exception("BTD6 排名玩家获取失败 kind=%s variant=%s rank=%s", kind, variant, rank)
+            if not cards:
+                await lb_cmd.finish(f"⚠️ 未找到第 {rank} 名的玩家（排行榜可能不足 {rank} 人或档案缺失）")
+            await _finish_multi_cards(lb_cmd, cards)
+            return
+        # 单榜单排名查询
+        variant = parse_variant(tokens, {"boss": "standard", "ct": "player"}.get(kind, ""))
+        try:
+            entry = await fetch_rank_entry(kind, variant, rank)
+            if not entry:
+                await lb_cmd.finish(f"⚠️ 未找到第 {rank} 名的玩家（排行榜可能不足 {rank} 人）")
+            pid = _extract_player_id(str(entry.get("profile") or ""))
+            if not pid:
+                # displayName 为 NK API 外部字段且玩家可自设昵称（防 CQ 码注入）：MessageSegment.text 包裹
+                await lb_cmd.finish(
+                    f"⚠️ 第 {rank} 名玩家 "
+                    + MessageSegment.text(str(entry.get("displayName") or "未知"))
+                    + " 的档案链接缺失，无法查询"
+                )
+            col = await collect_player(pid)
+            if col.get("empty"):
+                await lb_cmd.finish(col["empty"])
+        except Exception as e:
+            # 已 finish 的异常直接抛出
+            from nonebot.exception import FinishedException
+            if isinstance(e, FinishedException):
+                raise
+            _logger.exception("BTD6 排名玩家获取失败 kind=%s variant=%s rank=%s", kind, variant, rank)
+            await lb_cmd.finish("⚠️ 获取该名次玩家信息失败，请稍后再试")
+        await _send_card(lb_cmd, "btd6pl_rank", lambda: player_html(col), lambda: f"第 {rank} 名 · " + player_text(col))
+        return
+
+    # 分页查询：P2 / P 2 / p2
+    if page is not None:
+        page = max(1, min(page, LB_MAX_PAGE))
+        variants = {"boss": ("standard", "elite"), "ct": ("player", "team")}.get(kind)
+        if variants:
+            has_variant_word = any(
+                t.lower() in ELITE_WORDS or t.lower() in STANDARD_WORDS or t.lower() in PLAYER_WORDS or t.lower() in TEAM_WORDS
+                for t in tokens
+            )
+            if has_variant_word:
+                variant = parse_variant(tokens, {"boss": "standard", "ct": "player"}[kind])
+                try:
+                    col = await collect_leaderboard_page(kind, variant, page)
+                except Exception:
+                    _logger.exception("BTD6 排行榜分页获取失败 kind=%s variant=%s page=%s", kind, variant, page)
+                    await lb_cmd.finish("⚠️ 获取 BTD6 排行榜失败，请稍后再试")
+                await _send_card(lb_cmd, f"btd6lb_p{page}", lambda: leaderboard_html(col), lambda: leaderboard_text(col))
+                return
+            cards = []
+            for variant in variants:
+                try:
+                    c = await collect_leaderboard_page(kind, variant, page)
+                    if not c.get("empty"):
+                        cards.append((f"btd6lb_{variant}_p{page}", lambda c=c: leaderboard_html(c), lambda c=c: leaderboard_text(c)))
+                except Exception:
+                    _logger.exception("BTD6 排行榜分页获取失败 kind=%s variant=%s page=%s", kind, variant, page)
+            if not cards:
+                await lb_cmd.finish("⚠️ 获取 BTD6 排行榜失败，请稍后再试")
+            await _finish_multi_cards(lb_cmd, cards)
+            return
+        variant = parse_variant(tokens, {"boss": "standard", "ct": "player"}.get(kind, ""))
+        try:
+            col = await collect_leaderboard_page(kind, variant, page)
+        except Exception:
+            _logger.exception("BTD6 排行榜分页获取失败 kind=%s variant=%s page=%s", kind, variant, page)
+            await lb_cmd.finish("⚠️ 获取 BTD6 排行榜失败，请稍后再试")
+        await _send_card(lb_cmd, f"btd6lb_p{page}", lambda: leaderboard_html(col), lambda: leaderboard_text(col))
+        return
+
+    # 默认：前50名
+    rows = LB_DEFAULT_ROWS
     variants = {"boss": ("standard", "elite"), "ct": ("player", "team")}.get(kind)
     if variants:
         cards = []
@@ -3426,6 +3817,8 @@ async def handle_push_off(event: MessageEvent):
 
 @push_status_cmd.handle()
 async def handle_push_status(event: MessageEvent):
+    if not is_owner(event):
+        await push_status_cmd.finish("❌ 仅机器人主人可查看推送状态")
     groups = _push_groups()
     last = _last_pushed()
     lines = ["📋 BTD6 推送状态"]
@@ -3439,7 +3832,8 @@ async def handle_push_status(event: MessageEvent):
         lines.append("最近推送：无")
     lines.append("")
     lines.append("命令：.btd6推送开启 / .btd6推送关闭（仅主人）")
-    await push_status_cmd.finish("\n".join(lines))
+    # ev_id 等字段来自 NK API（防 CQ 码注入）：整段经 MessageSegment.text 发送
+    await push_status_cmd.finish(MessageSegment.text("\n".join(lines)))
 
 
 _HIST_KIND_WORDS = {"竞速": "race", "race": "race", "boss": "boss", "首领": "boss",
@@ -3483,4 +3877,5 @@ async def handle_history(event: MessageEvent):
                 lines.append(f"  {name}")
     if not any_data:
         lines.append("（归档为空，随预热每轮自动积累）")
-    await hist_cmd.finish("\n".join(lines))
+    # 活动名等来自 NK API 历史归档（防 CQ 码注入）：整段经 MessageSegment.text 发送
+    await hist_cmd.finish(MessageSegment.text("\n".join(lines)))

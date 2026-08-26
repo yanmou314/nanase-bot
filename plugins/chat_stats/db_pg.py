@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -23,6 +24,24 @@ _FLUSH_INTERVAL = 0.5
 _QUEUE_MAX_SIZE = 5000
 _logger = logging.getLogger(__name__)
 _SH = ZoneInfo("Asia/Shanghai")
+
+# 队列满告警节流：DB 长期故障时队列饱和后每条新消息都会打一条 warning（每秒几十条
+# 可持续数小时），1.6GB 小机上有日志写爆磁盘的风险。按 60 秒窗口聚合计数汇报。
+_qfull_state = {"window_start": 0.0, "dropped": 0}
+
+
+def _log_queue_full(detail: str) -> None:
+    now = time.monotonic()
+    if now - _qfull_state["window_start"] > 60.0:
+        if _qfull_state["dropped"]:
+            _logger.warning(
+                "消息队列已满：上一分钟累计丢弃 %d 条记录，数据库可能在持续异常", _qfull_state["dropped"]
+            )
+        _qfull_state["window_start"] = now
+        _qfull_state["dropped"] = 1
+        _logger.warning("消息队列已满，%s 被丢弃（此告警每分钟最多汇总一次）", detail)
+    else:
+        _qfull_state["dropped"] += 1
 
 
 def load_dsn() -> str:
@@ -47,7 +66,10 @@ async def get_pool() -> AsyncConnectionPool:
                 # 先在局部变量上完成 open + 建表，全部成功后才发布到 _pool；
                 # 中途任何失败都关闭半初始化的池并抛出，让下次调用能重试，
                 # 避免残留坏池导致后续查询每次都挂到 PoolTimeout。
-                pool = AsyncConnectionPool(load_dsn(), min_size=1, max_size=5, open=False)
+                pool = AsyncConnectionPool(
+                    load_dsn(), min_size=1, max_size=5, open=False,
+                    check=AsyncConnectionPool.check_connection,  # 取连接时校验健康度，DB 重启后自愈
+                )
                 try:
                     await pool.open()
                     async with pool.connection() as conn:
@@ -160,20 +182,34 @@ async def _ensure_writer() -> asyncio.Queue:
     return _write_queue
 
 
-async def _write_batch(batch: list[tuple[int, int, str, str, str, int]]) -> None:
+async def _write_batch(batch: list) -> None:
+    """批量落库。队列项两种：消息 6 元组，或 ('cmd', ...) 开头的指令记录；
+    两类分别 executemany 后同一次 commit（指令记录截断在入队前完成）。"""
     pool = await get_pool()
-    # day/hour 已在消息接收时（write 调用方）按上海时区算好，重试积压不会把消息记错日期桶
-    params = [
-        (group_id, user_id, msg_type, day, hour, text[:200] or "")
-        for group_id, user_id, msg_type, text, day, hour in batch
-    ]
+    # day/hour 已在入队时按上海时区算好，重试积压不会把消息记错日期桶
+    msg_params: list[tuple] = []
+    cmd_params: list[tuple] = []
+    for item in batch:
+        if len(item) == 6 and item[0] == "cmd":
+            _, group_id, user_id, day, hour, command = item
+            cmd_params.append((group_id, user_id, day, hour, command[:100]))
+        else:
+            group_id, user_id, msg_type, text, day, hour = item
+            msg_params.append((group_id, user_id, msg_type, day, hour, text[:200] or ""))
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
-            await cur.executemany(
-                "INSERT INTO messages(group_id, user_id, msg_type, day, hour, text) "
-                "VALUES(%s,%s,%s,%s,%s,%s)",
-                params,
-            )
+            if msg_params:
+                await cur.executemany(
+                    "INSERT INTO messages(group_id, user_id, msg_type, day, hour, text) "
+                    "VALUES(%s,%s,%s,%s,%s,%s)",
+                    msg_params,
+                )
+            if cmd_params:
+                await cur.executemany(
+                    "INSERT INTO command_usages(group_id, user_id, day, hour, command) "
+                    "VALUES(%s,%s,%s,%s,%s)",
+                    cmd_params,
+                )
         await conn.commit()
 
 
@@ -209,7 +245,7 @@ async def _write_loop() -> None:
                     try:
                         queue.put_nowait(item)
                     except asyncio.QueueFull:
-                        _logger.warning("消息队列已满，重试消息被丢弃 (group=%s user=%s)", item[0], item[1])
+                        _log_queue_full(f"重试消息被丢弃 (group={item[0]} user={item[1]})")
                 await asyncio.sleep(1)
             else:
                 for _ in batch:
@@ -226,23 +262,26 @@ async def write(group_id: int, user_id: int, msg_type: str, text: str) -> None:
         return
     queue = await _ensure_writer()
     now = datetime.now(_SH)
-    item = (group_id, user_id, msg_type, text, now.date().isoformat(), now.hour)
+    # 文本在入队前截断：队列积压时超长消息不会放大内存占用
+    item = (group_id, user_id, msg_type, text[:200], now.date().isoformat(), now.hour)
     try:
         queue.put_nowait(item)
     except asyncio.QueueFull:
-        _logger.warning("消息队列已满，丢弃该条消息 (group=%s user=%s)", group_id, user_id)
+        _log_queue_full(f"消息 (group={group_id} user={user_id})")
 
 
 async def write_command(group_id: int, user_id: int, command: str) -> None:
-    """记录一个已经通过 NoneBot 命令匹配并执行的群指令。"""
+    """记录一个已经通过 NoneBot 命令匹配并执行的群指令。
+
+    与消息写入共用批量队列（0.5s 窗口合并提交），命令热路径上只做一次非阻塞
+    入队，不再逐条取池连接 + 单条 INSERT + commit。
+    """
     if _closed:
         return
-    pool = await get_pool()
+    queue = await _ensure_writer()
     now = datetime.now(_SH)
-    async with pool.connection() as conn:
-        await conn.execute(
-            "INSERT INTO command_usages(group_id, user_id, day, hour, command) "
-            "VALUES(%s, %s, %s, %s, %s)",
-            (group_id, user_id, now.date().isoformat(), now.hour, command[:100]),
-        )
-        await conn.commit()
+    item = ("cmd", group_id, user_id, now.date().isoformat(), now.hour, command)
+    try:
+        queue.put_nowait(item)
+    except asyncio.QueueFull:
+        _log_queue_full(f"指令记录 (group={group_id} user={user_id})")

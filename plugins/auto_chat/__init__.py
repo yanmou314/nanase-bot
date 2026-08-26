@@ -5,6 +5,8 @@ import random
 import re
 import time
 from collections import defaultdict, deque
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 from nonebot import get_driver, logger, on_message, on_notice
@@ -125,9 +127,53 @@ def get_api_key() -> str:
 _MAX_ATTEMPTS = 3  # AI 请求失败后的总尝试次数，全部失败则放弃且不回复
 _RETRY_DELAY = 1.0  # 重试基础间隔秒数，指数退避：1s / 2s
 
+# 每日调用总量熔断（按上海时区日期重置）：防止被刷接口产生高额账单。
+# 环境变量 QQBOT_AI_DAILY_LIMIT 可调，设为 <=0 关闭限制。
+_DAILY_LIMIT = int(os.getenv("QQBOT_AI_DAILY_LIMIT", "500") or "500")
+_daily_usage = {"date": "", "count": 0}
+_SH_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _check_daily_budget() -> None:
+    """超过每日调用上限时抛 RuntimeError 熔断；由各调用方按普通失败处理。"""
+    if _DAILY_LIMIT <= 0:
+        return
+    today = datetime.now(_SH_TZ).strftime("%Y-%m-%d")
+    if _daily_usage["date"] != today:
+        _daily_usage["date"] = today
+        _daily_usage["count"] = 0
+    if _daily_usage["count"] >= _DAILY_LIMIT:
+        raise RuntimeError(
+            f"auto_chat 今日 AI 调用已达上限 {_DAILY_LIMIT} 次，为控制费用已暂停到明日"
+        )
+    _daily_usage["count"] += 1
+
+
+# 每用户每日上限：全局单桶熔断只有 500 次，几个小号轮流在各群 @bot 几分钟就能刷光，
+# 当天全部 AI 功能跟着瘫痪。并行加一道按账号的闸门。QQBOT_AI_USER_DAILY_LIMIT 可调，<=0 关闭。
+_USER_DAILY_LIMIT = int(os.getenv("QQBOT_AI_USER_DAILY_LIMIT", "50") or "50")
+_user_usage: dict[str, dict] = {}  # uid -> {"date": "%Y-%m-%d", "count": int}
+
+
+def _check_user_budget(uid: str) -> None:
+    """超过单账号每日上限时抛 RuntimeError；owner 不限（便于排查与演示）。"""
+    if _USER_DAILY_LIMIT <= 0 or uid == _OWNER:
+        return
+    today = datetime.now(_SH_TZ).strftime("%Y-%m-%d")
+    rec = _user_usage.get(uid)
+    if rec is None or rec["date"] != today:
+        rec = {"date": today, "count": 0}
+        _user_usage[uid] = rec
+    if len(_user_usage) > 2000:  # 防内存增长：清掉非当日记录
+        for k in [k for k, v in _user_usage.items() if v["date"] != today]:
+            _user_usage.pop(k, None)
+    if rec["count"] >= _USER_DAILY_LIMIT:
+        raise RuntimeError(f"该账号今日 AI 调用已达上限 {_USER_DAILY_LIMIT} 次")
+    rec["count"] += 1
+
 
 async def chat_completion(messages: list, max_tokens: int = 300, timeout: float = 30) -> str:
-    """公开接口：统一 AI 调用入口（自动读 key、受全局并发信号量限制）。
+    """公开接口：统一 AI 调用入口（自动读 key、受全局并发信号量与每日预算限制）。
 
     失败自动重试，共尝试 _MAX_ATTEMPTS 次，间隔指数退避；
     4xx（429 除外）属不可恢复错误，直接抛出不重试；全部失败抛出最后一次的异常。
@@ -135,6 +181,7 @@ async def chat_completion(messages: list, max_tokens: int = 300, timeout: float 
     key = _load_key()
     if not key:
         raise RuntimeError("auto_chat 未配置 api_key")
+    _check_daily_budget()
     client = _get_http_client()
     last_exc: Exception | None = None
     for attempt in range(1, _MAX_ATTEMPTS + 1):
@@ -296,6 +343,10 @@ async def chat(bot: Bot, event: MessageEvent):
     gid = str(getattr(event, "group_id", 0) or 0)
     if key:
         try:
+            _check_user_budget(uid)
+        except RuntimeError:
+            return
+        try:
             # 群聊时把发言人昵称拼进上下文；私聊本来就一对一，无需前缀
             sender = _sender_name(event) if gid and gid != "0" else ""
             reply = await _ai_reply(key, uid, gid, msg[:200], sender)
@@ -330,13 +381,18 @@ async def poke(bot: Bot, event: PokeNotifyEvent):
     key = _load_key()
     gid = str(event.group_id or 0)
     if key and now - _last_poke.get(uid, 0) >= _POKE_RATE_LIMIT:
-        _last_poke[uid] = now
         try:
-            sender = await _sender_name_by_id(bot, event.user_id, event.group_id or 0)
-            reply = await _ai_poke_reply(key, uid, gid, sender)
-        except Exception as e:
-            logger.warning(f"auto_chat 戳一戳 AI 生成失败（{e!r}）")
-            reply = ""
+            _check_user_budget(uid)
+        except RuntimeError:
+            pass  # 超限时跳过 AI 直接走静态回复
+        else:
+            _last_poke[uid] = now
+            try:
+                sender = await _sender_name_by_id(bot, event.user_id, event.group_id or 0)
+                reply = await _ai_poke_reply(key, uid, gid, sender)
+            except Exception as e:
+                logger.warning(f"auto_chat 戳一戳 AI 生成失败（{e!r}）")
+                reply = ""
     if not reply:
         reply = random.choice(POKE_REPLIES)
     try:

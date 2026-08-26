@@ -23,8 +23,18 @@ OWNER_ID = 10000  # conftest 固定的 QQBOT_OWNER
 @pytest.fixture(autouse=True)
 def _isolate_pending():
     request_manager._pending.clear()
+    request_manager._notify_index.clear()
     yield
     request_manager._pending.clear()
+    request_manager._notify_index.clear()
+
+
+@pytest.fixture(autouse=True)
+def guard_file(monkeypatch, tmp_path):
+    """安全闸状态文件指向临时目录：全测试套件隔离，绝不读写生产 approve_guard.json。"""
+    f = tmp_path / "approve_guard.json"
+    monkeypatch.setattr(request_manager, "GUARD_FILE", str(f))
+    return f
 
 
 class ApproveBot(Bot):
@@ -178,6 +188,76 @@ def test_auto_approve_miss_falls_through_to_manual(monkeypatch, tmp_path):
     assert bot.sent_private == []  # 也不发命中通知（等待人工）
 
 
+# ---------------- 自动通过安全闸：黑名单 + 二次申请节流 ----------------
+
+def _setup_approve(monkeypatch, tmp_path, gid=111):
+    mod = request_manager
+    monkeypatch.setattr(mod, "CONFIG_FILE", str(tmp_path / "auto_approve.json"))
+    mod._save_keywords(gid, ["暗号"])
+
+
+def test_auto_approve_blacklisted_user_requires_manual(monkeypatch, tmp_path, guard_file):
+    _setup_approve(monkeypatch, tmp_path)
+    request_manager._guard_blacklist(["222"])
+
+    bot = ApproveBot()
+    ev = _group_request(flag="f1", gid=111, uid=222, comment="暗号")
+    assert asyncio.run(request_manager._auto_approve(bot, ev, ev.comment)) is False
+    assert bot.group_requests == []  # 命中暗号也不放行
+
+
+def test_reapply_within_days_requires_manual_then_recovers(monkeypatch, tmp_path, guard_file):
+    _setup_approve(monkeypatch, tmp_path)
+    mod = request_manager
+
+    # 第一次自动通过成功并记账
+    bot = ApproveBot()
+    ev = _group_request(flag="f1", gid=111, uid=222, comment="暗号")
+    assert asyncio.run(mod._auto_approve(bot, ev, ev.comment)) is True
+    assert [r["flag"] for r in bot.group_requests] == ["f1"]
+
+    # 紧接着同号再次申请（退了又进）：不再自动通过，转人工
+    bot2 = ApproveBot()
+    ev2 = _group_request(flag="f2", gid=111, uid=222, comment="暗号")
+    assert asyncio.run(mod._auto_approve(bot2, ev2, ev2.comment)) is False
+    assert bot2.group_requests == []
+
+    # 把记账时间改到 8 天前：节流窗口已过，恢复自动通过
+    import json as _json
+    data = _json.loads(guard_file.read_text(encoding="utf-8"))
+    data["approved"]["222"] -= 8 * 86400
+    guard_file.write_text(_json.dumps(data), encoding="utf-8")
+
+    bot3 = ApproveBot()
+    ev3 = _group_request(flag="f3", gid=111, uid=222, comment="暗号")
+    assert asyncio.run(mod._auto_approve(bot3, ev3, ev3.comment)) is True
+    assert [r["flag"] for r in bot3.group_requests] == ["f3"]
+
+
+def test_guard_block_reason_classification(guard_file):
+    mod = request_manager
+    assert mod._guard_block_reason(999) == ""  # 无记录不阻断
+    mod._guard_blacklist(["111"])
+    assert mod._guard_block_reason(111) == "blacklist"
+    with open(guard_file, encoding="utf-8") as f:
+        import json as _json
+        data = _json.load(f)
+    data["approved"] = {"222": time.time()}
+    with open(guard_file, "w", encoding="utf-8") as f:
+        _json.dump(data, f)
+    assert mod._guard_block_reason(222) == "reapply"
+    assert mod._guard_block_reason(333) == ""
+
+
+def test_unblacklist_reports_missing(guard_file):
+    mod = request_manager
+    mod._guard_blacklist(["111", "222"])
+    removed = mod._guard_unblacklist(["111", "333"])
+    assert removed == ["111"]  # 只有存在的记录被移出，333 不在名单
+    assert mod._guard_block_reason(111) == ""
+    assert mod._guard_block_reason(222) == "blacklist"  # 未被请求移出的仍在名单
+
+
 def test_auto_approve_no_keywords_for_group(monkeypatch, tmp_path):
     mod = request_manager
     monkeypatch.setattr(mod, "CONFIG_FILE", str(tmp_path / "auto_approve.json"))
@@ -235,9 +315,10 @@ def test_group_decision_api_failure_restores_pending():
 def test_private_decision_reply_resolves_friend_request():
     mod = request_manager
     bot = ApproveBot()
-    bot.msgs_by_id[55] = "🔔 好友申请\n👤 申请人：888（08-16 12:00）"
     mod._pending["fF"] = _pending_friend("fF", 888)
     mod._pending["fG"] = _pending_group("fG", 111, uid=999)
+    # 审批路由只认机器人发出的申请通知（发送时登记的 message_id -> flag）
+    mod._notify_index["55"] = "fF"
 
     asyncio.run(mod._process_decision(bot, _owner_private_msg("同意", reply_to=55), True))
     assert [r["flag"] for r in bot.friend_requests] == ["fF"]
@@ -249,12 +330,11 @@ def test_private_decision_reply_resolves_friend_request():
 def test_private_decision_reply_resolves_group_request():
     mod = request_manager
     bot = ApproveBot()
-    bot.msgs_by_id[66] = "🔔 有人申请进群\n🏘 群号：111\n👤 申请人：999（08-16 12:00）"
     mod._pending["fF"] = _pending_friend("fF", 888)
     mod._pending["fG"] = _pending_group("fG", 111, uid=999)
+    mod._notify_index["66"] = "fG"
 
     asyncio.run(mod._process_decision(bot, _owner_private_msg("拒绝", reply_to=66), False))
-    # 好友正则先命中 999 但无好友申请匹配 → 回退群号正则命中 fG
     assert bot.friend_requests == []
     assert [r["flag"] for r in bot.group_requests] == ["fG"]
     assert bot.group_requests[0]["approve"] is False
@@ -262,10 +342,24 @@ def test_private_decision_reply_resolves_group_request():
     assert "已拒绝进群申请" in str(bot.sent_private[-1]["message"])
 
 
+def test_private_decision_reply_forged_quote_not_trusted():
+    """安全回归：引用消息文本可被陌生人伪造（私聊转发原文里塞「群号：xxx」行），
+    审批路由绝不能解析被引用消息的内容，只信任 _notify_index 里登记的通知。"""
+    mod = request_manager
+    bot = ApproveBot()
+    mod._pending["fF"] = _pending_friend("fF", 888)
+    mod._pending["fG"] = _pending_group("fG", 111, uid=999)
+    # 引用的 id 不在通知索引里：无论其内容是什么都不参与路由
+
+    asyncio.run(mod._process_decision(bot, _owner_private_msg("同意", reply_to=666), True))
+    assert bot.friend_requests == [] and bot.group_requests == []
+    assert set(mod._pending) == {"fF", "fG"}
+    assert "引用" in str(bot.sent_private[-1]["message"])
+
+
 def test_private_decision_reply_no_match_keeps_pending():
     mod = request_manager
     bot = ApproveBot()
-    bot.msgs_by_id[77] = "🔔 好友申请\n👤 申请人：777（08-16 12:00）"  # 777 没有待处理申请
     mod._pending["fF"] = _pending_friend("fF", 888)
     mod._pending["fG"] = _pending_group("fG", 111, uid=999)
 

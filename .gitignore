@@ -36,3 +36,4 @@ venv/
 # 图片缓存
 plugins/**/cache/
 plugins-disabled/**/cache/
+plugins/**/approve_guard.json
