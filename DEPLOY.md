@@ -9,6 +9,7 @@ apt update
 apt install -y python3.12 python3.12-venv \
     libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf2.0-0 \  # weasyprint
     poppler-utils \                                          # pdftoppm（PDF→PNG）
+    fonts-wqy-microhei \                                     # btd6 卡片用 glyf 中文字体（子集化比 CFF 快数倍）
     postgresql                                               # 群聊统计（可选）
 ```
 
