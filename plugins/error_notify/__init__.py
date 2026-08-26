@@ -5,7 +5,6 @@
 import asyncio
 import time
 from datetime import datetime
-from typing import Optional
 
 from nonebot import get_bot, get_driver, logger
 
@@ -23,7 +22,7 @@ from common import OWNER
 
 _COOLDOWN = 10 * 60  # 同一插件同一错误 10 分钟内只提醒一次
 _last_notified: dict[str, float] = {}
-_loop: Optional[asyncio.AbstractEventLoop] = None
+_loop: asyncio.AbstractEventLoop | None = None
 
 
 def _plugin_label(matcher: Matcher) -> str:
@@ -89,7 +88,7 @@ def _log_notice_result(fut) -> None:
 
 
 @run_postprocessor
-async def notify_plugin_error(matcher: Matcher, exception: Optional[Exception]) -> None:
+async def notify_plugin_error(matcher: Matcher, exception: Exception | None) -> None:
     # finish()/skip() 等流程控制异常不是真报错
     if exception is None or isinstance(
         exception, (MatcherException, SkippedException, IgnoredException)

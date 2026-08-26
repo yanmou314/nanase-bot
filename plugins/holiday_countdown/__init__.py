@@ -445,7 +445,7 @@ async def _push_daily_countdown() -> bool:
             return_exceptions=True,
         )
         sent = 0
-        for gid, result in zip(groups, results):
+        for gid, result in zip(groups, results, strict=False):
             if isinstance(result, BaseException):
                 _logger.warning("倒计时推送到群 %s 失败", gid, exc_info=result)
             else:

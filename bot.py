@@ -6,8 +6,8 @@ _BOT_ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(_BOT_ROOT)
 load_dotenv(os.path.join(_BOT_ROOT, ".env"))
 
-import nonebot
-from nonebot.adapters.onebot.v11 import Adapter as OneBotV11Adapter
+import nonebot  # noqa: E402  # 需先 chdir 并加载 .env
+from nonebot.adapters.onebot.v11 import Adapter as OneBotV11Adapter  # noqa: E402
 
 _OWNER = os.getenv("QQBOT_OWNER", "")
 if not _OWNER.isdigit():

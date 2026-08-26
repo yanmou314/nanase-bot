@@ -103,7 +103,7 @@ def _load_key() -> str:
         mtime = os.path.getmtime(CFG_FILE)
         if mtime == _cached_key_mtime:
             return _cached_key
-        with open(CFG_FILE, "r", encoding="utf-8") as f:
+        with open(CFG_FILE, encoding="utf-8") as f:
             _cached_key = (json.load(f).get("api_key") or "").strip()
         _cached_key_mtime = mtime
         _key_load_warned = False  # 读取成功，重置标记，下次失败可再警告

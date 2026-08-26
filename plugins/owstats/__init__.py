@@ -53,7 +53,7 @@ def _load_bindings() -> dict:
     global _bind_cache
     if _bind_cache is None:
         try:
-            with open(BIND_FILE, "r", encoding="utf-8") as f:
+            with open(BIND_FILE, encoding="utf-8") as f:
                 data = json.load(f)
             _bind_cache = data if isinstance(data, dict) else {}
         except json.JSONDecodeError:

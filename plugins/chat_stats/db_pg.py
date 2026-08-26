@@ -27,14 +27,14 @@ _SH = ZoneInfo("Asia/Shanghai")
 
 def load_dsn() -> str:
     try:
-        with open(CFG_FILE, "r", encoding="utf-8") as f:
+        with open(CFG_FILE, encoding="utf-8") as f:
             cfg = json.load(f)
         dsn = cfg["dsn"]
         if "postgresql" not in dsn:
             raise ValueError("invalid dsn")
         return dsn
     except Exception:
-        raise RuntimeError("数据库配置缺失：请创建 plugins/chat_stats/db.json（含 dsn 字段）")
+        raise RuntimeError("数据库配置缺失：请创建 plugins/chat_stats/db.json（含 dsn 字段）") from None
 
 
 async def get_pool() -> AsyncConnectionPool:

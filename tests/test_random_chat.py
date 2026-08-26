@@ -1,7 +1,6 @@
 import asyncio
 import json
 import time
-from collections import deque
 
 import pytest
 from conftest import GroupMessageEvent

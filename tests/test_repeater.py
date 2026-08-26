@@ -56,13 +56,20 @@ def test_fingerprint_image():
 def test_prune_removes_stale_groups():
     mod = repeater
     old_ts = time.time() - 8 * 86400
-    mod._track.clear(); mod._replied_ts.clear(); mod._replied_fp.clear()
-    mod._track[1] = deque(maxlen=3); mod._replied_ts[1] = old_ts; mod._replied_fp[1] = ("t", "x", "y")
-    mod._track[2] = deque(maxlen=3); mod._replied_ts[2] = time.time()
+    mod._track.clear()
+    mod._replied_ts.clear()
+    mod._replied_fp.clear()
+    mod._track[1] = deque(maxlen=3)
+    mod._replied_ts[1] = old_ts
+    mod._replied_fp[1] = ("t", "x", "y")
+    mod._track[2] = deque(maxlen=3)
+    mod._replied_ts[2] = time.time()
     mod._prune()
     assert 1 not in mod._track and 1 not in mod._replied_ts and 1 not in mod._replied_fp
     assert 2 in mod._track
-    mod._track.clear(); mod._replied_ts.clear(); mod._replied_fp.clear()
+    mod._track.clear()
+    mod._replied_ts.clear()
+    mod._replied_fp.clear()
 
 
 def test_save_state_skips_none_fingerprints(monkeypatch, tmp_path):
@@ -73,7 +80,8 @@ def test_save_state_skips_none_fingerprints(monkeypatch, tmp_path):
     mod = repeater
     f = tmp_path / "repeater_state.json"
     monkeypatch.setattr(mod, "STATE_FILE", str(f))
-    mod._track.clear(); mod._replied_ts.clear()
+    mod._track.clear()
+    mod._replied_ts.clear()
     mod._track[42] = deque([None, ("t", "a" * 40, "原文"), None], maxlen=3)
     mod._replied_ts[42] = time.time()
 
@@ -88,7 +96,9 @@ def test_repeater_none_fingerprint_breaks_chain_without_crash():
     import asyncio
 
     mod = repeater
-    mod._track.clear(); mod._replied_ts.clear(); mod._replied_fp.clear()
+    mod._track.clear()
+    mod._replied_ts.clear()
+    mod._replied_fp.clear()
 
     sent = []
 
@@ -111,4 +121,6 @@ def test_repeater_none_fingerprint_breaks_chain_without_crash():
     assert len(sent) == 1
     assert sent[0]["group_id"] == 999
     assert str(sent[0]["message"]) == "哈哈"
-    mod._track.clear(); mod._replied_ts.clear(); mod._replied_fp.clear()
+    mod._track.clear()
+    mod._replied_ts.clear()
+    mod._replied_fp.clear()

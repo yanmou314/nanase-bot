@@ -115,7 +115,7 @@ def _wrap_line(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> li
 def _help_cache_path(text: str, variant: str) -> str:
     payload = (
         f"{_RENDER_VERSION}\n{variant}\n{_plugin_source_signature()}\n{text}"
-    ).encode("utf-8")
+    ).encode()
     digest = hashlib.sha256(payload).hexdigest()[:20]
     return os.path.join(_CACHE_DIR, f"help_{variant}_{digest}.png")
 

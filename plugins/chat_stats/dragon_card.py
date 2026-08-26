@@ -116,7 +116,7 @@ body {{ width: 900px; height: 800px; font-family: "Noto Sans CJK SC", sans-serif
 
 async def build_card_async(rows: list) -> str:
     results = await asyncio.gather(*(_fetch_avatar(uid) for uid, _, _ in rows))
-    avatars = {uid: data for (uid, _, _), data in zip(rows, results) if data}
+    avatars = {uid: data for (uid, _, _), data in zip(rows, results, strict=False) if data}
     # weasyprint 渲染经全局渲染信号量串行化，避免小机器上并发渲染打爆内存
     async with RENDER_SEM:
         return await asyncio.to_thread(_render, rows, avatars)
