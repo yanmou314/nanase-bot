@@ -5,6 +5,7 @@
 
 # 运行时状态与配置（含 QQ 号/群号/密钥）
 plugins/**/state.json
+plugins/**/history.json
 plugins/**/db.json
 plugins/**/words_state.json
 plugins/**/push_config.json
