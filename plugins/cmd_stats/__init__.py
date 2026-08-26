@@ -206,7 +206,7 @@ async def _build_stats(day: str) -> dict:
         _fetch_name(bot, data["user_groups"][uid], uid) if uid in data["user_groups"] else str(uid)
         for uid, _ in top
     ))
-    data["users_named"] = [(name, cnt) for name, (_, cnt) in zip(names, top)]
+    data["users_named"] = [(name, cnt) for name, (_, cnt) in zip(names, top, strict=False)]
     return data
 
 

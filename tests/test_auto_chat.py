@@ -322,7 +322,7 @@ def test_chat_completion_gives_up_after_three_failures(monkeypatch):
     monkeypatch.setattr(mod, "_get_http_client", lambda: client)
     monkeypatch.setattr(mod, "_RETRY_DELAY", 0)
 
-    with pytest.raises(Exception):
+    with pytest.raises(httpx.ConnectError):
         asyncio.run(mod.chat_completion([{"role": "user", "content": "hi"}]))
 
     assert client.calls == 3  # 第 3 次失败后不再请求

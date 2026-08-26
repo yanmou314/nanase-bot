@@ -199,7 +199,7 @@ async def words_on(event: GroupMessageEvent):
     if not is_owner(event):
         await words_on_cmd.finish("❌ 你没有权限使用此功能")
     _add_words_group(str(event.group_id))
-    await words_on_cmd.finish(f"✅ 本群已开启每日词云推送\n每天 00:00 自动发送前一天的热词词云到此群")
+    await words_on_cmd.finish("✅ 本群已开启每日词云推送\n每天 00:00 自动发送前一天的热词词云到此群")
 
 
 @words_off_cmd.handle()

@@ -126,7 +126,7 @@ def load_json_state(path: str, lock=None) -> dict:
     """读取 JSON 状态文件；缺失/非对象返回 {}；损坏时先备份为 <path>.corrupt-<ts> 再返回 {}。"""
     with (lock or _NULL_LOCK):
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 data = json.load(f)
             return data if isinstance(data, dict) else {}
         except FileNotFoundError:

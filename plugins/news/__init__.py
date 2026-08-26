@@ -55,7 +55,7 @@ def _sh_today() -> date:
 
 def _load_state() -> dict:
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
+        with open(STATE_FILE, encoding="utf-8") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
@@ -266,7 +266,7 @@ def _load_ai_cfg() -> tuple[str, str]:
     try:
         mtime = os.path.getmtime(AI_CFG_FILE)
         if mtime != _ai_cfg_cache["mtime"]:
-            with open(AI_CFG_FILE, "r", encoding="utf-8") as f:
+            with open(AI_CFG_FILE, encoding="utf-8") as f:
                 data = json.load(f)
             _ai_cfg_cache.update(
                 mtime=mtime,
@@ -324,8 +324,8 @@ def _sanitize_greeting(text: str) -> str:
     """清理 AI 输出：只取第一行，去掉首尾包裹引号与空白。"""
     lines = str(text or "").strip().splitlines()
     t = lines[0].strip() if lines else ""
-    for l, r in (("「", "」"), ("“", "”"), ('"', '"')):
-        if len(t) >= 2 and t.startswith(l) and t.endswith(r):
+    for left, r in (("「", "」"), ("“", "”"), ('"', '"')):
+        if len(t) >= 2 and t.startswith(left) and t.endswith(r):
             t = t[1:-1].strip()
     return t
 
@@ -440,7 +440,7 @@ async def _send_daily() -> bool:
             return_exceptions=True,
         )
         sent = 0
-        for gid, result in zip(groups, results):
+        for gid, result in zip(groups, results, strict=False):
             if isinstance(result, BaseException):
                 _logger.warning("晨报发送到群 %s 失败", gid, exc_info=result)
             else:

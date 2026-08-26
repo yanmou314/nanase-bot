@@ -29,7 +29,7 @@ async def luck(event: MessageEvent):
     today = datetime.now(_SH).date()  # 运势按上海时区的日期重置，不受部署机时区影响
     rnd = random.Random(f"{event.user_id}-{today.isoformat()}")
     score = rnd.randint(1, 100)
-    for lo, hi, sign, sign_desc, luck_level, luck_desc in TIERS:
+    for lo, hi, _sign, _sign_desc, _luck_level, _luck_desc in TIERS:
         if lo <= score <= hi:
             break
     at = Message()
@@ -39,6 +39,6 @@ async def luck(event: MessageEvent):
         at + f"🔮 {today.month}月{today.day}日 运势\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"🎯 幸运数字：{score}\n"
-        f"🗒 签文：「{sign}」{sign_desc}\n"
-        f"✨ 运势：{luck_level} · {luck_desc}"
+        f"🗒 签文：「{_sign}」{_sign_desc}\n"
+        f"✨ 运势：{_luck_level} · {_luck_desc}"
     )

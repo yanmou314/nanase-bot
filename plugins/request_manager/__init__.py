@@ -65,7 +65,7 @@ def _purge_pending() -> None:
 
 def _load_config() -> dict:
     try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        with open(CONFIG_FILE, encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except FileNotFoundError:

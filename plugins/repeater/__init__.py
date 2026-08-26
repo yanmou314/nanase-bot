@@ -45,7 +45,7 @@ def _normalize_item(item) -> tuple:
 
 def _load_state() -> None:
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
+        with open(STATE_FILE, encoding="utf-8") as f:
             data = json.load(f)
         for gid, items in data.get("track", {}).items():
             deq: deque = deque(maxlen=3)

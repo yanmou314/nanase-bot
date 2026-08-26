@@ -23,7 +23,7 @@ from nonebot.adapters.onebot.v11 import Message, MessageEvent, MessageSegment
 from nonebot.params import CommandArg
 from PIL import Image, ImageDraw, ImageFont
 
-from common import at_prefix, cleanup_cache, close_http_clients, get_http_client, is_owner
+from common import at_prefix, cleanup_cache, close_http_clients, is_owner
 
 _logger = logging.getLogger(__name__)
 
@@ -181,7 +181,7 @@ async def fetch_models_dev() -> dict:
 
 def load_cache() -> dict | None:
     try:
-        with open(CACHE_PATH, "r", encoding="utf-8") as f:
+        with open(CACHE_PATH, encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
@@ -310,7 +310,7 @@ async def gen_chart(force: bool):
     except Exception as e:
         _logger.warning("models.dev 抓取失败: %s", e)
         if force:
-            raise RuntimeError("实时数据获取失败（强制更新模式不降级使用旧数据）")
+            raise RuntimeError("实时数据获取失败（强制更新模式不降级使用旧数据）") from e
     cache = None if force else load_cache()
     if prices is None:
         cache = load_cache()
@@ -370,7 +370,7 @@ async def handle_price(event: MessageEvent, arg: Message = CommandArg()):
     await price_cmd.send(at_prefix(event) + "⏳ 正在获取大模型价格...")
     try:
         path, summary = await gen_chart(force)
-    except Exception as e:
+    except Exception:
         _logger.exception("价格图生成失败")
         await price_cmd.finish(at_prefix(event) + "❌ 生成失败，请稍后再试")
     await price_cmd.finish(at_prefix(event) + summary + MessageSegment.image("file://" + path))
