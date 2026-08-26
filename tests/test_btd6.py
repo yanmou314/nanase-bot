@@ -278,12 +278,66 @@ def test_handler_leaderboard_race(monkeypatch):
     }
     monkeypatch.setattr(btd6, "fetch_body", _fake_fetch_factory(bodies))
     with pytest.raises(FinishedException):
-        asyncio.run(btd6.lb_cmd.handlers[0](_ev(".btd6排行 竞赛 2")))
+        asyncio.run(btd6.lb_cmd.handlers[0](_ev(".btd6排行 竞赛")))
     text = str(btd6.lb_cmd.finished[-1])
     assert "🥇 ISAB — 1:58.300" in text
     assert "🥈 <b>注入</b> — 1:59.017" in text
-    assert "third" not in text  # rows=2 截断生效
+    assert "third" in text  # 默认前50，3条全部展示
     # 毫秒级分差在格式化后仍可分辨（118300 vs 119017）
+
+
+def test_handler_leaderboard_race_page(monkeypatch):
+    entries_p1 = [{"displayName": f"p1_{i}", "score": 100000 + i} for i in range(50)]
+    entries_p2 = [{"displayName": f"p2_{i}", "score": 200000 + i} for i in range(5)]
+    bodies = {
+        btd6.URL_RACES: [RACE_ACTIVE],
+        RACE_ACTIVE["leaderboard"]: entries_p1,
+        RACE_ACTIVE["leaderboard"] + "?page=2": entries_p2,
+    }
+    monkeypatch.setattr(btd6, "fetch_body", _fake_fetch_factory(bodies))
+    with pytest.raises(FinishedException):
+        asyncio.run(btd6.lb_cmd.handlers[0](_ev(".btd6排行 竞赛 P2")))
+    text = str(btd6.lb_cmd.finished[-1])
+    assert "第2页" in text
+    assert "p2_0" in text
+    assert "p1_0" not in text
+
+
+def test_handler_leaderboard_rank_returns_player(monkeypatch):
+    pid2 = "b" * 40
+    entries = [
+        {"displayName": "first", "score": 118300, "profile": "https://data.ninjakiwi.com/btd6/users/" + "a" * 40},
+        {"displayName": "second", "score": 119017, "profile": "https://data.ninjakiwi.com/btd6/users/" + pid2},
+        {"displayName": "third", "score": 120000, "profile": "https://data.ninjakiwi.com/btd6/users/" + "c" * 40},
+    ]
+    player_body = {
+        "displayName": "second", "rank": 99, "veteranRank": 10, "followers": 123,
+        "mostExperiencedMonkey": "DartMonkey", "highestRound": 100, "achievements": 10,
+        "bloonsPopped": {"bloonsPopped": 1000}, "gameplay": {"highestRoundCHIMPS": 10},
+    }
+    bodies = {
+        btd6.URL_RACES: [RACE_ACTIVE],
+        RACE_ACTIVE["leaderboard"]: entries,
+        btd6.URL_USERS + pid2: player_body,
+    }
+    monkeypatch.setattr(btd6, "fetch_body", _fake_fetch_factory(bodies))
+    with pytest.raises(FinishedException):
+        asyncio.run(btd6.lb_cmd.handlers[0](_ev(".btd6排行 竞赛 2")))
+    text = str(btd6.lb_cmd.finished[-1])
+    assert "第 2 名" in text
+    assert "second" in text
+
+
+def test_parse_lb_page_and_rank():
+    assert btd6.parse_lb_page(["P2"]) == 2
+    assert btd6.parse_lb_page(["p", "2"]) == 2
+    assert btd6.parse_lb_page(["p2"]) == 2
+    assert btd6.parse_lb_page(["竞赛", "P3"]) == 3
+    assert btd6.parse_lb_page(["竞速"]) is None
+    assert btd6.parse_lb_rank(["7"]) == 7
+    assert btd6.parse_lb_rank(["P2"]) is None
+    assert btd6.parse_lb_rank(["p", "2"]) is None
+    assert btd6.parse_lb_rank(["竞速", "7"]) == 7
 
 
 def test_handler_leaderboard_boss_elite(monkeypatch):
@@ -454,7 +508,7 @@ def test_leaderboard_html_rows_and_escape():
         "entries": [(1, "ISAB", "1:58.300"), (2, "<script>", "$12")],
     }
     html = btd6.leaderboard_html(col)
-    assert "#e8b339" in html  # 金牌配色
+    assert "ISAB" in html and "1:58.300" in html
     assert "&lt;script&gt;" in html and "<script>" not in html
     assert "1:58.300" in html
 
@@ -666,7 +720,7 @@ def test_maps_html_rows_and_escape():
     assert "Map&lt;A&gt;" in html
     assert "2026-08-25" in html
     assert "游玩 1,234" in html and "点赞 56" in html
-    assert "nomap-s" in html  # 无缩略图占位
+    assert "ody-map-empty" in html  # 无缩略图占位（游戏风格）
 
 
 def test_maps_html_with_thumbnails():
@@ -674,7 +728,7 @@ def test_maps_html_with_thumbnails():
         "label": "热门",
         "entries": [(1, "PrettyMap", "2026-08-25", "data:image/jpg;base64,THUMB", 10, 2)],
     })
-    assert "<img class='mthumb'" in html and "THUMB" in html
+    assert "<img class='ody-map-img'" in html and "THUMB" in html
 
 
 # ---------------- 渲染缓存 / 素材缓存 / 预热 ----------------

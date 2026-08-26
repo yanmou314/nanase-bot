@@ -167,13 +167,22 @@ def _offwork_on(day: date) -> datetime:
     return datetime.combine(day, offwork_time, tzinfo=TIMEZONE)
 
 
+def _is_rest_saturday(day: date) -> bool:
+    """周六是否真正休息（排除官方通知标注“上班”的调休周六）。"""
+    return day not in WORKDAY_OVERRIDES.get(day.year, ())
+
+
 def _next_weekend(now: datetime) -> tuple[date, date, datetime]:
-    days_until_saturday = (5 - now.weekday()) % 7
-    weekend_day = now.date() + timedelta(days=days_until_saturday)
+    weekend_day = now.date() + timedelta(days=(5 - now.weekday()) % 7)
+    # 调休上班的周六不是休息日，顺延到下一周，否则会把“周五下班”错标成周末开始
+    while not _is_rest_saturday(weekend_day):
+        weekend_day += timedelta(days=7)
     start_day = _last_workday_before(weekend_day)
     target = _offwork_on(start_day)
     if target <= now:
         weekend_day += timedelta(days=7)
+        while not _is_rest_saturday(weekend_day):
+            weekend_day += timedelta(days=7)
         start_day = _last_workday_before(weekend_day)
         target = _offwork_on(start_day)
     return weekend_day, start_day, target
