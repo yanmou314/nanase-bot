@@ -160,6 +160,16 @@ def save_json_state(path: str, data: dict, lock=None) -> None:
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
+        # 权限沿用目标文件现状（防止手工收紧到 600 的密钥类文件在重写后掉回 644）；
+        # 新建文件一律 600——状态文件普遍含 QQ 号/群号，部分还含 API key 或数据库 DSN
+        try:
+            mode = os.stat(path).st_mode & 0o777
+        except OSError:
+            mode = 0o600
+        try:
+            os.chmod(tmp, mode)
+        except OSError:
+            pass
         os.replace(tmp, path)
 
 

@@ -14,6 +14,7 @@ import os
 import re
 import time
 from datetime import datetime
+from urllib.parse import urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -33,12 +34,17 @@ _HEADERS = {
     "Referer": "https://www.bilibili.com/",
 }
 
-# BV 号固定 1+10 位；av/ep/ss 号前置断言避免误伤普通文本（后接字母数字不算）
-_BV_RE = re.compile(r"BV[0-9A-Za-z]{10}")
+# BV 号固定 1+10 位；前后断言避免误伤长字母数字串（如 XBVxxx、多一位的 BV 号）
+_BV_RE = re.compile(r"(?<![0-9A-Za-z])BV[0-9A-Za-z]{10}(?![0-9A-Za-z])")
 _AV_RE = re.compile(r"(?<![0-9A-Za-z])av(\d{5,})", re.IGNORECASE)
 _EP_RE = re.compile(r"(?<![0-9A-Za-z])ep(\d{4,})", re.IGNORECASE)
 _SS_RE = re.compile(r"(?<![0-9A-Za-z])ss(\d{4,})", re.IGNORECASE)
 _B23_RE = re.compile(r"https?://b23\.tv/[0-9A-Za-z]+")
+# 短链重定向允许落到的域名白名单：不盲信"b23.tv 没有开放重定向"，每一跳都校验，
+# 防止被引向任意外部站点乃至内网地址（SSRF 防御纵深）
+_ALLOWED_REDIRECT_HOST_RE = re.compile(
+    r"^(?:[0-9a-z][0-9a-z-]*\.)*(?:b23\.tv|bilibili\.com|hdslb\.com|bilivideo\.com|biliapi\.net)$"
+)
 _CMD_PREFIXES = (".", "/", "。")
 
 _CARD_W = 900
@@ -47,6 +53,7 @@ _GROUP_COOLDOWN = 30.0        # 同群两次解析的最小间隔
 _DUP_WINDOW = 10 * 60.0       # 同群同一视频的去重窗口
 _CACHE_TTL = 30 * 60.0        # 视频信息/渲染卡片缓存
 _MAX_COVER_BYTES = 8 * 1024 * 1024  # 封面大小上限，防异常大图耗内存
+_MAX_COVER_PIXELS = 36_000_000      # 封面解码像素总量上限（约 6000×6000），防解压炸弹吃光内存
 
 # B站粉主题配色
 _C_PINK = (251, 114, 153)     # #fb7299
@@ -132,12 +139,24 @@ def extract_source_text(event) -> str:
 
 
 async def resolve_b23(url: str) -> str | None:
-    """解析 b23.tv 短链的真实地址（跟随重定向后从最终 URL 提取视频 ID）。"""
+    """解析 b23.tv 短链的真实地址：手动逐跳跟随重定向并校验域名白名单，
+    从最终 URL 提取视频 ID。"""
+    current = url
     try:
         client = get_http_client(5.0)
-        resp = await client.get(url, headers=_HEADERS, follow_redirects=True)
-        ids = extract_ids(str(resp.url))
-        return ids[0] if ids else None
+        for _ in range(5):  # 重定向最多跟 5 跳
+            host = (urlparse(current).hostname or "").lower()
+            if not _ALLOWED_REDIRECT_HOST_RE.match(host):
+                _logger.warning("b23.tv 短链跳转到非 B站域名已中止: %s", current)
+                return None
+            resp = await client.get(current, headers=_HEADERS, follow_redirects=False)
+            location = resp.headers.get("location") if resp.status_code in (301, 302, 303, 307, 308) else None
+            if not location:
+                ids = extract_ids(str(resp.url))
+                return ids[0] if ids else None
+            current = urljoin(current, location)
+        _logger.warning("b23.tv 短链重定向超过 5 跳已中止: %s", url)
+        return None
     except httpx.HTTPError:
         _logger.warning("b23.tv 短链解析失败: %s", url)
         return None
@@ -384,10 +403,12 @@ def _render_card(info: dict, cover_bytes: bytes | None):
     cover_img = None
     if cover_bytes:
         try:
-            cover_img = ImageOps.fit(
-                Image.open(io.BytesIO(cover_bytes)).convert("RGB"),
-                (_CARD_W, _COVER_H), Image.Resampling.LANCZOS,
-            )
+            img = Image.open(io.BytesIO(cover_bytes))
+            # 解压炸弹防护：Pillow 解码是惰性的，先查声明尺寸再 convert（全量解码）
+            w, h = img.size
+            if w * h > _MAX_COVER_PIXELS:
+                raise ValueError(f"cover too large: {w}x{h}")
+            cover_img = ImageOps.fit(img.convert("RGB"), (_CARD_W, _COVER_H), Image.Resampling.LANCZOS)
         except Exception:
             _logger.warning("封面解码失败，使用占位头", exc_info=True)
     if cover_img is not None:
@@ -545,6 +566,11 @@ async def handle_bili_link(event: GroupMessageEvent):
     now = time.time()
     gid = str(event.group_id)
 
+    # 群冷却前置：冷却期内连 b23 短链解析也不发起，防止请求放大与风控风险
+    # （缓存重发在原逻辑中本就被群冷却拦截，行为不变）
+    if now - _group_last.get(gid, 0.0) < _GROUP_COOLDOWN:
+        return
+
     ids = extract_ids(raw)
     for url in _B23_RE.findall(raw):
         resolved = await resolve_b23(url)
@@ -578,14 +604,18 @@ async def handle_bili_link(event: GroupMessageEvent):
             _prune_state(now)
             await bili_matcher.send(MessageSegment.image("file://" + path))
         return
-    if vid is None:
-        return
+
+    # 通过检查后立即占位，避免同群并发消息同时通过检查、重复解析重复回复
+    #（check-then-set 竞态；失败时下方释放群冷却但保留去重窗口）
+    _group_last[gid] = now
+    _recent[(gid, vid)] = now
 
     info = await fetch_info(vid)
     if info is None:
+        if _group_last.get(gid) == now:
+            _group_last.pop(gid, None)  # 失败不占用群冷却，同群其他链接仍可正常解析
+        _prune_state(now)
         return
-    _group_last[gid] = now
-    _recent[(gid, vid)] = now
     _prune_state(now)
 
     path = await build_card_image(info)

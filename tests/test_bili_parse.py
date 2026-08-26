@@ -178,26 +178,62 @@ def test_handler_ignores_plain_text_without_ids(monkeypatch):
 
 
 def test_handler_fetch_failure_silent(monkeypatch):
+    calls = []
+
     async def fake_fetch(vid):
+        calls.append(vid)
         return None
 
     monkeypatch.setattr(bili, "fetch_info", fake_fetch)
     asyncio.run(bili.bili_matcher.handlers[0](_ev("BV1GJ411x7h7")))
+    # 失败 vid 进入去重窗口：同一失效链接不重复查询（防刷接口）
+    asyncio.run(bili.bili_matcher.handlers[0](_ev("BV1GJ411x7h7")))
     assert not bili.bili_matcher.sent
-    assert not bili._group_last  # 失败不占用群冷却
+    assert not bili._group_last  # 失败不占用群冷却，其他链接不受影响
+    assert calls == ["BV1GJ411x7h7"]  # 只查询一次
 
 
 def test_resolve_b23_extracts_from_final_url(monkeypatch):
-    class _Resp:
+    class _Redirect:
+        status_code = 302
+        headers = {"location": "https://www.bilibili.com/video/BV1GJ411x7h7/?spm=x"}
+
+    class _Final:
+        status_code = 200
         url = "https://www.bilibili.com/video/BV1GJ411x7h7/?spm=x"
+
+    requested = []
 
     class _Client:
         async def get(self, url, **kw):
-            assert "b23.tv" in url
-            return _Resp()
+            # 手动逐跳跟随：禁止 httpx 自动重定向
+            assert kw.get("follow_redirects") is False
+            requested.append(url)
+            return _Redirect() if url.endswith("abc123") else _Final()
 
     monkeypatch.setattr(bili, "get_http_client", lambda t: _Client())
     assert asyncio.run(bili.resolve_b23("https://b23.tv/abc123")) == "BV1GJ411x7h7"
+
+
+def test_resolve_b23_rejects_offsite_redirect(monkeypatch):
+    """SSRF 防御回归：重定向到非 B站域名必须中止，绝不向白名单外域名发起请求。"""
+
+    class _Redirect:
+        status_code = 302
+        headers = {"location": "http://127.0.0.1:6099/webui"}
+
+    offsite = []
+
+    class _Client:
+        async def get(self, url, **kw):
+            if "b23.tv" in url:
+                return _Redirect()
+            offsite.append(url)
+            raise AssertionError(f"off-host request attempted: {url}")
+
+    monkeypatch.setattr(bili, "get_http_client", lambda t: _Client())
+    assert asyncio.run(bili.resolve_b23("https://b23.tv/abc123")) is None
+    assert not offsite  # 内网地址未被请求
 
 
 # ---------------- 图片卡片渲染（PIL） ----------------

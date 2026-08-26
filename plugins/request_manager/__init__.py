@@ -17,7 +17,7 @@ from nonebot.adapters.onebot.v11 import (
 from nonebot.matcher import Matcher
 from nonebot.params import CommandArg
 
-from common import OWNER, is_owner, now_str
+from common import OWNER, is_owner, load_json_state, now_str, save_json_state
 
 _logger = logging.getLogger(__name__)
 
@@ -44,6 +44,76 @@ decision_matcher = on_message(
 )
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "auto_approve.json")
+GUARD_FILE = os.path.join(os.path.dirname(__file__), "approve_guard.json")
+
+# 自动通过的两道安全闸（防「暗号外泄后被反复利用」）：
+# 1) 黑名单：名单内 QQ 永不自动通过，一律转人工
+# 2) 二次申请节流：自动通过后 _REAPPLY_MANUAL_DAYS 天内同号再次申请需人工核实
+_REAPPLY_MANUAL_DAYS = 7
+_GUARD_LOCK = threading.RLock()  # 可重入：辅助函数会嵌套经过 load/save_json_state 的同一把锁
+
+blk_on_cmd = on_command("进群拉黑", priority=5, block=True)
+blk_off_cmd = on_command("解除拉黑", aliases={"进群解除拉黑"}, priority=5, block=True)
+blk_list_cmd = on_command("拉黑列表", aliases={"进群拉黑列表"}, priority=5, block=True)
+
+
+def _load_guard() -> dict:
+    return load_json_state(GUARD_FILE, _GUARD_LOCK)
+
+
+def _save_guard(data: dict) -> None:
+    save_json_state(GUARD_FILE, data, _GUARD_LOCK)
+
+
+def _guard_block_reason(uid: int) -> str:
+    """返回非空表示该申请人本次不应自动通过（转人工）：blacklist / reapply。"""
+    data = _load_guard()
+    blacklist = data.get("blacklist") if isinstance(data.get("blacklist"), dict) else {}
+    if str(uid) in blacklist:
+        return "blacklist"
+    approved = data.get("approved") if isinstance(data.get("approved"), dict) else {}
+    last = approved.get(str(uid))
+    try:
+        if last and time.time() - float(last) < _REAPPLY_MANUAL_DAYS * 86400:
+            return "reapply"
+    except (TypeError, ValueError):
+        pass
+    return ""
+
+
+def _guard_mark_approved(uid: int) -> None:
+    """记录一次自动通过时间戳；只保留近 60 天记录防文件无限增长。"""
+    with _GUARD_LOCK:
+        data = _load_guard()
+        approved = data.get("approved") if isinstance(data.get("approved"), dict) else {}
+        cutoff = time.time() - 60 * 86400
+        approved = {
+            k: v for k, v in approved.items()
+            if isinstance(v, (int, float)) and v >= cutoff
+        }
+        approved[str(uid)] = time.time()
+        data["approved"] = approved
+        _save_guard(data)
+
+
+def _guard_blacklist(nums: list[str]) -> None:
+    with _GUARD_LOCK:
+        data = _load_guard()
+        blacklist = data.get("blacklist") if isinstance(data.get("blacklist"), dict) else {}
+        for n in nums:
+            blacklist[n] = time.time()
+        data["blacklist"] = blacklist
+        _save_guard(data)
+
+
+def _guard_unblacklist(nums: list[str]) -> list[str]:
+    with _GUARD_LOCK:
+        data = _load_guard()
+        blacklist = data.get("blacklist") if isinstance(data.get("blacklist"), dict) else {}
+        removed = [n for n in nums if blacklist.pop(n, None) is not None]
+        data["blacklist"] = blacklist
+        _save_guard(data)
+        return removed
 
 auto_on_cmd = on_command("自动通过", aliases={"自动同意"}, priority=5, block=True)
 auto_off_cmd = on_command("自动通过关闭", aliases={"自动同意关闭"}, priority=5, block=True)
@@ -51,16 +121,34 @@ auto_show_cmd = on_command("自动通过查看", aliases={"自动同意查看"},
 auto_count_cmd = on_command("自动通过数量", aliases={"自动同意数量", "自动通过统计", "自动同意统计"}, priority=5, block=True)
 
 _pending: dict[str, dict] = {}
+_notify_index: dict[str, str] = {}  # 机器人发给主人的申请通知 message_id -> pending flag
 _save_lock = threading.Lock()
 _PENDING_TTL = 48 * 3600  # 与 QQ 侧 flag 有效期一致
 
 
 def _purge_pending() -> None:
-    """清理超过 TTL 的待处理申请，防止内存无限增长。"""
+    """清理超过 TTL 的待处理申请与失效的通知索引，防止内存无限增长。"""
     now = time.time()
     for key in list(_pending):
         if now - _pending[key].get("ts", 0) > _PENDING_TTL:
             _pending.pop(key, None)
+    for mid in list(_notify_index):
+        if _notify_index[mid] not in _pending:
+            _notify_index.pop(mid, None)
+
+
+def _remember_notify(resp, flag: str) -> None:
+    """登记申请通知消息的 message_id，供私聊引用回复时精确路由审批目标。"""
+    try:
+        mid = resp.get("message_id") if isinstance(resp, dict) else None
+    except Exception:
+        mid = None
+    if mid is None:
+        return
+    if len(_notify_index) > 200:  # 有界：只留最近 200 条
+        for k in list(_notify_index)[: len(_notify_index) - 100]:
+            _notify_index.pop(k, None)
+    _notify_index[str(mid)] = flag
 
 
 def _load_config() -> dict:
@@ -109,8 +197,12 @@ async def _auto_approve(bot: Bot, event: GroupRequestEvent, comment: str) -> boo
     comment_lower = comment.lower()  # 大小写不敏感匹配（中文不受影响）
     hit = [k for k in keywords if k.lower() in comment_lower]
     if hit:
+        # 安全闸：黑名单成员与 N 天内已自动通过过的同号申请一律转人工
+        if _guard_block_reason(event.user_id):
+            return False
         try:
             await bot.set_group_add_request(flag=event.flag, sub_type=event.sub_type, approve=True)
+            _guard_mark_approved(event.user_id)  # 只在实际通过后记账
             await bot.send_private_msg(
                 user_id=int(OWNER),
                 message=MessageSegment.text(
@@ -201,6 +293,61 @@ async def auto_show(bot: Bot, event: MessageEvent):
     await auto_show_cmd.finish("\n".join(lines))
 
 
+# ---------------- 拉黑名单管理（owner） ----------------
+def _parse_qq_args(arg) -> list[str]:
+    return [p for p in re.split(r"[\s,，、]+", arg.extract_plain_text().strip()) if p.isdigit()]
+
+
+@blk_on_cmd.handle()
+async def blk_add(bot: Bot, event: MessageEvent, arg=CommandArg()):
+    if not is_owner(event):
+        await blk_on_cmd.finish("❌ 你没有权限使用此功能")
+    nums = _parse_qq_args(arg)
+    if not nums:
+        await blk_on_cmd.finish("用法：.进群拉黑 <QQ号> [更多QQ号...]\n例如：.进群拉黑 123456 789012\n拉黑后这些号码的进群申请将永不自动通过")
+    _guard_blacklist(nums)
+    await _finish_owner_config(bot, blk_on_cmd, event,
+                               f"⛔ 已拉黑 {len(nums)} 个 QQ：{'、'.join(nums)}\n其进群申请将不再自动通过，一律转人工")
+
+
+@blk_off_cmd.handle()
+async def blk_remove(bot: Bot, event: MessageEvent, arg=CommandArg()):
+    if not is_owner(event):
+        await blk_off_cmd.finish("❌ 你没有权限使用此功能")
+    nums = _parse_qq_args(arg)
+    if not nums:
+        await blk_off_cmd.finish("用法：.解除拉黑 <QQ号> [更多QQ号...]\n例如：.解除拉黑 123456")
+    removed = _guard_unblacklist(nums)
+    missing = [n for n in nums if n not in removed]
+    text = f"✅ 已移出拉黑：{'、'.join(removed)}" if removed else "没有匹配的记录"
+    if missing:
+        text += f"\nℹ️ 不在名单中：{'、'.join(missing)}"
+    await _finish_owner_config(bot, blk_off_cmd, event, text)
+
+
+@blk_list_cmd.handle()
+async def blk_show(bot: Bot, event: MessageEvent):
+    if not is_owner(event):
+        await blk_list_cmd.finish("❌ 你没有权限使用此功能")
+    data = _load_guard()
+    blacklist = data.get("blacklist") if isinstance(data.get("blacklist"), dict) else {}
+    if not blacklist:
+        await _finish_owner_config(bot, blk_list_cmd, event, "⛔ 进群拉黑名单为空\n用 .进群拉黑 <QQ号> 添加")
+        return
+    ids = sorted(blacklist)
+    shown = ids[:50]
+    text = f"⛔ 进群拉黑名单（共 {len(ids)} 人）：\n" + "、".join(shown)
+    if len(ids) > len(shown):
+        text += f"\n…其余 {len(ids) - len(shown)} 人略"
+    approved = data.get("approved") if isinstance(data.get("approved"), dict) else {}
+    recent = sum(
+        1 for v in approved.values()
+        if isinstance(v, (int, float)) and time.time() - v < _REAPPLY_MANUAL_DAYS * 86400
+    )
+    text += f"\n⏳ 节流期中（{_REAPPLY_MANUAL_DAYS} 天内已自动通过过）：{recent} 人"
+    await _finish_owner_config(bot, blk_list_cmd, event, text)
+
+
 # ---------------- 好友申请 / 加群申请 ----------------
 @auto_count_cmd.handle()
 async def auto_count(bot: Bot, event: MessageEvent, arg=CommandArg()):
@@ -233,6 +380,16 @@ async def handle_request(bot: Bot, event):
             "加群申请未自动通过: group=%s user=%s sub=%s comment=%r",
             event.group_id, event.user_id, event.sub_type, event.comment,
         )
+        # 转人工时提示安全闸状态，主人可据此提高警惕
+        blocked_note = ""
+        reason = _guard_block_reason(event.user_id)
+        if reason == "blacklist":
+            blocked_note = "\n⛔ 该申请人在进群拉黑名单中，请谨慎处理（可用 .解除拉黑 <QQ号> 移出）"
+        elif reason == "reapply":
+            blocked_note = (
+                f"\n⏳ 该账号 {_REAPPLY_MANUAL_DAYS} 天内已被自动通过过一次"
+                f"（退了又进），请核实后再处理"
+            )
         _pending[event.flag] = {
             "kind": "group", "flag": event.flag,
             "sub_type": event.sub_type, "group_id": event.group_id,
@@ -244,6 +401,7 @@ async def handle_request(bot: Bot, event):
             f"👤 申请人：{event.user_id}（{ts}）\n"
             f"💬 附言：{event.comment or '无'}\n"
             f"✍️ 群里直接回复「同意」或「拒绝」即可处理（无需@机器人，结果将私聊发给你），私聊回复也可以"
+            + blocked_note
         )
     elif isinstance(event, FriendRequestEvent):
         _pending[event.flag] = {
@@ -273,7 +431,8 @@ async def handle_request(bot: Bot, event):
         return
     try:
         # MessageSegment.text 包裹：附言等申请人可控文本不会被解析为 CQ 码（防注入）
-        await bot.send_private_msg(user_id=int(OWNER), message=MessageSegment.text(msg))
+        resp = await bot.send_private_msg(user_id=int(OWNER), message=MessageSegment.text(msg))
+        _remember_notify(resp, event.flag)
     except Exception:
         _logger.warning("申请通知私发失败", exc_info=True)
 
@@ -314,32 +473,17 @@ async def _process_decision(bot: Bot, event: MessageEvent, action: bool) -> None
             return
         target_key = candidates[0][0]
     else:
-        reply_id = None
+        reply_id = ""
         for seg in event.message:
             if seg.type == "reply":
-                reply_id = seg.data.get("id")
+                reply_id = str(seg.data.get("id") or "")
                 break
+        # 审批路由只信任「机器人发出的申请通知」的 message_id（发送时登记于 _notify_index）。
+        # 不解析被引用消息的文本内容：那可能是转发自陌生人的全文，能伪造「申请人：/群号：」行，
+        # 主人一旦引用它回复同意，就会把操作路由到攻击者指定的其他申请上。
         if reply_id:
-            try:
-                info = await bot.get_msg(message_id=int(reply_id))
-                quoted = str(info.get("raw_message") or "")
-                m = re.search(r"申请人[:：](\d+)", quoted)
-                if m:
-                    uid = m.group(1)
-                    for k, v in _pending.items():
-                        if v["kind"] == "friend" and str(v.get("user_id")) == uid:
-                            target_key = k
-                            break
-                if target_key is None:
-                    m = re.search(r"群号[:：](\d+)", quoted)
-                    if m:
-                        gid = int(m.group(1))
-                        for k, v in _pending.items():
-                            if v["kind"] == "group" and v.get("group_id") == gid:
-                                target_key = k
-                                break
-            except Exception:
-                _logger.warning("引用消息解析失败，回退到默认申请选择", exc_info=True)
+            candidate = _notify_index.get(reply_id)
+            target_key = candidate if candidate in _pending else None
 
         if target_key is None:
             if len(_pending) == 1:
@@ -347,7 +491,7 @@ async def _process_decision(bot: Bot, event: MessageEvent, action: bool) -> None
             else:
                 await _send_decision_notice(
                     bot,
-                    "⚠️ 有多个待处理申请，请回复时引用对应的通知消息来指定处理哪一个",
+                    "⚠️ 有多个待处理申请，请回复时引用机器人发来的申请通知消息来指定处理哪一个",
                 )
                 return
 
