@@ -6,7 +6,6 @@ from conftest import FinishedException, GroupMessageEvent, MessageSegment
 
 from helpers import load_plugin
 import sys
-import importlib
 
 # 移除缓存的旧模块，确保测试反映最新的插件代码
 sys.modules.pop("plugin_btd6", None)
