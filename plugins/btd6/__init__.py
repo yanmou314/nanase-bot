@@ -1930,7 +1930,7 @@ def player_html(col: dict) -> str:
 
 # ---------------- 参数解析 ----------------
 
-RUSH_WORDS = {"rush", "冲刺", "bossrush", "bossRush", "冲刺赛", "rush"}
+RUSH_WORDS = {"rush", "冲刺", "bossrush", "bossRush", "冲刺赛"}
 RACE_WORDS = {"race", "races", "竞速", "竞赛"}
 BOSS_WORDS = {"boss", "bosses", "首领", "boss战", "魔王"}
 CT_WORDS = {"ct", "领土", "争夺", "争夺领土"}
@@ -3194,7 +3194,7 @@ async def collect_rush() -> dict:
     if not ev:
         return {"empty": "当前没有 Boss Rush 活动"}
     islands = []
-    for idx, (name, png, emoji_hex) in enumerate(_RUSH_BOSSES, 1):
+    for idx, (name, png, _emoji_hex) in enumerate(_RUSH_BOSSES, 1):
         boss_url = _ui_asset_data_url(png) or _ui_asset_data_url("boss-event.png") or ""
         islands.append({
             "name": f"Island {idx} · {name}",
@@ -3250,9 +3250,6 @@ def _rush_diff_html(col: dict, d: str = "default", label: str = "") -> str:
     maps = diff.get("maps") or []
 
     state = _state_of(ev, bucket_now())
-    lives = int((meta or {}).get("startingHealth") or 0)
-    seats = int((meta or {}).get("maxMonkeySeats") or 0)
-    towers_cap = int((meta or {}).get("maxMonkeysOnBoat") or 0)
     is_extreme = bool((meta or {}).get("isExtreme"))
     event_name = (ev.get("name") or "Boss Rush").strip() or "Boss Rush"
 
