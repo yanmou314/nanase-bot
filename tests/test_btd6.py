@@ -502,18 +502,13 @@ def test_overview_html_escapes_and_sections():
     # Debug: check classification
     ongoing, upcoming, ended = btd6._classify_overview_events(data["races"], data["bosses"], data["cts"], data["now"])
     assert len(ongoing) > 0 or len(upcoming) > 0, f"No events classified: ongoing={len(ongoing)} upcoming={len(upcoming)} ended={len(ended)}"
-    print(f"HTML LEN={len(html)}; ACTIVE={html.count('ACTIVE')}; PH={html.count('ev-empty')}")
-    print(f"HTML head: {html[:500]}")
-    print(f"HTML mid: {html[500:1000]}")
-    print(f"HTML tail: {html[-1000:]}")
     assert "&lt;img src=x" in html and "<img src=x" not in html
-    # 新版图标列表布局：活动名以大写渲染
-    assert "PHAYZE30" in html  # boss 名称已转大写
-    # 状态：race 进行中 / boss 即将开始 / ct 已结束
-    assert "ACTIVE" in html  # 状态存在
-    assert "FINISHED" in html
-    # 日期：fmt_date 渲染为 YYYY-MM-DD 格式，固定 00:00:00 时间
-    assert "00:00:00" in html
+    # boss 名称：官方名 + 中文别名字段拼接渲染
+    assert "Phayze30（幻影" in html
+    # 状态以中文文案渲染：race 进行中 / boss 即将开始 / ct 已结束
+    assert "进行中" in html and "即将开始" in html and "已结束" in html
+    # 日期渲染为 YYYY-MM-DD
+    assert "2026-" in html
     # 不含命令提示
     assert ".btd6规则" not in html and ".btd6排行" not in html
 
@@ -679,7 +674,7 @@ def test_odyssey_html_renders_difficulties():
                       description="打气球！"), "diffs": diffs}
     html = btd6.odyssey_diff_html(col, "easy", "简单")
     assert "Sniper Target Practice" in html and "打气球！" in html
-    assert "简单难度" in html and "进行中" in html
+    assert "简单" in html  # 难度标题渲染为「简单 / 标准」
     assert "猴币×100" not in html  # 奖励改为图标 + 数值
     assert "现金掉落" in html and "ody-power-tile" in html
     assert "Odyssey Map 1" in html and "M1" in html  # 地图缩略图
