@@ -195,10 +195,14 @@ def render_html_to_png(html: str, prefix: str, cache_dir: str, max_age: int = 24
     path = os.path.join(cache_dir, f"{prefix}_{stamp}.png")
     try:
         HTML(string=html, url_fetcher=_local_only_fetcher).write_pdf(tmp_pdf)
-        subprocess.run(
-            ["pdftoppm", "-png", "-r", str(dpi), "-singlefile", tmp_pdf, path[:-4]],
-            check=True, capture_output=True,
-        )
+        try:
+            subprocess.run(
+                ["pdftoppm", "-png", "-r", str(dpi), "-singlefile", tmp_pdf, path[:-4]],
+                check=True, capture_output=True, timeout=60,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # 不加超时会让挂死的 pdftoppm 永久占住 RENDER_SEM(1)，全站渲染瘫痪
+            raise RuntimeError("pdftoppm render timed out after 60s") from exc
     finally:
         if os.path.exists(tmp_pdf):
             os.remove(tmp_pdf)

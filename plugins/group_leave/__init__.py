@@ -21,7 +21,7 @@ STATE_FILE = os.path.join(os.path.dirname(__file__), "join_state.json")
 
 # (group_id, user_id) -> 入群时间戳
 _join_ts: dict = {}
-_JOIN_MAX_KEYS = 100000  # 防止字典无限增长，超过后清理 30 天前的记录
+_JOIN_MAX_KEYS = 20000  # 防止字典无限增长，超过后清理 30 天前的记录（全量 dict 常驻内存，2 万条约 3-5MB）
 _JOIN_TTL = 30 * 86400
 
 _imported_groups: set = set()  # 本次进程已导入过的群，避免重复拉取

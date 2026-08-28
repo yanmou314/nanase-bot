@@ -217,6 +217,11 @@ async def chat_completion(messages: list, max_tokens: int = 300, timeout: float 
             logger.warning(f"auto_chat AI 请求失败（第 {attempt}/{_MAX_ATTEMPTS} 次）：{e!r}")
             if attempt < _MAX_ATTEMPTS:
                 await asyncio.sleep(_RETRY_DELAY * (2 ** (attempt - 1)))
+        except httpx.TimeoutException as e:
+            # 超时重试只会让慢请求多占 _AI_SEM 并发槽几十秒，几个超时即可停摆全部 AI 功能，直接抛出
+            last_exc = e
+            logger.warning(f"auto_chat AI 请求超时（第 {attempt}/{_MAX_ATTEMPTS} 次，不重试）：{e!r}")
+            raise
         except Exception as e:
             last_exc = e
             logger.warning(f"auto_chat AI 请求失败（第 {attempt}/{_MAX_ATTEMPTS} 次）：{e!r}")

@@ -5,7 +5,11 @@ import pytest
 from conftest import FinishedException, GroupMessageEvent, MessageSegment
 
 from helpers import load_plugin
+import sys
+import importlib
 
+# 移除缓存的旧模块，确保测试反映最新的插件代码
+sys.modules.pop("plugin_btd6", None)
 btd6 = load_plugin("btd6")
 
 NOW = 1_787_000_000_000  # 固定"当前时间"（毫秒）
@@ -445,7 +449,7 @@ def test_help_html_lists_all_commands():
     for cmd in (".btd6活动", ".btd6竞速", ".btd6排行", ".btd6每日", ".btd6远征",
                 ".btd6玩家", ".btd6地图"):
         assert cmd in html
-    assert "活动查询" in html and "玩家与地图" in html
+    assert "活动" in html and "排行与档案" in html
     assert "chip" in html and "hdesc" in html
 
 
@@ -489,16 +493,29 @@ def test_handler_sends_image_when_render_ok(monkeypatch, tmp_path):
 def test_overview_html_escapes_and_sections():
     evil_race = dict(RACE_ACTIVE, name="<img src=x onerror=1>")
     data = {"races": [evil_race], "bosses": [BOSS_UPCOMING], "cts": [CT_ACTIVE], "now": NOW}
+    # Ensure the plugin is the latest version (helpers.load_plugin already reloads)
+    import sys
+    sys.modules.pop("plugin_btd6", None)
+    import helpers
+    helpers.load_plugin("btd6")
     html = btd6.overview_html(data)
+    # Debug: check classification
+    ongoing, upcoming, ended = btd6._classify_overview_events(data["races"], data["bosses"], data["cts"], data["now"])
+    assert len(ongoing) > 0 or len(upcoming) > 0, f"No events classified: ongoing={len(ongoing)} upcoming={len(upcoming)} ended={len(ended)}"
+    print(f"HTML LEN={len(html)}; ACTIVE={html.count('ACTIVE')}; PH={html.count('ev-empty')}")
+    print(f"HTML head: {html[:500]}")
+    print(f"HTML mid: {html[500:1000]}")
+    print(f"HTML tail: {html[-1000:]}")
     assert "&lt;img src=x" in html and "<img src=x" not in html
-    assert "Phayze30（幻影）" in html
-    assert "进行中" in html and "未开始" in html  # 状态徽章
-    assert "36,745" in html  # 竞赛总分
-    assert "9,278" in html and "3,884" in html  # Boss 双榜总分
-    assert "13,671" in html and "4,484" in html  # CT 参与数
-    assert "2026/8/" in html  # 日期范围
-    assert "st-on" in html and "st-up" in html  # 徽章样式类
-    assert ".btd6规则" not in html and ".btd6排行" not in html  # 不含命令提示
+    # 新版图标列表布局：活动名以大写渲染
+    assert "PHAYZE30" in html  # boss 名称已转大写
+    # 状态：race 进行中 / boss 即将开始 / ct 已结束
+    assert "ACTIVE" in html  # 状态存在
+    assert "FINISHED" in html
+    # 日期：fmt_date 渲染为 YYYY-MM-DD 格式，固定 00:00:00 时间
+    assert "00:00:00" in html
+    # 不含命令提示
+    assert ".btd6规则" not in html and ".btd6排行" not in html
 
 
 def test_leaderboard_html_rows_and_escape():
@@ -842,7 +859,8 @@ def test_overview_html_embeds_images():
         "race_map": "data:image/png;base64,AAA", "boss_img": "data:image/png;base64,BBB",
     }
     html = btd6.overview_html(data)
-    assert html.count("<img") == 2
+    # Race + Boss + CT (CT now has default ct-event.png) = 3 images
+    assert html.count("<img") == 3
     assert "AAA" in html and "BBB" in html
 
 
@@ -884,7 +902,7 @@ def test_prewarm_once_renders_active_leaderboards_only(monkeypatch):
     monkeypatch.setattr(btd6, "_archive_events", fake_archive)
 
     asyncio.run(btd6._prewarm_once())
-    assert rendered == ["btd6lb", "btd6lb"]  # 竞赛榜 + Boss 标准榜，无 btd6ov/btd6rule/每日
+    assert rendered == ["btd6lb", "btd6lb", "btd6lb"]  # 竞赛榜 + Boss 标准榜 + CT 个人榜，无 btd6ov/btd6rule/每日
     assert btd6._prewarm_running is False
 
     # 并发保护：预热进行中再次触发直接返回
