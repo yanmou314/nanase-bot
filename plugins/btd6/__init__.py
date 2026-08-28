@@ -37,6 +37,8 @@ URL_CT = f"{API_ROOT}/btd6/ct"
 URL_MAP_FILTER = API_ROOT + "/btd6/maps/filter/{}"
 URL_DAILY = f"{API_ROOT}/btd6/challenges/filter/daily"
 URL_ODYSSEY = f"{API_ROOT}/btd6/odyssey"
+URL_EVENTS = f"{API_ROOT}/btd6/events"
+URL_RUSH = f"{API_ROOT}/btd6/bossRush"
 URL_USERS = f"{API_ROOT}/btd6/users/"
 
 DEFAULT_ROWS = 10  # 排行榜/地图列表默认条数
@@ -55,8 +57,9 @@ CARD_MAX_AGE = 6 * 60 * 60   # 渲染缓存文件存活时长
 ASSET_TTL = 7 * 24 * 60 * 60  # 素材落盘缓存时长（版本更新才会变）
 CARD_DPI = 120                # 渲染分辨率：小机器上 144 → 120 明显提速，QQ 显示足够
 # 规则与远征卡片的数据通常会持续数天甚至数周不变，单独放在持久缓存目录。
-# 排行榜、每日挑战等实时内容仍使用普通缓存，避免旧数据长期占用空间。
-PERSISTENT_CARD_PREFIXES = {"btd6rule", "btd6ody"}
+# 帮助菜单（btd6help）内容完全静态、不依赖任何 API/时间，必须持久化以保证
+# 首屏秒回；其余实时内容（排行榜/每日/总览）仍使用普通缓存，避免旧数据占用空间。
+PERSISTENT_CARD_PREFIXES = {"btd6rule", "btd6ody", "btd6help"}
 PERSISTENT_CARD_FILES = 128
 PERSISTENT_CARD_BYTES = 256_000_000
 MAX_JSON_BYTES = 8_000_000
@@ -137,31 +140,37 @@ async def _enforce_cooldown(matcher, event, command: str, weight: str = "default
         await matcher.finish(f"⏳ 请求太频繁，请 {remaining} 秒后再试")
 
 HELP_GROUPS = [
-    ("活动查询", [
-        (".btd6活动", "当前竞赛/Boss/争夺领土横幅总览"),
-        (".btd6竞速 [竞赛|boss]", "竞赛/Boss 活动规则详情（Boss 标准+精英一起返回）"),
-        (".btd6排行 竞赛|boss|领土 [P页码|排名]", "排行榜：默认前50；P2=第2页；数字=该名次玩家档案（Boss双榜/领土双榜自动返回）"),
+    ("活动", [
+        (".btd6活动", "当前竞赛/Boss/争夺领土/远征总览（三段式）"),
         (".btd6每日", "今日每日挑战（标准+高级一起返回）"),
+        (".btd6竞速 [竞赛|boss]", "竞赛/Boss 活动规则详情（Boss 标准+精英一起返回）"),
         (".btd6远征", "当前远征 Odyssey"),
+        (".btd6领土", "争夺领土详情"),
+        (".btd6冲刺", "Boss Rush 冲刺"),
     ]),
-    ("玩家与地图", [
+    ("排行与档案", [
+        (".btd6排行 竞赛|boss|领土 [P页码|排名]", "排行榜：默认前50；P2=第2页；数字=该名次玩家档案（Boss双榜/领土双榜自动返回）"),
         (".btd6玩家 <ID>", "玩家档案"),
         (".btd6地图 最新|热门|点赞 [数量]", "自制地图榜单"),
         (".btd6历史 [竞速|boss|领土|远征|每日] [数量]", "本地归档的历史活动（API 只保留近几期）"),
+        (".btd6预热", "手动预热全部活动（仅主人）"),
     ]),
 ]
 
 HELP_TEXT = """🐒 BTD6 情报站（气球塔防6）
-.btd6活动 — 当前竞赛/Boss/争夺领土总览
-.btd6排行 竞赛|boss|领土 [P页码|排名] — 排行榜：默认前50；P2=第2页；数字=该名次玩家档案（Boss标准+精英、领土个人+战队一起返回）
-.btd6竞速 [竞赛|boss] — 竞赛/Boss 活动规则详情（Boss 标准+精英一起返回；领土暂无通用规则）
+.btd6活动 — 当前竞赛/Boss/争夺领土/远征总览（三段式：进行中/即将开始/已结束）
 .btd6每日 — 今日每日挑战（标准+高级一起返回）
+.btd6竞速 [竞赛|boss] — 竞赛/Boss 活动规则详情（Boss 标准+精英一起返回；领土暂无通用规则）
 .btd6远征 — 当前远征活动
+.btd6领土 — 争夺领土详情
+.btd6冲刺 — Boss Rush 冲刺
+.btd6排行 竞赛|boss|领土 [P页码|排名] — 排行榜：默认前50；P2=第2页；数字=该名次玩家档案（Boss标准+精英、领土个人+战队一起返回）
 .btd6玩家 <ID> — 玩家档案（排行榜链接末尾的长串十六进制）
 .btd6地图 最新|热门|点赞 [数量] — 自制地图榜单
 .btd6历史 [竞速|boss|领土|远征|每日] [数量] — 本地归档的历史活动（API 只保留近几期）
+.btd6预热 — 手动预热全部活动（仅主人）
 数据源：Ninja Kiwi 官方开放数据接口"""
-LB_USAGE = "用法：.btd6排行 竞赛|boss|领土 [P页码|排名]\n例：.btd6排行 竞赛 — 前50\n.btd6排行 竞赛 P2 — 第2页\n.btd6排行 竞赛 7 — 第7名玩家档案\nboss 自动返回标准+精英双榜，领土 自动返回个人+战队双榜"
+LB_USAGE = "用法：.btd6排行 竞赛|boss|领土|冲刺 [P页码|排名]\n例：.btd6排行 竞赛 — 前50\n.btd6排行 竞赛 P2 — 第2页\n.btd6排行 竞赛 7 — 第7名玩家档案\nboss 自动返回标准+精英双榜，领土 自动返回个人+战队双榜，冲刺暂无榜单"
 
 # ---------------- 请求边界与内存 TTL 缓存 ----------------
 
@@ -280,14 +289,23 @@ def _sniff_mime(data: bytes) -> str:
 
 
 _asset_mem: OrderedDict[str, str] = OrderedDict()
+_asset_mem_sizes: dict[str, int] = {}
 _asset_mem_lock = threading.Lock()
+# 素材 data URL 常驻内存的硬预算：只限条数时 256 条大图可吃掉数百 MB
+MAX_ASSET_MEM_BYTES = 64_000_000
 
 
 def _remember_asset(url: str, data_url: str) -> None:
     with _asset_mem_lock:
         _asset_mem[url] = data_url
+        _asset_mem_sizes[url] = len(data_url)
         _asset_mem.move_to_end(url)
-        _prune_ordered(_asset_mem, MAX_ASSET_MEM_ITEMS)
+        for stale in [k for k in _asset_mem_sizes if k not in _asset_mem]:
+            _asset_mem_sizes.pop(stale, None)
+        total = sum(_asset_mem_sizes.values())
+        while (total > MAX_ASSET_MEM_BYTES or len(_asset_mem) > MAX_ASSET_MEM_ITEMS) and _asset_mem:
+            oldest, _ = _asset_mem.popitem(last=False)
+            total -= _asset_mem_sizes.pop(oldest, 0)
 
 
 async def _asset_data_url(url: str, max_bytes: int = 3_000_000) -> str:
@@ -525,6 +543,57 @@ def bucket_now() -> int:
     return int(time.time() * 1000) // BUCKET_MS * BUCKET_MS
 
 
+def _classify_overview_events(
+    races: list, bosses: list, cts: list, now_ms: int, odysseys: list | None = None, rush: list | None = None,
+) -> tuple[list[tuple[dict, str]], list[tuple[dict, str]], list[tuple[dict, str]]]:
+    """将全部活动按时间状态分为三类：进行中 / 即将开始 / 已结束(近5).
+
+    返回 (ongoing, upcoming, ended)，每项为 (ev, kind) 其中 kind ∈ {race,boss,ct,odyssey}.
+    - ongoing:  start <= now < end，按结束时间升序（先结束的在前）
+    - upcoming: start > now，按开始时间升序（最近开始的在前）
+    - ended:    end <= now，按结束时间降序取前 5（最近结束的在前）
+    兼容旧调用：odysseys 为空时与旧版一致。
+    """
+    all_events: list[tuple[dict, str]] = []
+    for ev in races or []:
+        if isinstance(ev, dict):
+            all_events.append((ev, "race"))
+    for ev in bosses or []:
+        if isinstance(ev, dict):
+            all_events.append((ev, "boss"))
+    for ev in cts or []:
+        if isinstance(ev, dict):
+            all_events.append((ev, "ct"))
+    for ev in odysseys or []:
+        if isinstance(ev, dict):
+            all_events.append((ev, "odyssey"))
+    for ev in rush or []:
+        if isinstance(ev, dict):
+            all_events.append((ev, "rush"))
+    ongoing: list[tuple[dict, str]] = []
+    upcoming: list[tuple[dict, str]] = []
+    ended: list[tuple[dict, str]] = []
+    for ev, kind in all_events:
+        try:
+            s = int(ev.get("start") or 0)
+            e = int(ev.get("end") or 0)
+        except (TypeError, ValueError):
+            continue
+        if e <= 0 or s <= 0:
+            continue
+        if s <= now_ms < e:
+            ongoing.append((ev, kind))
+        elif now_ms < s:
+            upcoming.append((ev, kind))
+        elif now_ms >= e:
+            ended.append((ev, kind))
+    ongoing.sort(key=lambda x: int(x[0].get("end") or 0))
+    upcoming.sort(key=lambda x: int(x[0].get("start") or 0))
+    ended.sort(key=lambda x: int(x[0].get("end") or 0), reverse=True)
+    ended = ended[:5]
+    return ongoing, upcoming, ended
+
+
 # ---------------- 常用名词翻译 ----------------
 
 BOSS_CN = {
@@ -674,13 +743,95 @@ def _ct_overview(cts: list, now_ms: int) -> list[str]:
     ]
 
 
-def build_overview(races: list, bosses: list, cts: list, now_ms: int) -> str:
+def _single_event_text(ev: dict, kind: str, now_ms: int) -> list[str]:
+    """单场活动的文本行（与 _race/_boss/_ct_overview 保持同格式，确保可通过现有单测）。"""
+    if kind == "race":
+        total = int(ev.get("totalScores") or 0)
+        return [
+            f"🏁 每周竞赛「{(ev.get('name') or '').strip()}」",
+            f"   {event_status_line(ev, now_ms)}",
+            f"   👥 参与人数 {total:,}",
+        ]
+    if kind == "boss":
+        name = (ev.get("name") or "").strip()
+        title = f"👹 Boss 事件「{name}」"
+        bt = boss_cn(ev.get("bossType"))
+        if bt:
+            title += f"（{bt}）"
+        std = SCORING_CN.get(str(ev.get("normalScoringType") or ""), str(ev.get("normalScoringType") or ""))
+        elite = SCORING_CN.get(str(ev.get("eliteScoringType") or ""), str(ev.get("eliteScoringType") or ""))
+        n_std = int(ev.get("totalScores_standard") or 0)
+        n_elite = int(ev.get("totalScores_elite") or 0)
+        return [
+            title,
+            f"   {event_status_line(ev, now_ms)}",
+            f"   📊 标准模式 {std} · 精英模式 {elite}",
+            f"   👥 参与：标准 {n_std:,} · 精英 {n_elite:,}",
+        ]
+    if kind == "odyssey":
+        name = (ev.get("name") or "").strip() or "远征"
+        desc = (ev.get("description") or "").strip()
+        lines = [
+            f"🏰 远征「{name}」",
+            f"   {event_status_line(ev, now_ms)}",
+        ]
+        if desc:
+            # 远征描述可能较长，截断到 60 字避免刷屏
+            short = desc[:60] + ("…" if len(desc) > 60 else "")
+            lines.append(f"   📜 {short}")
+        return lines
+    # ct
+    n_player = int(ev.get("totalScores_player") or 0)
+    n_team = int(ev.get("totalScores_team") or 0)
+    return [
+        "🏰 争夺领土（CT）",
+        f"   {event_status_line(ev, now_ms)}",
+        f"   👥 参与：个人 {n_player:,} · 战队 {n_team:,}",
+    ]
+
+
+def build_overview(races: list, bosses: list, cts: list, now_ms: int, odysseys: list | None = None, rush: list | None = None) -> str:
+    """三段式总览：进行中 / 即将开始 / 已结束(近5)，从上到下排列。
+
+    odysseys 为可选的远征列表，未传时与旧版一致（仅 race/boss/ct）。
+    """
+    odysseys = odysseys or []
+    rush = rush or []
+    ongoing, upcoming, ended = _classify_overview_events(races, bosses, cts, now_ms, odysseys, rush)
     parts = ["🎮 BTD6 当前活动", ""]
-    parts += _race_overview(races, now_ms)
+    # 进行中
+    parts.append(f"🟢 正在进行 ({len(ongoing)})")
+    if not ongoing:
+        parts.append("  暂无")
+    else:
+        for ev, kind in ongoing:
+            parts.extend(_single_event_text(ev, kind, now_ms))
+            parts.append("")
+        # 去掉最后多余的空行并补一个分隔
+        if parts and parts[-1] == "":
+            parts.pop()
     parts.append("")
-    parts += _boss_overview(bosses, now_ms)
+    # 即将开始
+    parts.append(f"🟡 即将开始 ({len(upcoming)})")
+    if not upcoming:
+        parts.append("  暂无")
+    else:
+        for ev, kind in upcoming:
+            parts.extend(_single_event_text(ev, kind, now_ms))
+            parts.append("")
+        if parts and parts[-1] == "":
+            parts.pop()
     parts.append("")
-    parts += _ct_overview(cts, now_ms)
+    # 已结束（近5）
+    parts.append(f"⚪ 已结束 · 最近 {len(ended)} 场" if ended else "⚪ 已结束 · 最近 0 场")
+    if not ended:
+        parts.append("  暂无")
+    else:
+        for ev, kind in ended:
+            parts.extend(_single_event_text(ev, kind, now_ms))
+            parts.append("")
+        if parts and parts[-1] == "":
+            parts.pop()
     return "\n".join(parts)
 
 
@@ -695,25 +846,126 @@ async def _safe(coro):
         return None
 
 
+async def _race_event_map_url(ev: dict) -> str:
+    """单场竞赛的地图 data URL（经 metadata → mapURL → data URL），失败返回空串。"""
+    url = ev.get("metadata") if isinstance(ev, dict) else None
+    if not url:
+        return ""
+    try:
+        _validate_url(url)
+    except ValueError:
+        return ""
+    meta = await _safe(fetch_body(url))
+    if not isinstance(meta, dict) or not meta.get("mapURL"):
+        return ""
+    return await _safe(_asset_data_url(meta["mapURL"])) or ""
+
+
+async def _boss_event_image_url(ev: dict) -> str:
+    """单场 Boss 的头像 data URL，优先使用本地方形图标（296×295，适配 160×100 contain），失败回退远端宽图。"""
+    if isinstance(ev, dict):
+        # 本地方形图标在 160×100 contain 下显示完整且居中，比 1440×332 宽图更适合缩略
+        try:
+            local_asset = _boss_event_asset(ev)  # type: ignore[name-defined]  # 定义在后，运行时已就绪
+            if local_asset:
+                local_url = _ui_asset_data_url(local_asset)
+                if local_url:
+                    return local_url
+        except Exception:
+            pass
+    url = ev.get("bossTypeURL") if isinstance(ev, dict) else None
+    if not url:
+        return ""
+    try:
+        _validate_url(url)
+    except ValueError:
+        return ""
+    return await _safe(_asset_data_url(url)) or ""
+
+
 async def collect_overview(now_ms: int | None = None) -> dict:
     now = now_ms if now_ms is not None else bucket_now()
-    races, bosses, cts = await asyncio.gather(
+    races, bosses, cts, odysseys, rush_events = await asyncio.gather(
         fetch_body(URL_RACES), fetch_body(URL_BOSSES), fetch_body(URL_CT),
+        _safe(fetch_body(URL_ODYSSEY)),
+        _safe(fetch_body(URL_EVENTS)),
     )
+    # odysseys 可能为 None（网络失败）或非列表
+    if not isinstance(odysseys, list):
+        odysseys = []
+    # rush via events type bossRush
+    rush = []
+    if isinstance(rush_events, list):
+        rush = [e for e in rush_events if isinstance(e, dict) and e.get("type") == "bossRush"]
+    elif isinstance(rush_events, dict) and isinstance(rush_events.get("body"), list):
+        rush = [e for e in rush_events["body"] if isinstance(e, dict) and e.get("type") == "bossRush"]
     race = _pick_section(races, now)
     boss = _pick_section(bosses, now)
     meta = await _safe(fetch_body(race["metadata"])) if race and race.get("metadata") else None
     race_map = await _safe(_asset_data_url(meta.get("mapURL"))) if meta and meta.get("mapURL") else None
-    boss_img = await _safe(_asset_data_url(boss.get("bossTypeURL"))) if boss else None
+    # Boss 首图优先本地方形图标，避免 1440×332 宽图在 160×100 下被 contain 压成 37px 高
+    if boss:
+        try:
+            boss_img = await _boss_event_image_url(boss)
+        except Exception:
+            boss_img = await _safe(_asset_data_url(boss.get("bossTypeURL"))) or "" if boss.get("bossTypeURL") else ""
+    else:
+        boss_img = ""
+
+    # 为三段式总览预取每场活动的独立配图，避免“全部复用当前场配图”的错图问题。
+    # 仅对将要展示的场次取图：进行中 + 即将开始 + 已结束(近5)，并发拉取并走两级缓存。
+    ongoing, upcoming, ended = _classify_overview_events(races, bosses, cts, now, odysseys, rush)
+    display = ongoing + upcoming + ended
+    # 构建 id -> 图 映射
+    race_map_by_id: dict[str, str] = {}
+    boss_img_by_id: dict[str, str] = {}
+    # 保留旧的单图作为兜底（_overview_panel_html 会优先查按 id 的表，缺失再回退到旧字段）
+    if race and race.get("id"):
+        race_map_by_id[str(race.get("id"))] = race_map or ""
+    if boss and boss.get("id"):
+        boss_img_by_id[str(boss.get("id"))] = boss_img or ""
+
+    async def _fetch_race(ev_kind: tuple[dict, str]):
+        ev, kind = ev_kind
+        if kind != "race":
+            return
+        eid = str(ev.get("id") or "")
+        if not eid or eid in race_map_by_id:
+            return
+        url = await _race_event_map_url(ev)
+        if url:
+            race_map_by_id[eid] = url
+
+    async def _fetch_boss(ev_kind: tuple[dict, str]):
+        ev, kind = ev_kind
+        if kind != "boss":
+            return
+        eid = str(ev.get("id") or "")
+        if not eid or eid in boss_img_by_id:
+            return
+        url = await _boss_event_image_url(ev)
+        if url:
+            boss_img_by_id[eid] = url
+
+    # 并发预取（带 _safe，已在内部处理异常）
+    if display:
+        await asyncio.gather(*(_fetch_race(x) for x in display), *(_fetch_boss(x) for x in display))
+
     return {
-        "races": races, "bosses": bosses, "cts": cts, "now": now,
+        "races": races, "bosses": bosses, "cts": cts, "odysseys": odysseys, "rush": rush, "now": now,
         "race_map": race_map or "", "boss_img": boss_img or "",
         "race_meta": meta or {},
+        "race_map_by_id": race_map_by_id,
+        "boss_img_by_id": boss_img_by_id,
     }
 
 
 def overview_text(data: dict) -> str:
-    return build_overview(data["races"], data["bosses"], data["cts"], data["now"])
+    return build_overview(
+        data["races"], data["bosses"], data["cts"], data["now"],
+        data.get("odysseys") or [],
+        data.get("rush") or [],
+    )
 
 
 MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
@@ -795,6 +1047,17 @@ async def collect_leaderboard(kind: str, variant: str, rows: int) -> dict:
         head = f"Boss「{(ev.get('name') or '').strip()}」{label}排行榜（{mode_cn}）"
         if ev.get("bossTypeURL"):
             img = await _safe(_asset_data_url(ev["bossTypeURL"])) or ""
+    elif kind == "rush":
+        # Boss Rush 暂无公开排行榜接口（events 仅提供摘要），返回提示
+        try:
+            events = await fetch_body(URL_EVENTS)
+            rush_list = [e for e in events if isinstance(e, dict) and e.get("type") == "bossRush"]
+        except Exception:
+            rush_list = []
+        ev = pick_active(rush_list, now) or fallback_latest(rush_list)
+        if not ev:
+            return {"empty": "当前没有 Boss Rush 活动"}
+        return {"empty": "Boss Rush 排行榜暂未开放（NK 仅在 /btd6/events 提供摘要，详细榜单待开放）"}
     else:  # ct
         cts = await fetch_body(URL_CT)
         ev = pick_active(cts, now) or fallback_latest(cts)
@@ -1141,6 +1404,7 @@ def _odyssey_map_icons() -> dict[str, str]:
 
 
 _odyssey_thumb_mem: OrderedDict[str, str] = OrderedDict()
+_odyssey_thumb_lock = threading.Lock()
 
 
 def _odyssey_thumbnail_data_url(cache_key: str, data_url: str) -> str:
@@ -1148,10 +1412,12 @@ def _odyssey_thumbnail_data_url(cache_key: str, data_url: str) -> str:
     if not data_url or not data_url.startswith("data:image/"):
         return data_url
     key = str(cache_key or "") or hashlib.md5(data_url.encode("utf-8")).hexdigest()
-    hit = _odyssey_thumb_mem.get(key)
-    if hit:
-        _odyssey_thumb_mem.move_to_end(key)
-        return hit
+    # 缩略图现在经 to_thread 并发执行，缓存读写必须持锁
+    with _odyssey_thumb_lock:
+        hit = _odyssey_thumb_mem.get(key)
+        if hit:
+            _odyssey_thumb_mem.move_to_end(key)
+            return hit
     try:
         from PIL import Image
         raw = base64.b64decode(data_url.split(",", 1)[1], validate=True)
@@ -1164,9 +1430,10 @@ def _odyssey_thumbnail_data_url(cache_key: str, data_url: str) -> str:
         thumb = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
     except Exception:
         return data_url
-    _odyssey_thumb_mem[key] = thumb
-    _odyssey_thumb_mem.move_to_end(key)
-    _prune_ordered(_odyssey_thumb_mem, 64)
+    with _odyssey_thumb_lock:
+        _odyssey_thumb_mem[key] = thumb
+        _odyssey_thumb_mem.move_to_end(key)
+        _prune_ordered(_odyssey_thumb_mem, 64)
     return thumb
 
 
@@ -1207,7 +1474,8 @@ async def collect_odyssey() -> dict:
         async def map_entry(mp: dict) -> dict:
             map_url = mp.get("mapURL")
             source_img = await _safe(_asset_data_url(map_url)) if map_url else ""
-            img = _odyssey_thumbnail_data_url(map_url, source_img or "")
+            # PIL 缩放/编码是重 CPU 同步操作，放线程池避免卡住事件循环
+            img = await asyncio.to_thread(_odyssey_thumbnail_data_url, map_url, source_img or "")
             # 保留逐岛规则字段，图片卡片需要用它显示回合、难度、模式和强化状态。
             return {
                 "name": str(mp.get("name") or "?").strip(),
@@ -1662,6 +1930,7 @@ def player_html(col: dict) -> str:
 
 # ---------------- 参数解析 ----------------
 
+RUSH_WORDS = {"rush", "冲刺", "bossrush", "bossRush", "冲刺赛", "rush"}
 RACE_WORDS = {"race", "races", "竞速", "竞赛"}
 BOSS_WORDS = {"boss", "bosses", "首领", "boss战", "魔王"}
 CT_WORDS = {"ct", "领土", "争夺", "争夺领土"}
@@ -1674,6 +1943,8 @@ TEAM_WORDS = {"team", "战队", "团队"}
 def parse_kind(tokens: list[str]) -> str | None:
     for t in tokens:
         k = t.lower()
+        if k in RUSH_WORDS:
+            return "rush"
         if k in RACE_WORDS:
             return "race"
         if k in BOSS_WORDS:
@@ -2032,15 +2303,16 @@ def _odyssey_shell(body: str, h: int) -> str:
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
-@page {{ size: {ODYSSEY_CARD_W}px {h}px; margin: 0; }}
+@page {{ size: {ODYSSEY_CARD_W}px {h}px; margin: 0; background: #0b7180; }}
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-body {{ width: {ODYSSEY_CARD_W}px; min-height: {h}px; color: #ffffff;
+html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #ffffff;
         font-family: "WenQuanYi Micro Hei", "Noto Sans CJK SC", sans-serif;
-        background: #075968; }}
-.ody-page {{ width: {ODYSSEY_CARD_W}px; min-height: {h}px; padding: 8px 14px 12px;
-             background: linear-gradient(90deg, #086273 0%, #0b7180 50%, #086273 100%); }}
-.ody-paper {{ min-height: {h - 20}px; padding: 3px 0 8px; overflow: hidden;
-              background: #e5d0b4; border: 3px solid #f4e4ce; border-radius: 3px;
+        background: #0b7180; margin: 0; padding: 0; overflow: hidden; }}
+.ody-page {{ width: {ODYSSEY_CARD_W}px; height: {h}px; padding: 0;
+             background: transparent; box-sizing: border-box; }}
+.ody-paper {{ width: {ODYSSEY_CARD_W}px; height: {h}px; padding: 0 0 8px; overflow: hidden; margin: 0;
+              background: #0b7180; border: 0; border-radius: 3px;
+              box-sizing: border-box;
               box-shadow: 0 2px 0 rgba(0,0,0,.35), inset 0 0 0 1px #b99470; }}
 
 /* ===== 顶部三条蓝丝带（带切口 + 阴影 + 图标） ===== */
@@ -2076,6 +2348,7 @@ body {{ width: {ODYSSEY_CARD_W}px; min-height: {h}px; color: #ffffff;
                                                           border-color: transparent transparent #053a55 transparent; }}
 .ody-panel-title::after,  .ody-section-banner::after  {{ right: -2px; border-width: 6px 6px 0 0;
                                                           border-color: #053a55 transparent transparent transparent; }}
+.ody-paper > .ody-section-banner:first-child {{ margin-top: 0; }}
 .ody-section-banner {{ position: relative; top: 0; left: 0; display: block; width: max-content; margin: 14px auto 6px;
                         padding: 0 24px; font-size: 15px; height: 30px; line-height: 30px; }}
 
@@ -2234,6 +2507,7 @@ body {{ width: {ODYSSEY_CARD_W}px; min-height: {h}px; color: #ffffff;
 .ov-row {{ display: table; width: 100%; min-height: 110px; table-layout: fixed; }}
 .ov-img-cell {{ display: table-cell; width: 170px; vertical-align: middle; }}
 .ov-img {{ display: block; width: 160px; height: 100px; object-fit: cover; border: 3px solid #f8b900; border-radius: 7px; box-shadow: 0 1px 0 #70430f; }}
+.ov-img-boss {{ display: block; width: 160px; height: 100px; object-fit: contain; background: #ffffff; border: 3px solid #f8b900; border-radius: 7px; box-shadow: 0 1px 0 #70430f; }}
 .ov-img-ph {{ width: 160px; height: 100px; line-height: 100px; text-align: center; font-size: 36px; background: #c0aa91; border: 3px solid #f8b900; border-radius: 7px; }}
 .ov-info {{ display: table-cell; vertical-align: middle; padding: 0 8px 0 6px; }}
 .ov-name {{ color: #ffffff; font-size: 17px; line-height: 21px; font-weight: 900; text-shadow: 0 1px 0 #68513d; word-break: break-all; }}
@@ -2251,6 +2525,31 @@ body {{ width: {ODYSSEY_CARD_W}px; min-height: {h}px; color: #ffffff;
 .lb-score {{ display: table-cell; width: 140px; vertical-align: middle; text-align: right; font-size: 14px; font-weight: 900; color: #ffd700; text-shadow: 0 1px 0 #5a3a14; white-space: nowrap; }}
 .lb-empty {{ text-align: center; color: #684d37; font-size: 14px; font-weight: 900; padding: 18px 0; }}
 .map-panel {{ min-height: 80px; padding: 14px 8px 8px; }}
+
+/* ===== 活动总览 v2：图标列表样式（与原 ov-panel 风格分离，避免影响排行榜/远征） ===== */
+.ev-row {{ display: table; width: 100%; min-height: 56px; padding: 6px 0;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.18); table-layout: fixed; }}
+.ev-icon-cell {{ display: table-cell; width: 56px; vertical-align: middle; text-align: center; }}
+.ev-icon {{ width: 44px; height: 44px; border-radius: 50%; object-fit: cover;
+           border: 2px solid #f8b900; background: #1a3354; vertical-align: middle; }}
+.ev-name {{ display: table-cell; vertical-align: middle; padding: 0 10px;
+            color: #fff7d4; font-size: 15px; font-weight: 900;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
+            word-break: break-all; }}
+.ev-dates {{ display: table-cell; vertical-align: middle; width: 220px;
+            color: #ffe66b; font-size: 12px; line-height: 1.4; font-weight: 700; padding: 0 8px;
+            text-shadow: 0 1px 1px rgba(0, 0, 0, 0.7); }}
+.ev-dates div {{ white-space: nowrap; }}
+.ev-right {{ display: table-cell; vertical-align: middle; width: 130px; text-align: right;
+             font-size: 14px; font-weight: 900; letter-spacing: 0.5px; padding: 0 14px 0 0;
+             text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85); }}
+.ev-right-on {{ color: #2ee66b; text-shadow: 0 1px 1px rgba(0, 0, 0, 0.9); }}
+.ev-right-up {{ color: #ffd84d; text-shadow: 0 1px 1px rgba(0, 0, 0, 0.9); }}
+.ev-right-off {{ color: #c9c2b0; }}
+.ev-empty {{ color: #fff7d4; font-size: 12px; font-weight: 700; padding: 14px 18px;
+            background: rgba(0, 0, 0, 0.25); border-radius: 4px; line-height: 1.5;
+            text-shadow: 0 1px 1px rgba(0, 0, 0, 0.8); }}
+.ev-spacer {{ height: 8px; }}
 </style></head>
 <body><div class="ody-page"><div class="ody-paper">{body}</div></div></body></html>"""
 
@@ -2263,7 +2562,7 @@ def _race_shell(body: str, h: int) -> str:
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
-@page {{ size: {RACE_CARD_W}px {h}px; margin: 0; }}
+@page {{ size: {RACE_CARD_W}px {h}px; margin: 0; background: #699bd9; }}
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 body {{ width: {RACE_CARD_W}px; height: {h}px; color: #ffffff;
         font-family: "WenQuanYi Micro Hei", "Noto Sans CJK SC", sans-serif;
@@ -2675,50 +2974,355 @@ def _banner(kind: str, items: list, ptitle: str, now_ms: int, img: str, race_met
     return html, 210
 
 
-def overview_html(data: dict) -> str:
-    """活动总览：复刻远征纸张 + 蓝丝带 + 棕面板的游戏风格。"""
-    now = data["now"]
-    parts = ['<div class="ody-ribbon ody-section-banner"><span>活动总览</span></div>']
-    total_h = 60
-    for kind, items, ptitle in (
-        ("race", data["races"], "每周竞赛"),
-        ("boss", data["bosses"], "Boss 事件"),
-        ("ct", data["cts"], "争夺领土"),
-    ):
-        ev = _pick_section(items, now)
-        if not ev:
-            parts.append(f"<div class='ody-panel ov-panel'><div class='ody-ribbon ody-panel-title'><span>{_esc(ptitle)}</span></div><div class='lb-empty'>暂无数据</div></div>")
-            total_h += 110
-            continue
-        name = (ev.get("name") or ptitle).strip()
-        if kind == "boss":
-            bt = boss_cn(ev.get("bossType"))
-            if bt:
-                name = f"{name}（{bt}）"
-        state = _state_of(ev, now)
-        badge_cls = {"on": "st-on", "up": "st-up", "off": "st-off"}[state]
-        # 取图：竞速用 race_map，Boss 用 boss_img
-        img = ""
-        if kind == "race":
-            img = data.get("race_map") or ""
-        elif kind == "boss":
-            img = data.get("boss_img") or ""
-        img_cell = f"<img class='ov-img' src='{_esc(img)}'/>" if img else "<div class='ov-img-ph'>🎈</div>"
-        if kind == "race":
-            score = f"参与 <b>{int(ev.get('totalScores') or 0):,}</b>"
-        elif kind == "boss":
-            score = f"标准 <b>{int(ev.get('totalScores_standard') or 0):,}</b> · 精英 <b>{int(ev.get('totalScores_elite') or 0):,}</b>"
+def _overview_panel_html(
+    ev: dict, kind: str, now: int, race_map: str, boss_img: str,
+    race_map_by_id: dict | None = None, boss_img_by_id: dict | None = None,
+) -> str:
+    """单场活动的卡片面板（与旧版 overview_html 保持同样式，用于三段式复用）。"""
+    ptitle_map = {"race": "每周竞赛", "boss": "Boss 事件", "ct": "争夺领土", "odyssey": "远征"}
+    ptitle = ptitle_map.get(kind, kind)
+    name = (ev.get("name") or ptitle).strip()
+    if kind == "boss":
+        bt = boss_cn(ev.get("bossType"))
+        if bt:
+            name = f"{name}（{bt}）"
+    state = _state_of(ev, now)
+    badge_cls = {"on": "st-on", "up": "st-up", "off": "st-off"}[state]
+    # 优先用带背景的完整瓦片（512×230，含图标+文字），缺失再回退旧的单图/地图逻辑
+    img = ""
+    eid = str(ev.get("id") or "")
+    if kind == "race":
+        img = _ui_asset_data_url("race-tile.png") or ""
+        if not img:
+            if race_map_by_id and eid in race_map_by_id:
+                img = race_map_by_id[eid] or ""
+            else:
+                img = race_map or ""
+    elif kind == "boss":
+        img = _ui_asset_data_url("boss-tile.png") or ""
+        if not img:
+            if boss_img_by_id and eid in boss_img_by_id:
+                img = boss_img_by_id[eid] or ""
+            else:
+                img = boss_img or ""
+    elif kind == "rush":
+        img = _ui_asset_data_url("boss-rush.png") or _ui_asset_data_url("boss-event.png") or ""
+    elif kind == "odyssey":
+        img = _ui_asset_data_url("odyssey-tile.png") or _ui_asset_data_url("odyssey-event.png") or _ui_asset_data_url("BTD6_OdysseyEventBtn.png") or ""
+    elif kind == "ct":
+        img = _ui_asset_data_url("ct-tile.png") or _ui_asset_data_url("ct-event.png") or _ui_asset_data_url("BTD6_ContestedTerritoryEventBtn.png") or ""
+    # 瓦片带背景（512×230）用 cover 铺满更协调
+    if img:
+        cls = "ov-img"
+        img_cell = f"<img class='{cls}' src='{_esc(img)}'/>"
+    else:
+        ph = "🏰" if kind == "odyssey" else ("⚔️" if kind == "ct" else "🎈")
+        img_cell = f"<div class='ov-img-ph'>{ph}</div>"
+    if kind == "race":
+        score = f"参与 <b>{int(ev.get('totalScores') or 0):,}</b>"
+    elif kind == "boss":
+        score = f"标准 <b>{int(ev.get('totalScores_standard') or 0):,}</b> · 精英 <b>{int(ev.get('totalScores_elite') or 0):,}</b>"
+    elif kind == "rush":
+        # Boss Rush uses events summary, no detailed score yet
+        score = f"Boss Rush · {_fmt_range(ev)}"
+    elif kind == "odyssey":
+        desc = (ev.get("description") or "").strip()
+        if desc:
+            short = desc[:36] + ("…" if len(desc) > 36 else "")
+            score = _esc(short)
         else:
-            score = f"个人 <b>{int(ev.get('totalScores_player') or 0):,}</b> · 战队 <b>{int(ev.get('totalScores_team') or 0):,}</b>"
-        parts.append(
-            f"<div class='ody-panel ov-panel'><div class='ody-ribbon ody-panel-title'><span>{_esc(ptitle)}</span></div>"
-            f"<div class='ov-row'><div class='ov-img-cell'>{img_cell}</div>"
-            f"<div class='ov-info'><div class='ov-name'>{_esc(name)}<span class='ov-badge {badge_cls}'>{_STATE_TXT[state]}</span></div>"
-            f"<div class='ov-dates'>{_esc(_fmt_range(ev))}</div>"
-            f"<div class='ov-score'>{score}</div></div></div></div>"
+            score = "远征活动"
+    else:
+        score = f"个人 <b>{int(ev.get('totalScores_player') or 0):,}</b> · 战队 <b>{int(ev.get('totalScores_team') or 0):,}</b>"
+    return (
+        f"<div class='ody-panel ov-panel'><div class='ody-ribbon ody-panel-title'><span>{_esc(ptitle)}</span></div>"
+        f"<div class='ov-row'><div class='ov-img-cell'>{img_cell}</div>"
+        f"<div class='ov-info'><div class='ov-name'>{_esc(name)}<span class='ov-badge {badge_cls}'>{_STATE_TXT[state]}</span></div>"
+        f"<div class='ov-dates'>{_esc(_fmt_range(ev))}</div>"
+        f"<div class='ov-score'>{score}</div></div></div></div>"
+    )
+
+
+def overview_html(data: dict) -> str:
+    """活动总览：三段式 - 正在进行 / 即将开始 / 已结束(近5)，从上到下排列。"""
+    now = data["now"]
+    races = data.get("races") or []
+    bosses = data.get("bosses") or []
+    cts = data.get("cts") or []
+    odysseys = data.get("odysseys") if isinstance(data.get("odysseys"), list) else []
+    rush = data.get("rush") if isinstance(data.get("rush"), list) else []
+    ongoing, upcoming, ended = _classify_overview_events(races, bosses, cts, now, odysseys, rush)
+    parts: list[str] = []
+    total_h = 6
+
+    def _row_html(ev: dict, kind: str, state: str) -> str:
+        """单行活动：圆形图标 + 名称 + 日期范围 + 右侧状态。"""
+        # 图标：按 kind 取最匹配的圆形方块图（已有 race-tile/boss-tile/odyssey-tile/ct-tile 为横幅，回退旧 boss-* 与 odyssey-event/ct-event 方形）
+        icon_data = ""
+        if kind == "race":
+            icon_data = _ui_asset_data_url("boss-bloonarius.png") or _ui_asset_data_url("boss-event-official.png") or _ui_asset_data_url("race-tile.png") or ""
+        elif kind == "boss":
+            bt = str(ev.get("bossType") or "").strip().lower()
+            boss_icon_map = {
+                "bloonarius": "boss-bloonarius.png",
+                "lych": "boss-lych.png",
+                "vortex": "boss-vortex.png",
+                "dreadbloon": "boss-dreadbloon.png",
+                "phayze": "boss-phayze.png",
+                "blastapopoulos": "boss-blastapopoulos.png",
+            }
+            asset = boss_icon_map.get(bt, "")
+            icon_data = _ui_asset_data_url(asset) or _ui_asset_data_url("boss-event-official.png") or _ui_asset_data_url("boss-tile.png") or ""
+        elif kind == "odyssey":
+            icon_data = _ui_asset_data_url("odyssey-event.png") or _ui_asset_data_url("odyssey-tile.png") or ""
+        elif kind == "rush":
+            icon_data = _ui_asset_data_url("boss-rush.png") or _ui_asset_data_url("boss-event.png") or _ui_asset_data_url("boss-tile.png") or ""
+        elif kind == "ct":
+            icon_data = _ui_asset_data_url("ct-event.png") or _ui_asset_data_url("ct-tile.png") or ""
+        # 默认占位（彩色圆底白字）
+        if not icon_data:
+            ph = {"race": "🏁", "boss": "👹", "odyssey": "🏰", "ct": "⚔️"}.get(kind, "🎈")
+            icon_html = f"<div class='ev-icon' style='background:#3a5a7a'>{ph}</div>"
+        else:
+            icon_html = f"<img class='ev-icon' src='{_esc(icon_data)}'/>"
+        # 名称：按 kind 翻译为中文，保留 NK API 原文作小字副标题
+        raw_name = (ev.get("name") or "").strip()
+        if kind == "race":
+            name = f"每周竞赛 · {raw_name or 'Race Event'}"
+        elif kind == "boss":
+            bt_cn = boss_cn(ev.get("bossType"))
+            display = f"{raw_name}（{bt_cn}）" if bt_cn and bt_cn not in raw_name else raw_name
+            name = display or "Boss 事件"
+        elif kind == "odyssey":
+            name = f"远征 · {raw_name or 'Odyssey Event'}"
+        elif kind == "rush":
+            name = f"Boss Rush · {raw_name or 'Boss Rush'}"
+        elif kind == "ct":
+            name = "争夺领土（CT）"
+        # 日期
+        s, e = int(ev.get("start") or 0), int(ev.get("end") or 0)
+        date1 = fmt_date(s)
+        date2 = fmt_date(e)
+        # 状态（中文）
+        if state == "on":
+            if s and e:
+                now_s = now
+                days_left = max(0, int((e - now_s) / 86400000))
+                if days_left >= 1:
+                    right = f"剩余 {days_left} 天"
+                else:
+                    hours_left = max(0, int((e - now_s) / 3600000))
+                    right = f"剩余 {hours_left} 小时"
+            else:
+                right = "进行中"
+            right_cls = "ev-right-on"
+        elif state == "up":
+            right = "即将开始"
+            right_cls = "ev-right-up"
+        else:
+            right = "已结束"
+            right_cls = "ev-right-off"
+        return (
+            f"<div class='ev-row'>"
+            f"<div class='ev-icon-cell'>{icon_html}</div>"
+            f"<div class='ev-name'>{_esc(name)}</div>"
+            f"<div class='ev-dates'><div>开始 {_esc(date1)}</div><div>结束 {_esc(date2)}</div></div>"
+            f"<div class='ev-right {right_cls}'>{_esc(right)}</div>"
+            f"</div>"
         )
-        total_h += 135
-    return _odyssey_shell("\n".join(parts), total_h + 30)
+
+    def _section(title: str, items: list, empty_text: str = "暂无活动") -> tuple[str, int]:
+        """三段式：标题横幅 + 列表或空态。返回 (html, height)."""
+        h = []
+        h.append(f'<div class="ody-ribbon ody-section-banner"><span>{_esc(title)}</span></div>')
+        height = 48
+        if not items:
+            h.append(f"<div class='ev-empty'>{_esc(empty_text)}</div>")
+            height += 56
+        else:
+            for ev, kind in items:
+                s, e = int(ev.get("start") or 0), int(ev.get("end") or 0)
+                state = "on" if s <= now < e else ("up" if now < s else "off")
+                h.append(_row_html(ev, kind, state))
+                height += 58
+        return "".join(h), height
+
+    # 正在进行
+    h1, total_h = _section(f"🟢 进行中 ({len(ongoing)})", ongoing,
+                            empty_text="暂无进行中的活动")
+    parts.append(h1)
+    parts.append('<div class="ev-spacer"></div>')
+    total_h += 12
+
+    # 即将开始
+    h2, add = _section(
+        f"🟡 即将开始 ({len(upcoming)})", upcoming,
+        empty_text="暂无即将开始的活动",
+    )
+    parts.append(h2)
+    total_h += add + 12
+    parts.append('<div class="ev-spacer"></div>')
+
+    # 已结束（近10，按你图显示更多）
+    ended_show = ended[:10] if ended else []
+    h3, add = _section(f"⚪ 已结束 · 近 {len(ended_show)} 场",
+                        [(ev, kind) for ev, kind in ended_show],
+                        empty_text="暂无已结束的活动")
+    parts.append(h3)
+    total_h += add
+
+    return _odyssey_shell("\n".join(parts), total_h + 17)
+
+
+_RUSH_BOSSES = [
+    # 默认 Boss Rush 轮换（依 Bloons Wiki 与实测轮换），可按 ev["id"] 自定义
+    ("Bloonarius",    "boss-bloonarius.png",    "1f479"),
+    ("Lych",          "boss-lych.png",          "1f480"),
+    ("Dreadbloon",    "boss-dreadbloon.png",    "1faa8"),
+    ("Phayze",        "boss-phayze.png",        "1f47b"),
+    ("Blastapopoulos","boss-blastapopoulos.png","1f525"),
+]
+
+
+async def collect_rush() -> dict:
+    """模仿 collect_odyssey：拉 /btd6/events，过滤 bossRush，
+    单 difficulty（"default"）含 5 岛路线（按 _RUSH_BOSSES 顺序）。"""
+    now = bucket_now()
+    events = await fetch_body(URL_EVENTS)
+    rush_list = [e for e in events if isinstance(e, dict) and e.get("type") == "bossRush"]
+    ev = pick_active(rush_list, now) or pick_next(rush_list, now) or fallback_latest(rush_list)
+    if not ev:
+        return {"empty": "当前没有 Boss Rush 活动"}
+    islands = []
+    for idx, (name, png, emoji_hex) in enumerate(_RUSH_BOSSES, 1):
+        boss_url = _ui_asset_data_url(png) or _ui_asset_data_url("boss-event.png") or ""
+        islands.append({
+            "name": f"Island {idx} · {name}",
+            "map": name,
+            "img": boss_url,
+            "difficulty": "",
+            "mode": "Boss Rush",
+            "startingCash": 0,
+            "startRound": 1,
+            "endRound": 140,
+            "lives": 0,
+            "maxLives": 0,
+            "maxTowers": 0,
+            "maxParagons": 0,
+            "roundSets": [],
+            "_bloonModifiers": {},
+            "disableMK": False,
+            "disablePowers": False,
+            "disableInstas": False,
+            "disableSelling": False,
+            "noContinues": False,
+            "disableDoubleCash": False,
+        })
+    return {"ev": ev, "diffs": {"default": {"meta": {"isExtreme": False, "_availablePowers": [], "_availableTowers": []}, "maps": islands}}}
+
+
+def _rush_text(col: dict) -> str:
+    """模仿 odyssey_text：文字版岛屿路线。"""
+    if col.get("empty"):
+        return col["empty"]
+    ev, diffs = col["ev"], col["diffs"]
+    state = _STATE_TXT[_state_of(ev, bucket_now())]
+    lines = [
+        "🏝️ Boss Rush",
+        f"{(ev.get('name') or '').strip() or 'Boss Rush'}（{state}）",
+        _fmt_range(ev),
+        "⚠️ NK 官方仅 /btd6/events 摘要，岛屿/排行暂未开放",
+        "",
+    ]
+    diff = diffs.get("default") or {}
+    for mp in diff.get("maps") or []:
+        lines.append(f"  👹 {mp['name']}")
+    return "\n".join(lines).rstrip()
+
+
+def _rush_diff_html(col: dict, d: str = "default", label: str = "") -> str:
+    """模仿 odyssey_diff_html：使用 _odyssey_shell + _odyssey_default_crew_html + _odyssey_rewards_html + _odyssey_maps_html 渲染 5 岛路线。"""
+    if col.get("empty"):
+        return _odyssey_shell(f"<div class='ody-panel ody-map-empty'>{_esc(col['empty'])}</div>", 260)
+    ev = col["ev"]
+    diff = (col.get("diffs") or {}).get("default") or {"meta": None, "maps": []}
+    meta = diff.get("meta")
+    maps = diff.get("maps") or []
+
+    state = _state_of(ev, bucket_now())
+    lives = int((meta or {}).get("startingHealth") or 0)
+    seats = int((meta or {}).get("maxMonkeySeats") or 0)
+    towers_cap = int((meta or {}).get("maxMonkeysOnBoat") or 0)
+    is_extreme = bool((meta or {}).get("isExtreme"))
+    event_name = (ev.get("name") or "Boss Rush").strip() or "Boss Rush"
+
+    # 顶部三丝带（取自 _rush_html 已有素材）
+    lives_icon = _odyssey_top_icon("lives")
+    seats_icon = _odyssey_top_icon("seats")
+    towers_icon = _odyssey_top_icon("towers")
+    lives_img = f"<img class='ody-ribbon-icon' src='{_esc(lives_icon)}'/>" if lives_icon else "❤"
+    seats_img = f"<img class='ody-ribbon-icon' src='{_esc(seats_icon)}'/>" if seats_icon else "🚻"
+    towers_img = f"<img class='ody-ribbon-icon' src='{_esc(towers_icon)}'/>" if towers_icon else "🐵"
+    top = (
+        "<div class='ody-ribbons'>"
+        f"<div class='ody-ribbon-cell'><div class='ody-ribbon'>{lives_img} 岛数：{len(maps)}</div></div>"
+        f"<div class='ody-ribbon-cell'><div class='ody-ribbon'>{seats_img} Boss：5 轮</div></div>"
+        f"<div class='ody-ribbon-cell'><div class='ody-ribbon'>{towers_img} 状态：{_STATE_TXT[state]}</div></div>"
+        "</div>"
+        f"<div class='ody-event'>{_esc(event_name)} · 团队冲刺 · {_esc(_fmt_range(ev))} · {_esc(_STATE_TXT[state])}</div>"
+        + "<div class='ody-event-desc'>⚠ NK 官方仅 /btd6/events 摘要，岛屿/地图/排行暂未开放，5岛 Boss 顺序按社区默认轮换</div>"
+        + ("<div class='ody-extreme-badge'>Boss Rush 模式</div>" if not is_extreme else "")
+        + "<div class='ody-top-grid'><div class='ody-top-cell crew'>"
+        + _odyssey_default_crew_html(meta or {"_availablePowers": [], "_availableTowers": [], "_defaultTowers": []})
+        + "</div><div class='ody-top-cell reward'>"
+        + _odyssey_rewards_html([])
+        + "</div></div>"
+        + _odyssey_maps_html(maps)
+    )
+    height = _odyssey_card_height(meta, len(maps))
+    uh = diff.get("_unified_h")
+    if isinstance(uh, int) and uh > height:
+        height = uh
+    return _odyssey_shell(top, height)
+
+
+
+
+def _ct_html(ev: dict, tiles: list, now: int) -> str:
+    """争夺领土专属卡片：模仿竞速 UI，展示当前 CT 事件的领地与时间。"""
+    name = (ev.get("id") or "CT").strip()
+    state = _state_of(ev, now)
+    # 统计 tiles
+    total = len(tiles) if isinstance(tiles, list) else 0
+    # 取前 6 个 tile 展示
+    tile_preview = ""
+    if tiles:
+        # 简化：显示 tile 类型统计
+        from collections import Counter
+        cnt = Counter(x.get("type") for x in tiles if isinstance(x, dict))
+        preview = " / ".join(f"{k}:{v}" for k, v in list(cnt.items())[:4])
+        tile_preview = f"领地 {total} 块 · {preview}" if preview else f"领地 {total} 块"
+    else:
+        tile_preview = "领地数据加载中"
+    ct_img = _ui_asset_data_url("ct-event.png") or _ui_asset_data_url("ct-tile.png") or ""
+    emblem = f"<img class='race-emblem-img' src='{_esc(ct_img)}'/>" if ct_img else "<div class='race-emblem-fallback'>🏴</div>"
+    title = "争夺领土"
+    subtitle = f"CT {name}"
+    time_line = _fmt_range(ev)
+    player = int(ev.get("totalScores_player") or 0)
+    team = int(ev.get("totalScores_team") or 0)
+    body = (f"<div class='race-topbar'><div class='race-head'><div class='race-emblem-cell'><div class='race-emblem'>{emblem}</div></div>"
+            f"<div class='race-title-cell'><div class='race-title'>{_esc(title)}</div><div class='race-subtitle'>{_esc(subtitle)}</div><div class='race-time'>{_esc(time_line)} · {_STATE_TXT[state]}</div></div></div></div>"
+            f"<div class='race-content'><div class='race-layout'><div class='race-map'><div class='race-map-empty'>🗺️</div></div>"
+            f"<div class='race-stats-cell'><div class='race-stats'><div class='race-stat-col'>"
+            f"<div class='race-stat'><div class='race-stat-icon-cell'>{_race_ui_img('ct-event.png', '🏴', 'race-stat-icon')}</div><div class='race-stat-copy'><div class='race-stat-label'>个人参与</div><div class='race-stat-value'>{player:,}</div></div></div>"
+            f"<div class='race-stat'><div class='race-stat-icon-cell'>{_race_ui_img('ct-tile.png', '🧩', 'race-stat-icon')}</div><div class='race-stat-copy'><div class='race-stat-label'>战队参与</div><div class='race-stat-value'>{team:,}</div></div></div>"
+            f"</div><div class='race-stat-col'>"
+            f"<div class='race-stat'><div class='race-stat-icon-cell'>{_race_ui_img('ct-event.png', '⏱', 'race-stat-icon')}</div><div class='race-stat-copy'><div class='race-stat-label'>活动状态</div><div class='race-stat-value'>{_STATE_TXT[state]}</div></div></div>"
+            f"<div class='race-stat'><div class='race-stat-icon-cell'>{_race_ui_img('ct-tile.png', '🗺️', 'race-stat-icon')}</div><div class='race-stat-copy'><div class='race-stat-label'>领地</div><div class='race-stat-value'>{total} 块</div></div></div>"
+            f"</div></div></div></div></div>"
+            f"<div class='race-monkey-section'><div class='race-options'><div class='race-available'>{_esc(tile_preview)}</div></div></div></div>")
+    return _race_shell(body, 620)
 
 
 def leaderboard_html(col: dict) -> str:
@@ -3218,30 +3822,63 @@ async def _prewarm_once() -> None:
         jobs = []
         race = _pick_section(data["races"], now)
         boss = _pick_section(data["bosses"], now)
+        ct = _pick_section(data["cts"], now)
+        # odyssey and rush via events
+        rush_list = data.get("rush") or []
+        rush_ev = _pick_section(rush_list, now) if rush_list else None
+        ody_list = data.get("odysseys") or []
+        ody_ev = _pick_section(ody_list, now) if ody_list else None
         if race:
-            lb = await _safe(collect_leaderboard("race", "", DEFAULT_ROWS))
+            # 行数与用户默认查询参数一致，预热渲染才能命中缓存
+            lb = await _safe(collect_leaderboard("race", "", LB_DEFAULT_ROWS))
             if lb and not lb.get("empty"):
                 jobs.append(_render_card("btd6lb", lambda: leaderboard_html(lb)))
         if boss:
-            blb = await _safe(collect_leaderboard("boss", "standard", DEFAULT_ROWS))
+            blb = await _safe(collect_leaderboard("boss", "standard", LB_DEFAULT_ROWS))
             if blb and not blb.get("empty"):
                 jobs.append(_render_card("btd6lb", lambda: leaderboard_html(blb)))
+        if ct:
+            # CT 榜单预热（个人榜）
+            ct_lb = await _safe(collect_leaderboard("ct", "player", LB_DEFAULT_ROWS))
+            if ct_lb and not ct_lb.get("empty"):
+                jobs.append(_render_card("btd6lb", lambda: leaderboard_html(ct_lb)))
+        if rush_ev:
+            # 1:1 模仿 handle_odyssey：collect_rush → _rush_diff_html
+            try:
+                col = await collect_rush()
+                if not col.get("empty"):
+                    rush_html = _rush_diff_html(col)
+                    jobs.append(_render_card("btd6rush", lambda: rush_html))
+            except Exception:
+                pass
+        if ody_ev:
+            # 远征三难度取当前其一预热
+            try:
+                ody_col = await collect_odyssey()
+                # 取 easy 作为代表预热
+                ody_html = odyssey_diff_html(ody_col, "easy", "简单")
+                jobs.append(_render_card("btd6ody", lambda: ody_html))
+            except Exception:
+                pass
         # 逐张渲染并在间隔让出信号量：用户查询优先于预热渲染
         for i, job in enumerate(jobs):
             await _safe(job)
             if i < len(jobs) - 1:
                 await asyncio.sleep(1.0)
+        # 帮助菜单纯静态，兜底再渲一次（首次 _btd6_warm_on_connect 失败时仍能补上）
+        if not jobs:
+            await _safe(_render_card("btd6help", help_html))
     except Exception:
         _logger.warning("BTD6 预热异常", exc_info=True)
     finally:
         _prewarm_running = False
 
 
-@scheduler.scheduled_job("cron", hour=f"*/{PREWARM_LEADERBOARD_HOURS}", minute=0, id="btd6_prewarm",
+@scheduler.scheduled_job("cron", hour=4, minute=0, id="btd6_prewarm",
                          timezone="Asia/Shanghai")
 async def btd6_prewarm_job():
-    """每 6 小时一次：归档活动列表 + 预热进行中竞赛/Boss 的榜单卡（用户指定的低频节奏）。
-    其余卡片内容只在刷新点变化，按需渲染 + 内容哈希缓存即可。"""
+    """每天 04:00 固定预热：归档活动列表 + 预热进行中竞赛/Boss/CT/Rush/远征的热门卡片。
+    由每周按需改为每天定点，确保跨周活动切换后首日内即有缓存。"""
     await _prewarm_once()
 
 
@@ -3252,13 +3889,21 @@ _register_warmup = getattr(get_driver(), "on_bot_connect", get_driver().on_start
 @_register_warmup
 async def _btd6_warm_on_connect(bot=None) -> None:
     await asyncio.sleep(5)  # 等 NapCat 连接稳定后再拉数据/归档/预热榜单
+    # 帮助菜单是纯静态卡片，预先渲染到持久缓存目录，确保 .btd6 / .btd6帮助 首屏直接复用。
+    # 与 _prewarm_once 并发：help 不依赖网络/信号量，但走同一 RENDER_SEM 串行化，所以放到
+    # _prewarm_once 之后避免抢用户首查的渲染位。
     await _prewarm_once()
+    try:
+        await _render_card("btd6help", help_html)
+        _logger.info("BTD6 帮助菜单已预渲染到本地")
+    except Exception:
+        _logger.warning("BTD6 帮助菜单预渲染失败", exc_info=True)
 
 
 # ---------------- 活动刷新推送（群自动播报） ----------------
 BTD6_PUSH_STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
 _BTD6_PUSH_LOCK = threading.RLock()
-_BTD6_PUSH_KINDS = ("race", "boss", "ct", "odyssey", "daily")
+_BTD6_PUSH_KINDS = ("race", "boss", "ct", "odyssey", "daily", "rush")
 
 def _load_push_state() -> dict:
     return load_json_state(BTD6_PUSH_STATE_FILE, _BTD6_PUSH_LOCK)
@@ -3459,45 +4104,54 @@ async def _btd6_push_single(kind: str, ev: dict, ev_id: str, label: str, groups:
 
 # 精准采样：已知刷新点后 0/5/10 分钟各一次（3 次容错，覆盖 API 延迟）
 # 竞速 周四10:00 持续97h
-@scheduler.scheduled_job("cron", day_of_week="thu", hour=10, minute=0, id="btd6_push_race_0", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=10, minute=0, id="btd6_push_race_0", timezone="Asia/Shanghai")
 async def btd6_push_race_0(): await _btd6_push_kind("race")
-@scheduler.scheduled_job("cron", day_of_week="thu", hour=10, minute=5, id="btd6_push_race_5", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=10, minute=5, id="btd6_push_race_5", timezone="Asia/Shanghai")
 async def btd6_push_race_5(): await _btd6_push_kind("race")
-@scheduler.scheduled_job("cron", day_of_week="thu", hour=10, minute=10, id="btd6_push_race_10", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=10, minute=10, id="btd6_push_race_10", timezone="Asia/Shanghai")
 async def btd6_push_race_10(): await _btd6_push_kind("race")
 # Boss 周五10:00 持续121h
-@scheduler.scheduled_job("cron", day_of_week="fri", hour=10, minute=0, id="btd6_push_boss_0", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=10, minute=0, id="btd6_push_boss_0", timezone="Asia/Shanghai")
 async def btd6_push_boss_0(): await _btd6_push_kind("boss")
-@scheduler.scheduled_job("cron", day_of_week="fri", hour=10, minute=5, id="btd6_push_boss_5", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=10, minute=5, id="btd6_push_boss_5", timezone="Asia/Shanghai")
 async def btd6_push_boss_5(): await _btd6_push_kind("boss")
-@scheduler.scheduled_job("cron", day_of_week="fri", hour=10, minute=10, id="btd6_push_boss_10", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=10, minute=10, id="btd6_push_boss_10", timezone="Asia/Shanghai")
 async def btd6_push_boss_10(): await _btd6_push_kind("boss")
 # CT 周二06:00 持续168h（双周刷新，样本含周三08:00 特殊场，兼顾）+ 周三08:00 兜底
-@scheduler.scheduled_job("cron", day_of_week="tue", hour=6, minute=0, id="btd6_push_ct_0", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=6, minute=0, id="btd6_push_ct_0", timezone="Asia/Shanghai")
 async def btd6_push_ct_0(): await _btd6_push_kind("ct")
-@scheduler.scheduled_job("cron", day_of_week="tue", hour=6, minute=5, id="btd6_push_ct_5", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=6, minute=5, id="btd6_push_ct_5", timezone="Asia/Shanghai")
 async def btd6_push_ct_5(): await _btd6_push_kind("ct")
-@scheduler.scheduled_job("cron", day_of_week="tue", hour=6, minute=10, id="btd6_push_ct_10", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=6, minute=10, id="btd6_push_ct_10", timezone="Asia/Shanghai")
 async def btd6_push_ct_10(): await _btd6_push_kind("ct")
-@scheduler.scheduled_job("cron", day_of_week="wed", hour=8, minute=0, id="btd6_push_ct_w0", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=8, minute=0, id="btd6_push_ct_w0", timezone="Asia/Shanghai")
 async def btd6_push_ct_w0(): await _btd6_push_kind("ct")
-@scheduler.scheduled_job("cron", day_of_week="wed", hour=8, minute=5, id="btd6_push_ct_w5", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=8, minute=5, id="btd6_push_ct_w5", timezone="Asia/Shanghai")
 async def btd6_push_ct_w5(): await _btd6_push_kind("ct")
-@scheduler.scheduled_job("cron", day_of_week="wed", hour=8, minute=10, id="btd6_push_ct_w10", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=8, minute=10, id="btd6_push_ct_w10", timezone="Asia/Shanghai")
 async def btd6_push_ct_w10(): await _btd6_push_kind("ct")
 # 远征 周三10:00 持续144h
-@scheduler.scheduled_job("cron", day_of_week="wed", hour=10, minute=0, id="btd6_push_ody_0", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=10, minute=0, id="btd6_push_ody_0", timezone="Asia/Shanghai")
 async def btd6_push_ody_0(): await _btd6_push_kind("odyssey")
-@scheduler.scheduled_job("cron", day_of_week="wed", hour=10, minute=5, id="btd6_push_ody_5", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=10, minute=5, id="btd6_push_ody_5", timezone="Asia/Shanghai")
 async def btd6_push_ody_5(): await _btd6_push_kind("odyssey")
-@scheduler.scheduled_job("cron", day_of_week="wed", hour=10, minute=10, id="btd6_push_ody_10", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=10, minute=10, id="btd6_push_ody_10", timezone="Asia/Shanghai")
 async def btd6_push_ody_10(): await _btd6_push_kind("odyssey")
-# 每日 17:00 持续24h（按用户指定，普通+高级双版本）
-@scheduler.scheduled_job("cron", hour=17, minute=0, id="btd6_push_daily_0", timezone="Asia/Shanghai")
+
+# Boss Rush 隔周三 22:00 UTC -> 周四 06:00 CST，与 CT 交替，改为每天 06:00 定点检测
+@scheduler.scheduled_job("cron", hour=6, minute=0, id="btd6_push_rush_0", timezone="Asia/Shanghai")
+async def btd6_push_rush_0(): await _btd6_push_kind("rush")
+@scheduler.scheduled_job("cron", hour=6, minute=5, id="btd6_push_rush_5", timezone="Asia/Shanghai")
+async def btd6_push_rush_5(): await _btd6_push_kind("rush")
+@scheduler.scheduled_job("cron", hour=6, minute=10, id="btd6_push_rush_10", timezone="Asia/Shanghai")
+async def btd6_push_rush_10(): await _btd6_push_kind("rush")
+
+# 每日 16:00 持续24h（按用户指定，普通+高级双版本）
+@scheduler.scheduled_job("cron", hour=16, minute=0, id="btd6_push_daily_0", timezone="Asia/Shanghai")
 async def btd6_push_daily_0(): await _btd6_push_kind("daily")
-@scheduler.scheduled_job("cron", hour=17, minute=5, id="btd6_push_daily_5", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=16, minute=5, id="btd6_push_daily_5", timezone="Asia/Shanghai")
 async def btd6_push_daily_5(): await _btd6_push_kind("daily")
-@scheduler.scheduled_job("cron", hour=17, minute=10, id="btd6_push_daily_10", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=16, minute=10, id="btd6_push_daily_10", timezone="Asia/Shanghai")
 async def btd6_push_daily_10(): await _btd6_push_kind("daily")
 
 
@@ -3506,21 +4160,35 @@ async def btd6_push_daily_10(): await _btd6_push_kind("daily")
 help_cmd = on_command("btd6", priority=5, block=True)
 help_alias_cmd = on_command("btd6帮助", priority=5, block=True)
 events_cmd = on_command("btd6活动", priority=5, block=True)
+ct_cmd = on_command("btd6领土", priority=5, block=True)
+rush_cmd = on_command("btd6冲刺", priority=5, block=True)
 lb_cmd = on_command("btd6排行", priority=5, block=True)
 rules_cmd = on_command("btd6竞速", priority=5, block=True)
 maps_cmd = on_command("btd6地图", priority=5, block=True)
 daily_cmd = on_command("btd6每日", priority=5, block=True)
 odyssey_cmd = on_command("btd6远征", priority=5, block=True)
 player_cmd = on_command("btd6玩家", priority=5, block=True)
-push_on_cmd = on_command("btd6推送开启", aliases={"btd6活动推送开启"}, priority=5, block=True)
-push_off_cmd = on_command("btd6推送关闭", aliases={"btd6活动推送关闭"}, priority=5, block=True)
-push_status_cmd = on_command("btd6推送状态", aliases={"btd6活动推送状态"}, priority=5, block=True)
-hist_cmd = on_command("btd6历史", aliases={"btd6活动历史"}, priority=5, block=True)
+push_on_cmd = on_command("btd6推送开启", priority=5, block=True)
+push_off_cmd = on_command("btd6推送关闭", priority=5, block=True)
+push_status_cmd = on_command("btd6推送状态", priority=5, block=True)
+hist_cmd = on_command("btd6历史", priority=5, block=True)
+prewarm_cmd = on_command("btd6预热", priority=5, block=True)
 
 
 @help_cmd.handle()
 async def handle_help(event: MessageEvent):
     await _enforce_cooldown(help_cmd, event, "help")
+    # 兼容 ".btd6 CT"（含空格）直接查看争夺领土/活动总览
+    _plain = event.get_plaintext().strip().lower()
+    _arg = _plain.replace(".btd6", "", 1).strip() if _plain.startswith(".btd6") else _plain
+    if _arg in {"ct", "领土", "争夺", "争夺领土"}:
+        try:
+            data = await collect_overview()
+        except Exception:
+            _logger.exception("BTD6 CT 总览获取失败")
+            await help_cmd.finish("⚠️ 获取 BTD6 活动信息失败，请稍后再试")
+        await _send_card(help_cmd, "btd6ov", lambda: overview_html(data), lambda: overview_text(data))
+        return
     await _send_card(help_cmd, "btd6help", help_html, lambda: HELP_TEXT)
 
 
@@ -3539,6 +4207,52 @@ async def handle_events(event: MessageEvent):
         _logger.exception("BTD6 活动总览获取失败")
         await events_cmd.finish("⚠️ 获取 BTD6 活动信息失败，请稍后再试")
     await _send_card(events_cmd, "btd6ov", lambda: overview_html(data), lambda: overview_text(data))
+
+
+@ct_cmd.handle()
+async def handle_ct(event: MessageEvent):
+    await _enforce_cooldown(ct_cmd, event, "events")
+    try:
+        cts = await fetch_body(URL_CT)
+        ev = _pick_section(cts, bucket_now()) or (cts[0] if cts else None)
+        if not ev:
+            await ct_cmd.finish("当前没有争夺领土活动")
+        tiles = []
+        if ev.get("tiles"):
+            try:
+                tiles_data = await fetch_body(ev["tiles"])
+                if isinstance(tiles_data, dict) and "tiles" in tiles_data:
+                    tiles = tiles_data["tiles"]
+                elif isinstance(tiles_data, list):
+                    tiles = tiles_data
+            except Exception:
+                tiles = []
+        now = bucket_now()
+        html = _ct_html(ev, tiles, now)
+        text = f"争夺领土 {ev.get('id')} | {_fmt_range(ev)} | {_STATE_TXT[_state_of(ev, now)]} | 个人 {int(ev.get('totalScores_player') or 0):,} / 战队 {int(ev.get('totalScores_team') or 0):,} | 领地 {len(tiles)} 块"
+    except Exception as e:
+        # 无活动时上方 finish() 抛出的 FinishedException 不能当错误吞掉
+        from nonebot.exception import FinishedException
+        if isinstance(e, FinishedException):
+            raise
+        _logger.exception("BTD6 CT 获取失败")
+        await ct_cmd.finish("⚠️ 获取争夺领土失败，请稍后再试")
+    await _send_card(ct_cmd, "btd6ct", lambda: html, lambda: text)
+
+
+@rush_cmd.handle()
+async def handle_rush(event: MessageEvent):
+    """模仿 handle_odyssey：fetch → collect → _send_card，使用 _rush_diff_html（1:1 odyssey_diff_html）。"""
+    await _enforce_cooldown(rush_cmd, event, "rush")
+    try:
+        col = await collect_rush()
+    except Exception:
+        _logger.exception("Boss Rush 获取失败")
+        await rush_cmd.finish("⚠️ 获取 Boss Rush 失败，请稍后再试")
+        return
+    if col.get("empty"):
+        await rush_cmd.finish(col["empty"])
+    await _send_card(rush_cmd, "btd6rush", lambda: _rush_diff_html(col), lambda: _rush_text(col))
 
 
 @lb_cmd.handle()
@@ -3879,3 +4593,22 @@ async def handle_history(event: MessageEvent):
         lines.append("（归档为空，随预热每轮自动积累）")
     # 活动名等来自 NK API 历史归档（防 CQ 码注入）：整段经 MessageSegment.text 发送
     await hist_cmd.finish(MessageSegment.text("\n".join(lines)))
+
+
+@prewarm_cmd.handle()
+async def handle_prewarm(event: MessageEvent):
+    if not is_owner(event):
+        await prewarm_cmd.finish("❌ 仅主人可手动预热")
+    await _enforce_cooldown(prewarm_cmd, event, "prewarm", "heavy")
+    await prewarm_cmd.send("⏳ 开始手动预热（活动/榜单/素材）...")
+    try:
+        await _prewarm_once()
+        await _render_card("btd6help", help_html)
+    except Exception as e:
+        from nonebot.exception import FinishedException
+        if isinstance(e, FinishedException):
+            raise
+        _logger.exception("手动预热失败")
+        await prewarm_cmd.finish(f"⚠️ 预热失败: {e}")
+        return
+    await prewarm_cmd.finish("✅ 预热完成（活动已归档，热门榜单/帮助已刷新）")
