@@ -1745,8 +1745,12 @@ def _odyssey_rewards_html(rewards: list) -> str:
             tier_txt = "-".join(tiers) if tiers else ""
             icon = ""
             if re.fullmatch(r"[0-9]{3}", tiers):
-                # 奖励是升级后的即时猴，用对应品阶立绘（如 302-SpikeFactory）
-                icon = _game_asset_data_url(f"{tiers}-{tower}.webp")
+                # 塔立绘只体现最高单路外观：3-0-2 → 300-SpikeFactory、0-4-2 → 040-EngineerMonkey
+                best = max(range(3), key=lambda i: int(tiers[i]))
+                combo = ["0", "0", "0"]
+                combo[best] = tiers[best]
+                if int("".join(combo)) > 0:
+                    icon = _game_asset_data_url(f"{''.join(combo)}-{tower}.webp")
             if not icon:
                 icon = _tower_icon(tower, False)
             icon_html = _odyssey_img(icon, "ody-reward-icon", tower_cn(tower), tower_cn(tower))
@@ -2461,8 +2465,8 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
 .ody-unit-card.hero {{ background: linear-gradient(180deg, #ffe94d 0%, #ffc516 78%, #dd9300 100%); }}
 .ody-unit-card img {{ display: block; width: 51px; height: 51px; margin: 0 auto; object-fit: contain;
                        filter: drop-shadow(0 1px 0 rgba(0,0,0,.15)); }}
-.ody-unit-card.big {{ width: 80px; height: 100px; border-radius: 14px;
-                       background: linear-gradient(180deg, #f8d9a0 0%, #eeb55e 70%, #db9a35 100%); }}
+.ody-crew-panel .ody-unit-card.big {{ width: 80px; height: 100px; border-radius: 14px;
+                       background: linear-gradient(180deg, #f7ecd2 0%, #e9d5a4 70%, #d8bf8a 100%); }}
 .ody-unit-card.big img {{ width: 76px; height: 76px; }}
 /* 数量徽章（默认队伍用：右上） */
 .ody-unit-quantity {{ position: absolute; right: 1px; top: 1px; min-width: 25px; padding: 1px 3px;
