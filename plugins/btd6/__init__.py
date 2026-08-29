@@ -3208,8 +3208,15 @@ _RUSH_BOSSES = [
 def math_ceil(v: float) -> int:
     return int(v) if v == int(v) else int(v) + 1
 
-# Boss 名 → 本地头像（Diamondback 暂无专属素材，走 boss-event.png 兜底）
+# Boss 名 → 本地头像（Diamondback 走 nkstatic 官方立绘 Portrait.webp）
 _RUSH_BOSS_ART = {name: png for name, png, _emoji in _RUSH_BOSSES}
+_RUSH_MAX_MONKEYS = 30  # 每场战斗猴子数量上限（游戏内活动页固定值，转录）
+
+_REWARD_LABELS = {
+    "MonkeyMoney": "猴币", "Trophy": "奖杯", "TeamTrophy": "战队奖杯",
+    "CollectionEvent": "收集事件", "RandomPower": "随机强化", "RandomInstaMonkey": "随机香蕉",
+}
+
 _BOSS_CN = {
     "Bloonarius": "布隆纳里乌斯", "Lych": "莱奇", "Dreadbloon": "恐惧布隆",
     "Phayze": "法泽", "Blastapopoulos": "爆破波普利斯", "Diamondback": "菱背龙",
@@ -3255,11 +3262,6 @@ _RELIC_CN = {
     "GlueTrap": "胶水陷阱", "Techbot": "科技猴",
 }
 
-_REWARD_LABELS = {
-    "MonkeyMoney": "猴币", "Trophy": "奖杯", "TeamTrophy": "战队奖杯",
-    "CollectionEvent": "收集事件", "RandomPower": "随机强化", "RandomInstaMonkey": "随机香蕉",
-}
-
 
 def _tower_cn(t: str) -> str:
     return _TOWER_CN.get(t, t)
@@ -3267,6 +3269,21 @@ def _tower_cn(t: str) -> str:
 
 def _tower_portrait(t: str) -> str:
     return _game_asset_data_url(_TOWER_PORTRAIT_SPECIAL.get(t, f"000-{t}.webp"))
+
+
+def _tower_category(t: str) -> str:
+    return (rushgen.load_constants()["towersInOrder"].get(t) or {}).get("category", "")
+
+
+# 分类底色：同类猴子同色（Primary 红 / Military 绿 / Magic 紫 / Support 橙）
+_TOWER_CAT_COLORS = {
+    "Primary": ("#d4604a", "#9c3a2a"), "Military": ("#7ba84e", "#4d7530"),
+    "Magic": ("#9a6fe0", "#6440a8"), "Support": ("#e0a95f", "#b0782f"),
+}
+
+
+def _tower_cat_grad(t: str) -> tuple:
+    return _TOWER_CAT_COLORS.get(_tower_category(t), ("#8d8279", "#57504a"))
 
 
 def _hero_cn(h: str) -> str:
@@ -3292,6 +3309,19 @@ def _rush_stage_rewards_text(reward_str: str) -> str:
     return " · ".join(parts)
 
 
+def _rush_rewards_pairs(reward_str: str) -> list:
+    """把 StageRewards 配置串解析为 [(中文标签, 数值)]（不含收集事件）。"""
+    pairs = []
+    for chunk in (reward_str or "").split("#"):
+        if ":" not in chunk:
+            continue
+        k, v = chunk.split(":", 1)
+        if k == "CollectionEvent":
+            continue  # 用户要求去掉收集事件
+        pairs.append((_REWARD_LABELS.get(k, k), v))
+    return pairs
+
+
 async def collect_rush() -> dict:
     """拉 /btd6/events 取 bossRush 摘要，用 rushgen 从活动种子生成逐阶段配置。
 
@@ -3308,19 +3338,21 @@ async def collect_rush() -> dict:
     scores = br.get("StageScores") or []
     rewards = br.get("StageRewards") or []
     gen = rushgen.generate_boss_rush(str(ev.get("id") or ""))
-    maps_meta = rushgen.load_constants()["mapsInOrder"]
     islands = []
     for st in gen["stages"]:
         idx = st["stage"] - 1
         boss_name = st["boss"]
-        art = _RUSH_BOSS_ART.get(boss_name)
-        boss_url = (_ui_asset_data_url(art) if art else "") or _ui_asset_data_url("boss-event.png") or ""
+        boss_url = _game_asset_data_url(f"{boss_name}Portrait.webp")
+        if not boss_url:
+            art = _RUSH_BOSS_ART.get(boss_name)
+            boss_url = (_ui_asset_data_url(art) if art else "") or _ui_asset_data_url("boss-event.png") or ""
+        map_img = _game_asset_data_url(f"MapSelect{st['map']}Button.webp")
         islands.append({
             "stage": st["stage"],
             "name": f"Island {st['stage']} · {boss_name}",
             "map": boss_name,
             "map_name": st["map"],
-            "theme": (maps_meta.get(st["map"]) or {}).get("theme", ""),
+            "map_img": map_img,
             "boss": boss_name,
             "kills": scores[idx] if idx < len(scores) else 0,
             "rewards": _rush_rewards_pairs(rewards[idx] if idx < len(rewards) else ""),
@@ -3336,16 +3368,6 @@ async def collect_rush() -> dict:
             "hero": "ChosenPrimaryHero" if hero == "ChosenPrimaryHero" else (hero or ""),
             "diffs": {"default": {"meta": {"isExtreme": False}, "maps": islands}}}
 
-
-def _rush_rewards_pairs(reward_str: str) -> list:
-    """把 StageRewards 配置串解析为 [(中文标签, 数值)]。"""
-    pairs = []
-    for chunk in (reward_str or "").split("#"):
-        if ":" not in chunk:
-            continue
-        k, v = chunk.split(":", 1)
-        pairs.append((_REWARD_LABELS.get(k, k), v))
-    return pairs
 
 def _rush_text(col: dict) -> str:
     """模仿 odyssey_text：文字版阶段路线。"""
@@ -3384,19 +3406,22 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #e8dcc0;
         font-family: "WenQuanYi Micro Hei", "Noto Sans CJK SC", sans-serif;
         background: #4a453c; overflow: hidden; }}
 .rush-pool {{ display: flex; flex-wrap: wrap; justify-content: center; margin-bottom: 12px; }}
-.rush-cell {{ width: 88px; height: 88px; border-radius: 8px; border: 1px solid rgba(0,0,0,.28);
-              display: flex; align-items: center; justify-content: center; margin: 0 3px 3px 0;
+.rush-cell {{ position: relative; width: 88px; height: 88px; border-radius: 8px;
+              border: 1px solid rgba(0,0,0,.28); display: flex; align-items: center;
+              justify-content: center; margin: 0 3px 3px 0;
               box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 1px 0 rgba(0,0,0,.25); }}
 .rush-cell img {{ width: 74px; height: 74px; object-fit: contain;
                   filter: drop-shadow(0 1px 1px rgba(0,0,0,.35)); }}
+.rush-cell i.slash {{ position: absolute; inset: 0;
+                      background: linear-gradient(135deg, transparent 42%, #e0442e 46%, #e0442e 54%, transparent 58%); }}
 .rush-stage {{ position: relative; display: flex; gap: 12px; background: #3f3b33;
                border: 1px solid #2b2823; border-radius: 10px; padding: 10px 12px;
                margin-bottom: 10px; box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 1px 0 rgba(0,0,0,.2); }}
 .rush-map {{ position: relative; flex: none; width: 168px; height: 120px; }}
-.rush-mapph {{ width: 100%; height: 100%; border-radius: 6px; border: 2px solid #26231f;
-               display: flex; align-items: flex-end; justify-content: center; overflow: hidden; }}
-.rush-mapname {{ width: 100%; text-align: left; padding-left: 8px; background: rgba(20,18,14,.78); color: #ffd964;
-                 font-size: 13px; font-weight: 900; line-height: 24px; letter-spacing: 1px; }}
+.rush-mapimg {{ width: 100%; height: 100%; object-fit: cover; border-radius: 6px; }}
+.rush-mapname {{ position: absolute; left: 0; right: 0; bottom: 0; text-align: center;
+                 background: rgba(20,18,14,.78); color: #ffd964; font-size: 13px;
+                 font-weight: 900; line-height: 24px; letter-spacing: 1px; }}
 .rush-stagebanner {{ position: absolute; top: -8px; left: -6px; padding: 2px 10px; z-index: 2;
                      background: linear-gradient(180deg,#ff9a3d,#e2611b); border: 2px solid #93400f;
                      border-radius: 4px; color: #ffffff; font-size: 13px; font-weight: 900;
@@ -3411,19 +3436,14 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #e8dcc0;
 .rush-chip img {{ width: 15px; height: 15px; object-fit: contain; }}
 .rush-relics {{ display: flex; gap: 12px; margin-top: 9px; align-items: flex-start; }}
 .rush-relic {{ position: relative; width: 48px; height: 48px; border-radius: 50%; background: #33302a;
-               border: 2px solid #6b6355; display: flex; align-items: center; justify-content: center;
-               text-align: center; font-size: 9px; color: #e8dcc0; line-height: 11px; padding: 2px; }}
+               border: 2px solid #6b6355; display: flex; align-items: center; justify-content: center; }}
+.rush-relic img {{ width: 40px; height: 40px; object-fit: contain; }}
 .rush-relic.new {{ border-color: #ffc63d; box-shadow: 0 0 0 1px #ffc63d; }}
-.rush-newtag {{ position: absolute; top: -9px; right: -6px; background: #d63a14; color: #ffffff;
-                font-size: 9px; font-weight: 900; padding: 0 4px; border-radius: 3px; line-height: 13px; }}
-.rush-lost {{ flex: none; width: 158px; background: #35322b; border: 1px solid #26231f;
+.rush-newribbon {{ position: absolute; top: -10px; right: -12px; width: 34px; object-fit: contain; }}
+.rush-lost {{ flex: none; width: 200px; background: #35322b; border: 1px solid #26231f;
               border-radius: 6px; padding: 6px 8px; }}
-.rush-lost-title {{ color: #e05545; font-size: 11px; font-weight: 900; margin-bottom: 5px; }}
-.rush-lost-body {{ display: flex; flex-wrap: wrap; gap: 4px; min-height: 34px; align-items: center; }}
-.rush-crossed {{ position: relative; display: inline-block; width: 30px; height: 30px; opacity: .85; }}
-.rush-crossed img {{ width: 30px; height: 30px; object-fit: contain; filter: grayscale(.7); }}
-.rush-crossed i {{ position: absolute; inset: 0;
-                   background: linear-gradient(135deg, transparent 42%, #e0442e 46%, #e0442e 54%, transparent 58%); }}
+.rush-lost-title {{ color: #e05545; font-size: 11px; font-weight: 900; margin-bottom: 6px; }}
+.rush-lost-body {{ display: flex; flex-wrap: wrap; gap: 3px; align-items: center; }}
 .rush-none {{ color: #9a9284; font-size: 11px; }}
 .rush-note {{ margin-top: 4px; text-align: center; font-size: 10px; color: #857e70; }}
 </style></head><body>{body}</body></html>"""
@@ -3439,58 +3459,58 @@ def _rush_diff_html(col: dict, d: str = "default", label: str = "") -> str:
     state = _state_of(ev, bucket_now())
     event_name = (ev.get("name") or "Boss Rush").strip() or "Boss Rush"
 
-    # ---- 顶部塔池墙（对照截图两行猴子头像） ----
+    # ---- 顶部塔池墙（同类同色底块，对照截图两行猴子头像） ----
     pool = maps[0]["towers"] if maps else []
-    _pool_palette = ["#5b9fd4,#2f6da0", "#54c1bd,#2b8a86", "#83c963,#4c9440",
-                     "#a584dc,#6f4ab5", "#dfa05f,#b06f35", "#dd7663,#ad4433"]
     pool_cells = []
-    for i, t in enumerate(pool):
+    for t in pool:
         img = _tower_portrait(t)
-        c = _pool_palette[i % len(_pool_palette)].split(",")
+        c0, c1 = _tower_cat_grad(t)
         face = (f"<img src='{img}' alt='{_esc(_tower_cn(t))}' style='width:74px;height:74px;"
                 f"object-fit:contain;filter:drop-shadow(0 1px 1px rgba(0,0,0,.35));'/>" if img
                 else f"<div style='font-size:10px;color:#e8dcc0;'>{_esc(_tower_cn(t))}</div>")
         pool_cells.append(
-            f"<div class='rush-cell' style='background:linear-gradient(180deg,{c[0]},{c[1]});'>{face}</div>")
+            f"<div class='rush-cell' style='background:linear-gradient(180deg,{c0},{c1});'>{face}</div>")
     pool_block = f"<div class='rush-pool'>{''.join(pool_cells)}</div>"
-
-    _theme_grad = {
-        "Snow": ("#e8f2f8", "#9fc4da", "#2a3a4a"), "Dirt": ("#c9a06a", "#8a6238", "#3a2a15"),
-        "Water": ("#6db8e8", "#2d6e9e", "#e8f4fc"), "Grass": ("#8ec660", "#56913f", "#1e3a12"),
-        "DarkGrass": ("#5d9c3f", "#35682a", "#d8ecd0"), "MountainCave": ("#8d8279", "#57504a", "#e8e2da"),
-        "City": ("#b0b8c0", "#707880", "#262a2e"),
-    }
 
     skull = ("<svg width='14' height='14' viewBox='0 0 24 24' fill='#e05545' style='flex:none;'>"
              "<path d='M12 2C7 2 3 6 3 11c0 2.4 1.2 4.5 3 5.7V19c0 1.1.9 2 2 2h1v-2h2v2h2v-2h2v2h1c1.1 0 2-.9 2-2v-2.3"
              "c1.8-1.2 3-3.3 3-5.7 0-5-4-9-9-9zM8.5 13a1.8 1.8 0 110-3.6 1.8 1.8 0 010 3.6zm7 0a1.8 1.8 0 110-3.6"
              " 1.8 1.8 0 010 3.6z'/></svg>")
     coin_icon = _game_asset_data_url("UI_CoinIcon.webp")
-    trophy_icon = _game_asset_data_url("UI_TrophyIcon.webp")
+    new_ribbon = _game_asset_data_url("NewRibbon.webp")
 
     rows = []
     for mp in maps:
         boss_cn = _BOSS_CN.get(mp["boss"], mp["boss"])
-        grad = _theme_grad.get(mp.get("theme") or "", ("#8d8279", "#57504a", "#e8e2da"))
         rewards = mp.get("rewards") or []
         mm = next((v for k, v in rewards if k == "猴币"), "-")
-        tr = [v for k, v in rewards if k == "奖杯"]
-        tt = [v for k, v in rewards if k == "战队奖杯"]
-        others = " · ".join(f"{k} {v}" for k, v in rewards if k not in ("猴币", "奖杯", "战队奖杯"))
+        tr = next((v for k, v in rewards if k == "奖杯"), "-")
+        tt = next((v for k, v in rewards if k == "战队奖杯"), "-")
+        extra = " · ".join(f"{k} {v}" for k, v in rewards if k not in ("猴币", "奖杯", "战队奖杯"))
 
+        # 遗物圆牌：官方遗物图标 + 金环 + NEW 缎带
         relic_badges = []
         for r in mp["relics"]:
             is_new = r == mp.get("new_relic")
+            r_img = _game_asset_data_url(f"{r}.webp")
+            inner = (f"<img src='{r_img}' alt='{_esc(_relic_cn(r))}'/>" if r_img
+                     else f"<span style='font-size:9px;'>{_esc(_relic_cn(r))}</span>")
+            ribbon = (f"<img class='rush-newribbon' src='{new_ribbon}' alt='新'/>"
+                      if is_new and new_ribbon else
+                      ("<div class='rush-newtag'>新</div>" if is_new else ""))
             relic_badges.append(
-                f"<div class='rush-relic{' new' if is_new else ''}'>{_esc(_relic_cn(r))}"
-                + ("<div class='rush-newtag'>新</div>" if is_new else "")
-                + "</div>")
+                f"<div class='rush-relic{' new' if is_new else ''}'>{inner}{ribbon}</div>")
+
+        # 损失猴子：与顶部塔池同样的大立绘底块 + 红斜杠
         lost_body = []
         for t in mp.get("removed") or []:
             img = _tower_portrait(t)
+            c0, c1 = _tower_cat_grad(t)
             if img:
                 lost_body.append(
-                    f"<span class='rush-crossed'><img src='{img}' alt='{_esc(_tower_cn(t))}'/><i></i></span>")
+                    f"<div class='rush-cell' style='background:linear-gradient(180deg,{c0},{c1});'>"
+                    f"<img src='{img}' alt='{_esc(_tower_cn(t))}' style='filter:grayscale(.6);opacity:.85;'/>"
+                    f"<i class='slash'></i></div>")
             else:
                 lost_body.append(
                     f"<span style='padding:1px 6px;border-radius:4px;background:rgba(255,90,70,.14);"
@@ -3501,21 +3521,22 @@ def _rush_diff_html(col: dict, d: str = "default", label: str = "") -> str:
         rows.append(
             "<div class='rush-stage'>"
             "<div class='rush-map'>"
-            f"<div class='rush-mapph' style='background:linear-gradient(160deg,{grad[0]},{grad[1]});'>"
-            f"<div class='rush-mapname' style='color:{grad[2]};'>{_esc(mp['map_name'])}</div></div>"
+            + (f"<img class='rush-mapimg' src='{_esc(mp['map_img'])}' alt='{_esc(mp['map_name'])}'/>"
+               if mp.get("map_img") else
+               f"<div class='rush-mapimg' style='background:linear-gradient(160deg,#3f6f5e,#26473c);'></div>")
+            + f"<div class='rush-mapname'>{_esc(mp['map_name'])}</div>"
             f"<div class='rush-stagebanner'>第 {mp['stage']} 阶段</div>"
-            + (f"<img class='rush-bossimg' src='{_esc(mp['img'])}' alt=''/>" if mp.get("img") else "")
+            + (f"<img class='rush-bossimg' src='{_esc(mp['img'])}' alt='{_esc(boss_cn)}'/>" if mp.get("img") else "")
             + "</div>"
             + "<div class='rush-mid'>"
             + "<div class='rush-chips'>"
             + f"<span class='rush-chip'>{skull}<span style='color:#ffb0a0;'>{mp['kills']} 击杀需求</span></span>"
             + (f"<span class='rush-chip'><img src='{coin_icon}'/>{mm} 猴币</span>" if coin_icon
                else f"<span class='rush-chip'>{mm} 猴币</span>")
-            + (f"<span class='rush-chip'><img src='{trophy_icon}'/>{tr[0] if tr else '-'} 奖杯"
-               + (f" · {tt[0]} 战队奖杯" if tt else "") + "</span>" if trophy_icon
-               else f"<span class='rush-chip'>{tr[0] if tr else '-'} 奖杯"
-                    + (f" · {tt[0]} 战队奖杯" if tt else "") + "</span>")
-            + (f"<span class='rush-chip'>{_esc(others)}</span>" if others else "")
+            + f"<span class='rush-chip' style='background:#3f5a78;border-color:#2b3f57;color:#bfe3ff;'>"
+            + f"🐵 {_RUSH_MAX_MONKEYS} 最大猴子数量</span>"
+            + (f"<span class='rush-chip'>奖杯 {tr} · 战队奖杯 {tt}"
+               + (f" · {extra}" if extra else "") + "</span>" if (tr != "-" or tt != "-" or extra) else "")
             + "</div>"
             + f"<div class='rush-relics'>{''.join(relic_badges)}</div>"
             + "</div>"
@@ -3528,7 +3549,7 @@ def _rush_diff_html(col: dict, d: str = "default", label: str = "") -> str:
             + "".join(rows)
             + f"<div class='rush-note'>{_esc(event_name)} · {_esc(_fmt_range(ev))} · "
             + f"阶段配置由活动种子确定性生成，与游戏内一致</div>")
-    # 高度：塔池墙(2行×91+标题间距≈200) + 阶段行×152 + 底部注释24
+    # 高度：塔池墙(2行×91+12) + 阶段行×152 + 底部注释30
     height = 200 + len(maps) * 152 + 30
     return _rush_shell(body, height)
 
