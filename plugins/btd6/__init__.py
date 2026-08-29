@@ -2409,9 +2409,11 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #4a3c28;
 /* ===== 默认队伍 ===== */
 .ody-crew-panel {{ min-height: 204px; padding: 8px 8px 8px; }}
 .ody-crew-body {{ display: table; width: 100%; min-height: 169px; table-layout: fixed; }}
-.ody-crew-hero {{ display: table-cell; width: 93px; vertical-align: top; padding-top: 13px; text-align: center; }}
+.ody-crew-hero {{ display: table-cell; width: 104px; vertical-align: top; padding-top: 8px; text-align: center; }}
 .ody-crew-grid-cell {{ display: table-cell; vertical-align: top; padding: 6px 0 0 4px; }}
-.ody-default-grid {{ text-align: left; }}
+.ody-default-grid {{ text-align: left; white-space: nowrap; }}
+.ody-default-grid .ody-unit-wrap {{ width: 46px; height: 58px; }}
+.ody-default-grid .ody-unit-card {{ width: 44px; height: 54px; border-radius: 9px; }}
 
 /* ===== 塔卡（通用：可用 + 默认队伍 共用） ===== */
 .ody-unit-wrap {{ display: inline-block; width: 55px; height: 67px; margin: 0 1px 3px; vertical-align: top; }}
@@ -2433,8 +2435,8 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #4a3c28;
 .ody-unit-card.hero {{ background: linear-gradient(180deg, #ffe94d 0%, #ffc516 78%, #dd9300 100%); }}
 .ody-unit-card img {{ display: block; width: 51px; height: 51px; margin: 0 auto; object-fit: contain;
                        filter: drop-shadow(0 1px 0 rgba(0,0,0,.15)); }}
-.ody-unit-card.big {{ width: 78px; height: 96px; border-radius: 14px; }}
-.ody-unit-card.big img {{ width: 75px; height: 75px; }}
+.ody-unit-card.big {{ width: 92px; height: 114px; border-radius: 16px; }}
+.ody-unit-card.big img {{ width: 88px; height: 88px; }}
 /* 数量徽章（默认队伍用：右上） */
 .ody-unit-quantity {{ position: absolute; right: 1px; top: 1px; min-width: 25px; padding: 1px 3px;
                       color: #ffffff; background: #1879bf; border: 2px solid #e8f7ff; border-radius: 12px;
@@ -2465,7 +2467,8 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #4a3c28;
 .ody-av-cell.heroes {{ width: 21%; padding-right: 6px; }}
 .ody-av-cell.towers {{ width: 47%; padding: 0 3px; }}
 .ody-av-cell.powers {{ width: 32%; padding-left: 6px; }}
-.ody-av-panel {{ min-height: 250px; padding: 14px 7px 8px; }}
+.ody-av-panel {{ min-height: 300px; padding: 14px 7px 8px; }}
+.ody-av-cell.powers .ody-av-panel {{ height: 300px; overflow: hidden; }}
 .ody-av-title {{ height: 22px; color: #ffffff; font-size: 15px; line-height: 22px; font-weight: 900;
                  text-shadow: 0 1px 0 #58432f; text-align: center; white-space: nowrap; }}
 .ody-av-title-dark {{ color: #3d2a1a; text-shadow: 0 1px 0 rgba(255,244,222,.4); margin: 2px 0 6px; }}
