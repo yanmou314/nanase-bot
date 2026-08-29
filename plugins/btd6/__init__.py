@@ -1650,7 +1650,7 @@ def _odyssey_default_crew_html(meta: dict) -> str:
             "border:2px solid #e7f8ff;border-radius:6px;color:#ffffff;font-size:10px;line-height:14px;"
             "padding:0 4px;font-weight:900;'>{}/{}".format(quantity, denom) + "</span>"
             "<span style='display:flex;align-items:center;justify-content:center;width:46px;height:46px;"
-            "border-radius:50%;background:linear-gradient(180deg,#8fc460,#4d8f3c);"
+            "border-radius:10px;background:linear-gradient(180deg,#c67b27 0%,#8a5630 100%);"
             "border:2px solid rgba(0,0,0,.3);box-shadow:inset 0 1px 0 rgba(255,255,255,.4);'>" + face + "</span></span>")
     return ("<div class='ody-panel ody-crew-panel'>"
             "<div class='ody-ribbon ody-panel-title'><span>默认队伍</span></div>"
@@ -2368,7 +2368,7 @@ def _odyssey_shell(body: str, h: int, theme: str = "teal") -> str:
     # 时间戳注释：确保任何 CSS/布局调整后 html 哈希必定变化，渲染文件名随之更新，
     # 避免 QQ 端按旧文件名复用缓存的图片
     body = f"<!-- render:{int(time.time())} -->" + body
-    page_bg = "#d5c295" if theme == "tan" else "#0b7180"
+    page_bg = "#e4d0bc" if theme == "tan" else "#0b7180"
     text_color = "#4a3c28" if theme == "tan" else "#ffffff"
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
@@ -2402,7 +2402,7 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
                     object-fit: contain; filter: drop-shadow(0 1px 0 #075b8b); }}
 
 /* 面板通用：棕底圆角 + 内/外阴影 */
-.ody-panel {{ position: relative; background: #a58a6e; border: 1px solid rgba(81,52,30,.18); border-radius: 9px;
+.ody-panel {{ position: relative; background: #ab927c; border: 1px solid rgba(81,52,30,.18); border-radius: 9px;
               box-shadow: inset 0 1px 0 rgba(255,244,222,.30), 0 2px 0 rgba(84,53,30,.20); padding-top: 22px; }}
 /* 面板顶部蓝丝带标题（默认队伍 / 奖励 / 岛屿规则 等） */
 .ody-panel-title, .ody-section-banner {{ position: absolute; top: -10px; left: 12px; height: 26px; padding: 0 22px;
@@ -2475,6 +2475,7 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
 .ody-unit-card img {{ display: block; width: 51px; height: 51px; margin: 0 auto; object-fit: contain;
                        filter: drop-shadow(0 1px 0 rgba(0,0,0,.15)); }}
 .ody-crew-panel .ody-unit-card.big {{ width: 84px; height: 104px; border-radius: 14px;
+                       border: 3px solid #eab607;
                        background: linear-gradient(180deg, #f2e3bd 0%, #e5cd9d 70%, #d5b87e 100%); }}
 .ody-unit-card.big img {{ width: 80px; height: 80px; }}
 /* 数量徽章（默认队伍用：右上） */
@@ -2554,7 +2555,7 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
 /* ===== 岛屿规则 ===== */
 .ody-maps {{ padding: 4px 13px 0; }}
 .ody-map-row {{ display: table; width: 100%; min-height: 118px; margin-bottom: 8px; padding: 6px 8px;
-                table-layout: fixed; background: #aa937b; border-radius: 8px;
+                table-layout: fixed; background: #ab927c; border-radius: 8px;
                 box-shadow: inset 0 1px 0 rgba(255,244,222,.24), 0 2px 0 rgba(84,53,30,.20); }}
 .ody-map-img-cell {{ position: relative; display: table-cell; width: 178px; vertical-align: middle; }}
 .ody-map-img {{ display: block; width: 168px; height: 105px; object-fit: cover; border: 3px solid #f8b900;
