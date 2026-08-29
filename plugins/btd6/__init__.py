@@ -195,6 +195,7 @@ def _prune_ordered(mapping: OrderedDict, limit: int) -> None:
 _cache: OrderedDict[str, tuple[float, object]] = OrderedDict()
 _stale: OrderedDict[str, object] = OrderedDict()  # 过期旧数据：网络抖动时先返回旧值再后台刷新
 _refreshing: set[str] = set()
+_refresh_tasks: set[asyncio.Task] = set()  # 持有后台刷新任务引用，防止任务被 GC 中途回收
 _cache_lock = threading.Lock()
 
 
@@ -258,7 +259,9 @@ async def fetch_body(url: str):
         if stale is not None:
             _stale.move_to_end(url)
     if stale is not None:
-        asyncio.create_task(_refresh_url(url))
+        task = asyncio.create_task(_refresh_url(url))
+        _refresh_tasks.add(task)
+        task.add_done_callback(_refresh_tasks.discard)
         return stale
     r = await _http_get(url, 20)
     r.raise_for_status()
@@ -1024,10 +1027,14 @@ async def collect_leaderboard(kind: str, variant: str, rows: int) -> dict:
         ev = pick_active(races, now) or fallback_latest(races)
         if not ev:
             return {"empty": "当前没有竞赛活动"}
-        entries = await fetch_leaderboard_paginated(ev["leaderboard"], rows)
+        lb_url = ev.get("leaderboard")
+        if not lb_url:
+            return {"empty": "该活动暂无排行榜"}
+        entries = await fetch_leaderboard_paginated(lb_url, rows)
         head = f"竞赛「{(ev.get('name') or '').strip()}」排行榜（最快用时，越短越好）"
         scoring = "GameTime"
-        meta = await _safe(fetch_body(ev["metadata"])) if ev.get("metadata") else None
+        meta_url = ev.get("metadata")
+        meta = await _safe(fetch_body(meta_url)) if meta_url else None
         if meta and meta.get("mapURL"):
             img = await _safe(_asset_data_url(meta["mapURL"])) or ""
     elif kind == "boss":
@@ -2034,6 +2041,9 @@ async def fetch_leaderboard_page(start_url: str, page: int) -> list:
 
 async def collect_leaderboard_page(kind: str, variant: str, page: int) -> dict:
     """拉取并整理指定页的排行榜；页码越界返回 empty。"""
+    if kind == "rush":
+        # Boss Rush 暂无公开排行榜接口，显式返回空榜，避免落入 CT 分支取到错误数据
+        return {"empty": "Boss Rush 排行榜暂未开放（NK 仅在 /btd6/events 提供摘要，详细榜单待开放）"}
     now = bucket_now()
     scoring = ""
     img = ""
@@ -2098,6 +2108,9 @@ async def collect_leaderboard_page(kind: str, variant: str, page: int) -> dict:
 
 async def fetch_rank_entry(kind: str, variant: str, rank: int) -> dict | None:
     """取指定排名的单条排行榜记录（用于玩家档案查询）。"""
+    if kind == "rush":
+        # Boss Rush 暂无公开排行榜接口，显式返回空结果，避免落入 CT 分支取到错误数据
+        return None
     size = lb_page_size(kind)
     page = (rank - 1) // size + 1
     idx = (rank - 1) % size
@@ -3847,7 +3860,7 @@ async def _prewarm_once() -> None:
                     rush_html = _rush_diff_html(col)
                     jobs.append(_render_card("btd6rush", lambda: rush_html))
             except Exception:
-                pass
+                _logger.warning("BTD6 预热 Rush 卡渲染失败", exc_info=True)
         if ody_ev:
             # 远征三难度取当前其一预热
             try:
@@ -3856,7 +3869,7 @@ async def _prewarm_once() -> None:
                 ody_html = odyssey_diff_html(ody_col, "easy", "简单")
                 jobs.append(_render_card("btd6ody", lambda: ody_html))
             except Exception:
-                pass
+                _logger.warning("BTD6 预热远征卡渲染失败", exc_info=True)
         # 逐张渲染并在间隔让出信号量：用户查询优先于预热渲染
         for i, job in enumerate(jobs):
             await _safe(job)
@@ -3964,7 +3977,8 @@ async def _btd6_push_kind(kind: str) -> None:
     except Exception:
         return
     now = bucket_now()
-    # 12 分钟窗口：bucket 取整后 :10 采样点距刷新点恰为 10min，10min 窗口会漏掉第三次容错采样
+    real_now = int(time.time() * 1000)  # 窗口比较用真实时间：start 带秒级偏移时桶取整会恒判"未在窗口内"而漏推
+    # 12 分钟窗口：:10 采样点距刷新点恰为 10min，10min 窗口会漏掉第三次容错采样
     window_ms = 12 * 60 * 1000
     last = _last_pushed()
     # 单类检查（只取列表判断 id/start，重量级元数据/素材留到确认推送后再拉）
@@ -3982,6 +3996,9 @@ async def _btd6_push_kind(kind: str) -> None:
         elif kind == "odyssey":
             items = await _safe(fetch_body(URL_ODYSSEY)) or []
             ev = pick_active(items, now) or pick_next(items, now) or fallback_latest(items)
+        elif kind == "rush":
+            data = await collect_overview()
+            ev = _pick_section(data.get("rush") or [], now)
         elif kind == "daily":
             items = await _safe(fetch_body(URL_DAILY)) or []
             ev = next((x for x in items if str(x.get("name") or "").startswith("Standard")), None)
@@ -3995,9 +4012,9 @@ async def _btd6_push_kind(kind: str) -> None:
         if kind == "daily":
             # daily 无 start，以 id 变化即视为刷新
             pass
-        elif not start or not (0 <= now - start < window_ms):
+        elif not start or not (0 <= real_now - start < window_ms):
             # 非窗口期内且非首次配置则跳过；首次配置 30 分钟内补发
-            if last.get(kind) or not start or not (0 <= now - start < 30 * 60 * 1000):
+            if last.get(kind) or not start or not (0 <= real_now - start < 30 * 60 * 1000):
                 return
         # 确认要推送后才拉取重量级数据并渲染发送
         await _btd6_push_single(kind, ev, ev_id, label, groups)
@@ -4010,26 +4027,40 @@ async def _btd6_push_single(kind: str, ev: dict, ev_id: str, label: str, groups:
     except Exception:
         return
     try:
-        if kind in ("race", "ct"):
+        if kind in ("race", "ct", "rush"):
             data = await collect_overview()
             path = await _render_card("btd6ov", lambda: overview_html(data))
-            text = f"🎮 BTD6 { {'race':'竞速','ct':'争夺领土'}[kind] }已刷新：{label}" if label else f"🎮 BTD6 {kind} 已刷新"
+            text = f"🎮 BTD6 { {'race':'竞速','ct':'争夺领土','rush':'Boss Rush'}[kind] }已刷新：{label}" if label else f"🎮 BTD6 {kind} 已刷新"
         elif kind == "odyssey":
             col = await collect_odyssey()
             data = await collect_overview()
             path = await _render_card("btd6ov", lambda: overview_html(data))
             text = f"🏰 远征已刷新：{label}" if label else "🏰 远征已刷新"
+            sent_any = False
             for d, lab in _ODYSSEY_DIFFS:
                 try:
                     p = await _render_card("btd6ody", lambda d=d, lab=lab: odyssey_diff_html(col, d, lab))
                     for gid in groups:
                         try:
                             await bot.send_group_msg(group_id=gid, message=MessageSegment.image(Path(p).as_uri()))
+                            sent_any = True
                             await asyncio.sleep(0.6)
                         except Exception:
                             _logger.warning("BTD6 远征分图推送到群 %s 失败", gid, exc_info=True)
                 except Exception:
                     _logger.warning("BTD6 远征 %s 渲染失败", lab, exc_info=True)
+            for gid in groups:
+                try:
+                    await bot.send_group_msg(group_id=gid, message=MessageSegment.text(text) + MessageSegment.image(Path(path).as_uri()))
+                    sent_any = True
+                    await asyncio.sleep(0.5)
+                except Exception:
+                    _logger.warning("BTD6 推送到群 %s 失败 kind=%s", gid, kind, exc_info=True)
+            if sent_any:
+                # 分图与总览任一发送成功即标记，避免部分成功时下轮重发整组刷屏；全部失败时保留待推状态
+                _set_last_pushed(kind, ev_id)
+            _logger.info("BTD6 精准推送 %s %s 到 %d 群（成功标记：%s）", kind, ev_id, len(groups), sent_any)
+            return
         elif kind == "daily":
             # 每日普通+高级双版本一起推送
             pushed_any = False
@@ -4565,7 +4596,8 @@ async def handle_history(event: MessageEvent):
             kind = k
             break
     rows = parse_rows(tokens)
-    hist = _load_history()
+    # 归档文件读取（含磁盘 IO 与锁）放到线程池，避免卡住事件循环
+    hist = await asyncio.to_thread(_load_history)
     now = int(time.time() * 1000)
     kinds = [kind] if kind else ["race", "boss", "ct", "odyssey", "daily"]
     lines = ["🗂 BTD6 活动历史归档"]
@@ -4597,6 +4629,8 @@ async def handle_prewarm(event: MessageEvent):
     if not is_owner(event):
         await prewarm_cmd.finish("❌ 仅主人可手动预热")
     await _enforce_cooldown(prewarm_cmd, event, "prewarm", "heavy")
+    if _prewarm_running:
+        await prewarm_cmd.finish("⏳ 预热已在进行中，请稍候")
     await prewarm_cmd.send("⏳ 开始手动预热（活动/榜单/素材）...")
     try:
         await _prewarm_once()
@@ -4606,6 +4640,7 @@ async def handle_prewarm(event: MessageEvent):
         if isinstance(e, FinishedException):
             raise
         _logger.exception("手动预热失败")
-        await prewarm_cmd.finish(f"⚠️ 预热失败: {e}")
+        # 异常信息含外部输入内容（防 CQ 码注入）：经 MessageSegment.text 发送
+        await prewarm_cmd.finish(MessageSegment.text(f"⚠️ 预热失败: {e}"))
         return
     await prewarm_cmd.finish("✅ 预热完成（活动已归档，热门榜单/帮助已刷新）")

@@ -1,10 +1,14 @@
+import logging
 import os
+import sys
 
 from dotenv import load_dotenv
 
 _BOT_ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(_BOT_ROOT)
 load_dotenv(os.path.join(_BOT_ROOT, ".env"))
+
+_logger = logging.getLogger("qqbot.bot")
 
 import nonebot  # noqa: E402  # 需先 chdir 并加载 .env
 from nonebot.adapters.onebot.v11 import Adapter as OneBotV11Adapter  # noqa: E402
@@ -30,6 +34,15 @@ driver.register_adapter(OneBotV11Adapter)
 nonebot.load_plugin("nonebot_plugin_apscheduler")
 
 nonebot.load_from_toml(os.path.join(_BOT_ROOT, "pyproject.toml"))
+
+# nonebot 对插件加载失败只记日志不抛错，error_notify 若随依赖一起静默加载失败，
+# 整条告警链路就消失了。这里显式断言关键插件已加载，缺失则崩溃退出
+# （systemd Restart=always 会重试，宁可崩溃循环也不静默降级）。
+_loaded = {p.name for p in nonebot.get_loaded_plugins()}
+_missing = [name for name in ("error_notify",) if name not in _loaded]
+if _missing:
+    _logger.critical("关键插件加载失败：%s，告警链路缺失，拒绝启动", "、".join(_missing))
+    sys.exit(1)
 
 if __name__ == "__main__":
     nonebot.run()

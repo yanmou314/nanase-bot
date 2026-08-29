@@ -212,9 +212,13 @@ async def handle(bot: Bot, event: MessageEvent):
         content = text
     # 管理菜单标注「仅你可见」：群聊里不广播，私发给主人后群里只回简短确认
     if owner and hasattr(event, "group_id"):
+        sent = True
         try:
             await bot.send_private_msg(user_id=int(OWNER), message=content)
         except Exception:
+            sent = False
             _logger.warning("主人帮助菜单私发失败", exc_info=True)
-        await help_cmd.finish("📖 完整菜单已私发给你")
+        await help_cmd.finish(
+            "📖 完整菜单已私发给你" if sent else "📖 完整菜单私发失败，请稍后再试"
+        )
     await help_cmd.finish(content)

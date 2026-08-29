@@ -184,6 +184,20 @@ async def fetch_info(vid: str) -> dict | None:
     return info
 
 
+def _check_api_status(resp: httpx.Response, vid: str, label: str) -> bool:
+    """B站 API 非 200 一律按失败处理；412 专门标注疑似风控。返回 False 表示直接按查询失败处理。"""
+    # getattr 兼容：真实 httpx.Response 恒有 status_code；测试桩对象可能没有（视同 200 走原逻辑）
+    status = getattr(resp, "status_code", 200)
+    if status == 200:
+        return True
+    host = urlparse(str(resp.url)).hostname or ""
+    if status == 412:
+        _logger.warning("疑似触发B站风控（HTTP 412）vid=%s host=%s", vid, host)
+    else:
+        _logger.warning("B站%s信息请求 HTTP %s vid=%s host=%s", label, status, vid, host)
+    return False
+
+
 async def _fetch_video_info(vid: str) -> dict | None:
     params = {"bvid": vid[2:]} if vid.startswith("BV") else {"aid": vid[2:]}
     try:
@@ -192,9 +206,14 @@ async def _fetch_video_info(vid: str) -> dict | None:
             "https://api.bilibili.com/x/web-interface/view",
             params=params, headers=_HEADERS,
         )
+        if not _check_api_status(resp, vid, "视频"):
+            return None
         data = resp.json()
         if data.get("code") != 0 or not isinstance(data.get("data"), dict):
-            _logger.warning("B站视频信息查询失败 vid=%s code=%s", vid, data.get("code"))
+            if data.get("code") == -352:
+                _logger.warning("疑似触发B站风控（code=-352）vid=%s", vid)
+            else:
+                _logger.warning("B站视频信息查询失败 vid=%s code=%s", vid, data.get("code"))
             return None
         d = data["data"]
         stat = d.get("stat") or {}
@@ -231,9 +250,14 @@ async def _fetch_bangumi_info(vid: str) -> dict | None:
             "https://api.bilibili.com/pgc/view/web/season",
             params=params, headers=_HEADERS,
         )
+        if not _check_api_status(resp, vid, "番剧"):
+            return None
         data = resp.json()
         if data.get("code") != 0 or not isinstance(data.get("result"), dict):
-            _logger.warning("B站番剧信息查询失败 vid=%s code=%s", vid, data.get("code"))
+            if data.get("code") == -352:
+                _logger.warning("疑似触发B站风控（code=-352）vid=%s", vid)
+            else:
+                _logger.warning("B站番剧信息查询失败 vid=%s code=%s", vid, data.get("code"))
             return None
         r = data["result"]
         stat = r.get("stat") or {}
@@ -573,10 +597,19 @@ async def handle_bili_link(event: GroupMessageEvent):
         return
 
     ids = extract_ids(raw)
-    for url in _B23_RE.findall(raw):
-        resolved = await resolve_b23(url)
-        if resolved and resolved not in ids:
-            ids.append(resolved)
+    # 短链解析限流：同消息相同 URL 去重保序、最多解析前 3 条，整体 20 秒兜底防挂死
+    urls = list(dict.fromkeys(_B23_RE.findall(raw)))[:3]
+    if urls:
+        try:
+            resolved_list = await asyncio.wait_for(
+                asyncio.gather(*(resolve_b23(u) for u in urls)), 20
+            )
+        except asyncio.TimeoutError:
+            _logger.warning("b23.tv 短链解析超时（%d 条）已跳过: %s", len(urls), urls)
+            resolved_list = []
+        for resolved in resolved_list:
+            if resolved and resolved not in ids:
+                ids.append(resolved)
     if not ids:
         return
 
@@ -607,7 +640,7 @@ async def handle_bili_link(event: GroupMessageEvent):
         return
 
     # 通过检查后立即占位，避免同群并发消息同时通过检查、重复解析重复回复
-    #（check-then-set 竞态；失败时下方释放群冷却但保留去重窗口）
+    #（check-then-set 竞态；失败时下方释放群冷却，去重占位保留以拦截死链接重复查询）
     _group_last[gid] = now
     _recent[(gid, vid)] = now
 
@@ -615,6 +648,7 @@ async def handle_bili_link(event: GroupMessageEvent):
     if info is None:
         if _group_last.get(gid) == now:
             _group_last.pop(gid, None)  # 失败不占用群冷却，同群其他链接仍可正常解析
+        # 失败 vid 保留去重占位（有意设计）：死链接不重复查询，防止刷接口
         _prune_state(now)
         return
     _prune_state(now)

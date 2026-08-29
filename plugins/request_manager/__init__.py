@@ -25,16 +25,31 @@ request_matcher = on_request(priority=1, block=False)
 private_matcher = on_message(priority=20, block=False)
 
 
+def _reply_message_id(event: MessageEvent) -> str:
+    """取消息里 reply 段引用的 message_id（无引用返回空串）。"""
+    for seg in event.message:
+        if seg.type == "reply":
+            return str(seg.data.get("id") or "")
+    return ""
+
+
 async def _owner_decision_rule(event: MessageEvent) -> bool:
     """主人的纯「同意/拒绝」审批指令：
 
     priority=1 + block=True，抢在 auto_chat 等聊天插件之前。
-    群内（无需@）和私聊均始终识别，反馈只私发给主人、不在群里回话，
-    避免审批操作被聊天插件当成聊天公开回复。
+    私聊始终识别；群内只在**引用回复**机器人发出的申请通知时才识别
+    （通知发出后 message_id 已登记进 _notify_index，按引用 id 精确路由），
+    群里正常聊天说「同意/拒绝」不会再被吞掉，也不会静默放行陌生人。
+    反馈只私发给主人、不在群里回话，避免审批操作被聊天插件当成聊天公开回复。
     """
     if not is_owner(event):
         return False
-    return event.get_plaintext().strip() in {"同意", "拒绝"}
+    if event.get_plaintext().strip() not in {"同意", "拒绝"}:
+        return False
+    if isinstance(event, GroupMessageEvent):
+        reply_id = _reply_message_id(event)
+        return bool(reply_id) and _notify_index.get(reply_id) in _pending
+    return True
 
 
 decision_matcher = on_message(
@@ -202,7 +217,14 @@ async def _auto_approve(bot: Bot, event: GroupRequestEvent, comment: str) -> boo
             return False
         try:
             await bot.set_group_add_request(flag=event.flag, sub_type=event.sub_type, approve=True)
-            _guard_mark_approved(event.user_id)  # 只在实际通过后记账
+        except Exception as e:
+            try:
+                await bot.send_private_msg(user_id=int(OWNER), message=MessageSegment.text(f"⚠️ 自动通过失败：{e}"))
+            except Exception:
+                _logger.warning("自动通过失败通知发送失败", exc_info=True)
+            return False
+        _guard_mark_approved(event.user_id)  # 只在实际通过后记账
+        try:
             await bot.send_private_msg(
                 user_id=int(OWNER),
                 message=MessageSegment.text(
@@ -213,13 +235,10 @@ async def _auto_approve(bot: Bot, event: GroupRequestEvent, comment: str) -> boo
                     f"🔑 命中关键字：{' / '.join(hit)}"
                 ),
             )
-            return True
-        except Exception as e:
-            try:
-                await bot.send_private_msg(user_id=int(OWNER), message=MessageSegment.text(f"⚠️ 自动通过失败：{e}"))
-            except Exception:
-                _logger.warning("自动通过失败通知发送失败", exc_info=True)
-            return False
+        except Exception:
+            # 通知私发失败不代表审批失败：已通过的申请不能被上层当作「未通过」放回待处理重复处理
+            _logger.warning("自动通过成功但结果通知私发失败", exc_info=True)
+        return True
     return False
 
 
@@ -400,7 +419,7 @@ async def handle_request(bot: Bot, event):
             f"🏘 群号：{event.group_id}\n"
             f"👤 申请人：{event.user_id}（{ts}）\n"
             f"💬 附言：{event.comment or '无'}\n"
-            f"✍️ 群里直接回复「同意」或「拒绝」即可处理（无需@机器人，结果将私聊发给你），私聊回复也可以"
+            f"✍️ 私聊回复「同意」或「拒绝」即可处理（多个申请时请引用对应的通知消息）"
             + blocked_note
         )
     elif isinstance(event, FriendRequestEvent):
@@ -425,7 +444,7 @@ async def handle_request(bot: Bot, event):
             f"🏘 群号：{event.group_id}\n"
             f"👤 邀请人：{event.user_id}（{ts}）\n"
             f"💬 附言：{event.comment or '无'}\n"
-            f"✍️ 群里直接回复「同意」或「拒绝」即可处理（无需@机器人，结果将私聊发给你），私聊回复也可以"
+            f"✍️ 私聊回复「同意」或「拒绝」即可处理（多个申请时请引用对应的通知消息）"
         )
     else:
         return
@@ -454,38 +473,36 @@ async def _process_decision(bot: Bot, event: MessageEvent, action: bool) -> None
 
     target_key = None
 
-    if isinstance(event, GroupMessageEvent):
-        # 群内操作只允许处理当前群的进群/邀请申请，不能误操作其他群或好友申请。
-        candidates = [
-            (key, value)
-            for key, value in _pending.items()
-            if value.get("kind") == "group"
-            and value.get("group_id") == event.group_id
-        ]
-        if not candidates:
-            await _send_decision_notice(bot, "📭 当前群没有待处理的进群申请")
-            return
-        if len(candidates) > 1:
-            await _send_decision_notice(
-                bot,
-                "⚠️ 当前群有多个待处理申请，请到私聊引用对应的申请通知消息来指定处理哪一个",
-            )
-            return
-        target_key = candidates[0][0]
-    else:
-        reply_id = ""
-        for seg in event.message:
-            if seg.type == "reply":
-                reply_id = str(seg.data.get("id") or "")
-                break
-        # 审批路由只信任「机器人发出的申请通知」的 message_id（发送时登记于 _notify_index）。
-        # 不解析被引用消息的文本内容：那可能是转发自陌生人的全文，能伪造「申请人：/群号：」行，
-        # 主人一旦引用它回复同意，就会把操作路由到攻击者指定的其他申请上。
-        if reply_id:
-            candidate = _notify_index.get(reply_id)
-            target_key = candidate if candidate in _pending else None
+    # 群内与私聊统一：引用回复了机器人发出的申请通知（message_id 登记于 _notify_index）
+    # 就按引用 id 精确路由，同群有多个申请时也能准确指定。
+    # 不解析被引用消息的文本内容：那可能是转发自陌生人的全文，能伪造「申请人：/群号：」行，
+    # 主人一旦引用它回复同意，就会把操作路由到攻击者指定的其他申请上。
+    reply_id = _reply_message_id(event)
+    if reply_id:
+        candidate = _notify_index.get(reply_id)
+        target_key = candidate if candidate in _pending else None
 
-        if target_key is None:
+    if target_key is None:
+        if isinstance(event, GroupMessageEvent):
+            # 群内兜底路径（matcher 规则已保证裸发「同意/拒绝」不会进入这里）：
+            # 只允许处理当前群的进群/邀请申请，不能误操作其他群或好友申请。
+            candidates = [
+                (key, value)
+                for key, value in _pending.items()
+                if value.get("kind") == "group"
+                and value.get("group_id") == event.group_id
+            ]
+            if not candidates:
+                await _send_decision_notice(bot, "📭 当前群没有待处理的进群申请")
+                return
+            if len(candidates) > 1:
+                await _send_decision_notice(
+                    bot,
+                    "⚠️ 当前群有多个待处理申请，请到私聊引用对应的申请通知消息来指定处理哪一个",
+                )
+                return
+            target_key = candidates[0][0]
+        else:
             if len(_pending) == 1:
                 target_key = next(iter(_pending))
             else:

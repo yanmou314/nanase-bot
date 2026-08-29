@@ -243,11 +243,27 @@ def _warmup_busy_notice() -> str:
     return f"机器人正在后台预热数据，约 {int(remain) + 1} 秒后完成，请稍后再试～"
 
 
-async def _wait_queue(matcher, event: MessageEvent):
-    if OW_LOCK.locked():
-        await matcher.send(at_prefix(event) + Message("⏳ 有请求正在处理中，你已进入队列，完成后自动回复，请稍候..."))
-    await OW_LOCK.acquire()
-    return OW_LOCK
+# 排队上限：全局查询锁同一时刻只处理 1 个查询，最多再排 _QUEUE_MAX_WAITERS 个；
+# 满员直接提示稍后再试，防止查询无限堆积把渲染队列堵死
+_QUEUE_MAX_WAITERS = 3
+_queue_waiters = 0
+
+
+async def _wait_queue(matcher, event: MessageEvent) -> None:
+    """排队等待全局查询锁；排队满员时提示稍后再试并结束本次查询（不排队）。
+
+    等待名额在进入队列前同步扣减（事件循环内原子），不再依赖 locked() 检查与
+    acquire 之间「恰好没有 await」的窗口；用户提示统一由抢到锁之后各 handler
+    发送的「正在生成/查询」消息承担，提示与实际开始处理严格对应，无漏发竞态。
+    """
+    global _queue_waiters
+    if _queue_waiters >= _QUEUE_MAX_WAITERS:
+        await matcher.finish(at_prefix(event) + Message("⏳ 查询排队已满，请稍后再试～"))
+    _queue_waiters += 1
+    try:
+        await OW_LOCK.acquire()
+    finally:
+        _queue_waiters -= 1
 
 
 def _done(matcher_msg: Message, at: Message, elapsed: float) -> Message:

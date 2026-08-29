@@ -1,6 +1,6 @@
 import asyncio
 import hashlib
-import json
+import logging
 import os
 import re
 import time
@@ -10,7 +10,9 @@ from nonebot import get_driver, on_message
 from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
 
-from common import save_json_state
+from common import load_json_state, save_json_state
+
+_logger = logging.getLogger(__name__)
 
 rep_matcher = on_message(priority=50, block=False)
 
@@ -44,9 +46,9 @@ def _normalize_item(item) -> tuple:
 
 
 def _load_state() -> None:
+    # 文件级读取（缺失/损坏/不可读）统一走 common，含 corrupt/unreadable 备份防护
+    data = load_json_state(STATE_FILE)
     try:
-        with open(STATE_FILE, encoding="utf-8") as f:
-            data = json.load(f)
         for gid, items in data.get("track", {}).items():
             deq: deque = deque(maxlen=3)
             for item in items:
@@ -55,7 +57,7 @@ def _load_state() -> None:
         for gid, ts in data.get("replied_ts", {}).items():
             _replied_ts[int(gid)] = ts
     except Exception:
-        pass
+        _logger.warning("repeater 状态加载失败: %s", STATE_FILE, exc_info=True)
 
 
 def _save_state(snapshot: dict | None = None) -> None:
@@ -71,7 +73,7 @@ def _save_state(snapshot: dict | None = None) -> None:
             },
         )
     except Exception:
-        pass
+        _logger.warning("repeater 状态写入失败: %s", STATE_FILE, exc_info=True)
 
 
 _load_state()
@@ -87,7 +89,8 @@ async def _save_on_shutdown():
         }
         await asyncio.to_thread(_save_state, snapshot)
     except Exception:
-        pass  # 关机钩子绝不向上抛异常，避免拖垮 lifespan 导致状态全丢
+        # 关机钩子绝不向上抛异常，避免拖垮 lifespan 导致状态全丢
+        _logger.warning("repeater 关机落盘失败", exc_info=True)
 
 
 def _prune() -> None:

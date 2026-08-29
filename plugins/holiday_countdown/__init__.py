@@ -371,8 +371,30 @@ async def _build_image_message() -> MessageSegment | str:
         return _build_message(now)
 
 
+_last_countdown: dict[str, float] = {}
+_COUNTDOWN_COOLDOWN = 30  # 每用户 30 秒冷却：卡片渲染吃内存，防止 .倒计时 被连发刷爆
+
+
+def _check_countdown_cooldown(key: str) -> float:
+    """通过冷却则记账并返回 0；冷却中返回剩余秒数（不记账）。"""
+    now = system_time.time()
+    if len(_last_countdown) > 5000:  # 防内存增长
+        for k in [k for k, t in _last_countdown.items() if now - t > 3600]:
+            _last_countdown.pop(k, None)
+    remain = _COUNTDOWN_COOLDOWN - (now - _last_countdown.get(key, 0))
+    if remain > 0:
+        return remain
+    _last_countdown[key] = now
+    return 0.0
+
+
 @countdown_cmd.handle()
 async def countdown(event: MessageEvent):
+    # 每群+每用户维度限频（私聊 group_id 记 0），避免任意群成员刷渲染拖垮小机器
+    key = f"{getattr(event, 'group_id', 0) or 0}:{event.user_id}"
+    remain = _check_countdown_cooldown(key)
+    if remain > 0:
+        await countdown_cmd.finish(f"⏳ 倒计时生成太频繁啦，请 {int(remain) + 1} 秒后再试～")
     await countdown_cmd.finish(await _build_image_message())
 
 
@@ -424,7 +446,7 @@ _push_running = False  # 推送进行中标记：定时触发与启动补发恰�
 
 
 async def _push_daily_countdown() -> bool:
-    """推送当日倒计时到所有开启群；至少一个群送达才记录 last_push_date 并返回 True。"""
+    """推送当日倒计时到所有开启群；全部群送达才记录 last_push_date 并返回 True。"""
     global _push_running
     today = _now().date().isoformat()
     if _last_push_date() == today:
@@ -454,14 +476,20 @@ async def _push_daily_countdown() -> bool:
             return_exceptions=True,
         )
         sent = 0
+        failed = 0
         for gid, result in zip(groups, results, strict=False):
             if isinstance(result, BaseException):
+                failed += 1
                 _logger.warning("倒计时推送到群 %s 失败", gid, exc_info=result)
             else:
                 sent += 1
-        if sent:
-            _mark_pushed(_now().date())  # 有群成功送达才记录，全失败保留补发机会
-        return bool(sent)
+        if failed:
+            # 部分群失败不算推送完成：不标记 last_push_date，保留当日再次触发时的补发机会；
+            # 但不做主动补发，避免向已收到的群重复推送
+            _logger.warning("倒计时推送未全部送达（成功 %s/共 %s），今日不标记已推送", sent, sent + failed)
+            return False
+        _mark_pushed(_now().date())  # 全部目标群送达才记录，防止重复推送
+        return True
     finally:
         _push_running = False
 
@@ -480,7 +508,8 @@ _register_catchup = getattr(get_driver(), "on_bot_connect", get_driver().on_star
 
 
 @_register_catchup
-async def _countdown_catchup(bot: Bot) -> None:
+async def _countdown_catchup(bot: Bot | None = None) -> None:
+    # on_bot_connect 会传入 Bot 实例，on_startup 回退路径不传参：默认 None 兼容两种钩子
     now = _now()
     if (now.hour, now.minute) < (PUSH_TIME.hour, PUSH_TIME.minute):
         return  # 还没到当日推送时刻，交给定时任务
