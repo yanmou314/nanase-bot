@@ -3426,8 +3426,8 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #e8dcc0;
                      background: linear-gradient(180deg,#ff9a3d,#e2611b); border: 2px solid #93400f;
                      border-radius: 4px; color: #ffffff; font-size: 13px; font-weight: 900;
                      box-shadow: 0 2px 0 rgba(0,0,0,.35); }}
-.rush-bossimg {{ position: absolute; right: -16px; bottom: 22px; width: 86px; object-fit: contain;
-                 z-index: 3; filter: drop-shadow(0 2px 3px rgba(0,0,0,.45)); }}
+.rush-bossimg {{ position: absolute; right: 26px; bottom: 22px; width: 86px; object-fit: contain;
+                 z-index: 3; transform: scaleX(-1); filter: drop-shadow(0 2px 3px rgba(0,0,0,.45)); }}
 .rush-mid {{ flex: 1; min-width: 0; }}
 .rush-chips {{ display: flex; flex-wrap: wrap; gap: 6px; }}
 .rush-chip {{ display: flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 5px;
