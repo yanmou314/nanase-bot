@@ -2438,12 +2438,14 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
 
 /* ===== 默认队伍 ===== */
 .ody-crew-panel {{ min-height: 204px; padding: 8px 8px 8px; }}
-.ody-crew-body {{ display: flex; align-items: stretch; gap: 10px; width: 100%; min-height: 169px; }}
+.ody-crew-body {{ display: flex; align-items: stretch; gap: 0; width: 100%; min-height: 169px; }}
 .ody-crew-hero {{ flex: none; width: 96px; display: flex; align-items: center; justify-content: center;
-                  background: #9a8260; border: 1px solid rgba(58,44,26,.4); border-radius: 8px;
+                  background: linear-gradient(90deg, #cdbb92 0%, #cdbb92 45%, #8a7355 100%);
+                  border-radius: 8px 0 0 8px;
                   box-shadow: inset 0 1px 0 rgba(255,255,255,.15); }}
-.ody-crew-grid-cell {{ flex: 1; min-width: 0; padding: 12px 0 8px 4px; white-space: nowrap;
-                        background: #b19a76; border: 1px solid rgba(58,44,26,.4); border-radius: 8px;
+.ody-crew-grid-cell {{ flex: 1; min-width: 0; padding: 12px 0 8px 10px; white-space: nowrap;
+                        background: #8a7355;
+                        border-radius: 0 8px 8px 0;
                         box-shadow: inset 0 1px 0 rgba(255,244,222,.25); }}
 .ody-default-grid {{ text-align: left; white-space: nowrap; }}
 .ody-default-grid .ody-unit-wrap {{ width: 46px; height: 58px; }}
