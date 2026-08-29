@@ -1640,18 +1640,17 @@ def _odyssey_default_crew_html(meta: dict) -> str:
         quantity = int(item.get("quantity") or 0)
         max_count = info.get("max")
         denom = int(max_count) if isinstance(max_count, (int, float)) and max_count > 0 else quantity
-        c0, c1 = _tower_cat_grad(raw)
         img = _tower_portrait(raw)
-        face = (f"<img src='{img}' style='width:36px;height:36px;object-fit:contain;'/>" if img
-                else f"<span style='font-size:8px;color:#ffffff;line-height:11px;'>{_esc(_tower_cn(raw))}</span>")
+        face = (f"<img src='{img}' style='width:32px;height:32px;object-fit:contain;'/>" if img
+                else f"<span style='font-size:8px;color:#ffffff;line-height:10px;'>{_esc(_tower_cn(raw))}</span>")
         tower_html.append(
-            "<span style='position:relative;display:inline-block;width:46px;margin:14px 5px 0 0;"
+            "<span style='position:relative;display:inline-block;width:44px;margin:14px 3px 0 0;"
             "vertical-align:top;text-align:center;'>"
             "<span style='position:absolute;top:-8px;left:-3px;z-index:2;background:#1596d2;"
             "border:2px solid #e7f8ff;border-radius:6px;color:#ffffff;font-size:10px;line-height:14px;"
             "padding:0 4px;font-weight:900;'>{}/{}".format(quantity, denom) + "</span>"
-            "<span style='display:flex;align-items:center;justify-content:center;width:44px;height:44px;"
-            "border-radius:50%;background:linear-gradient(180deg," + c0 + "," + c1 + ");"
+            "<span style='display:flex;align-items:center;justify-content:center;width:40px;height:40px;"
+            "border-radius:50%;background:linear-gradient(180deg,#8fc460,#4d8f3c);"
             "border:2px solid rgba(0,0,0,.3);box-shadow:inset 0 1px 0 rgba(255,255,255,.4);'>" + face + "</span></span>")
     return ("<div class='ody-panel ody-crew-panel'>"
             "<div class='ody-ribbon ody-panel-title'><span>默认队伍</span></div>"
@@ -2425,14 +2424,14 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
 /* 上下两栏：队伍 + 奖励 */
 .ody-top-grid {{ display: table; width: 100%; padding: 6px 13px 0; table-layout: fixed; }}
 .ody-top-cell {{ display: table-cell; vertical-align: top; }}
-.ody-top-cell.crew {{ width: 68%; padding-right: 8px; }}
-.ody-top-cell.reward {{ width: 32%; padding-left: 8px; }}
+.ody-top-cell.crew {{ width: 70%; padding-right: 8px; }}
+.ody-top-cell.reward {{ width: 30%; padding-left: 8px; }}
 
 /* ===== 默认队伍 ===== */
 .ody-crew-panel {{ min-height: 204px; padding: 8px 8px 8px; }}
-.ody-crew-body {{ display: table; width: 100%; min-height: 169px; table-layout: fixed; }}
-.ody-crew-hero {{ display: table-cell; width: 104px; vertical-align: top; padding-top: 8px; text-align: center; }}
-.ody-crew-grid-cell {{ display: table-cell; vertical-align: top; padding: 6px 0 0 4px; }}
+.ody-crew-body {{ display: flex; align-items: flex-start; gap: 10px; width: 100%; min-height: 169px; }}
+.ody-crew-hero {{ flex: none; width: 96px; padding-top: 8px; text-align: center; }}
+.ody-crew-grid-cell {{ flex: 1; min-width: 0; padding: 14px 0 0 0; white-space: nowrap; }}
 .ody-default-grid {{ text-align: left; white-space: nowrap; }}
 .ody-default-grid .ody-unit-wrap {{ width: 46px; height: 58px; }}
 .ody-default-grid .ody-unit-card {{ width: 44px; height: 54px; border-radius: 9px; }}
@@ -2457,7 +2456,8 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
 .ody-unit-card.hero {{ background: linear-gradient(180deg, #ffe94d 0%, #ffc516 78%, #dd9300 100%); }}
 .ody-unit-card img {{ display: block; width: 51px; height: 51px; margin: 0 auto; object-fit: contain;
                        filter: drop-shadow(0 1px 0 rgba(0,0,0,.15)); }}
-.ody-unit-card.big {{ width: 92px; height: 114px; border-radius: 16px; }}
+.ody-unit-card.big {{ width: 88px; height: 108px; border-radius: 16px;
+                       background: linear-gradient(180deg, #f0a24a 0%, #d97b1c 75%, #b25e10 100%); }}
 .ody-unit-card.big img {{ width: 88px; height: 88px; }}
 /* 数量徽章（默认队伍用：右上） */
 .ody-unit-quantity {{ position: absolute; right: 1px; top: 1px; min-width: 25px; padding: 1px 3px;
