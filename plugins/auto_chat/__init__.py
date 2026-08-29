@@ -68,6 +68,7 @@ _cached_key = ""
 _cached_key_mtime = -1.0
 _key_load_warned = False  # 配置读取失败只警告一次，成功后重置，避免每条消息刷日志
 _last_timeout_notice = 0.0
+_last_fail_notice = 0.0  # 持续性故障告警的限频时间戳（与超时告警分开计数，互不吞掉）
 _TIMEOUT_NOTICE_COOLDOWN = 10 * 60
 
 POKE_REPLIES = [
@@ -327,6 +328,35 @@ async def _notify_owner_timeout(bot: Bot) -> None:
         logger.warning(f"auto_chat 超时通知主人失败（{notify_error!r}）")
 
 
+async def _notify_owner_ai_failure(bot: Bot, exc: Exception) -> None:
+    """AI 持续性故障（key 失效/欠费、5xx 重试耗尽、日预算熔断等）时私聊主人提醒。
+
+    复用超时提醒的 10 分钟限频：故障期间每条 @ 消息都会失败，不限频会刷屏。
+    摘要只含异常类型与简要信息（key 只出现在请求头里，不会进入异常文本）。
+    """
+    global _last_fail_notice
+    if not _OWNER.isdigit():
+        return
+    now = time.time()
+    if now - _last_fail_notice < _TIMEOUT_NOTICE_COOLDOWN:
+        return
+    _last_fail_notice = now
+    # 防御性脱敏：个别上游会把鉴权信息回显进错误文本，摘要里绝不出现 key
+    summary = f"{type(exc).__name__}: {str(exc)[:200]}"
+    api_key = _load_key()
+    if api_key:
+        summary = summary.replace(api_key, "***")
+    try:
+        await bot.send_private_msg(
+            user_id=int(_OWNER),
+            message=MessageSegment.text(
+                f"⚠️ AI 聊天持续故障，本次未回复：{summary}\n请检查 API key 是否有效、账户余额与服务状态"
+            ),
+        )
+    except Exception as notify_error:
+        logger.warning(f"auto_chat 故障通知主人失败（{notify_error!r}）")
+
+
 @chat_matcher.handle()
 async def chat(bot: Bot, event: MessageEvent):
     uid = str(event.user_id)
@@ -363,6 +393,9 @@ async def chat(bot: Bot, event: MessageEvent):
             return
         except Exception as e:
             logger.warning(f"auto_chat AI 生成失败（{e!r}），{_MAX_ATTEMPTS} 次尝试均失败，本次不回复")
+            # 走到这里都是持续性故障：4xx（key 失效/欠费）、重试耗尽或预算熔断，
+            # 只写日志主人无感知，按 10 分钟限频私发一条告警
+            await _notify_owner_ai_failure(bot, e)
             return
 
     if not reply:
@@ -399,7 +432,13 @@ async def poke(bot: Bot, event: PokeNotifyEvent):
                 logger.warning(f"auto_chat 戳一戳 AI 生成失败（{e!r}）")
                 reply = ""
     if not reply:
-        reply = random.choice(POKE_REPLIES)
+        # 静态回复同样套用 _POKE_RATE_LIMIT：AI 刚失败/超限或刚回复过时不再连发，
+        # 防止未配置 key 或 AI 故障期间被连戳刷屏（冷却窗口内直接不回复）
+        if now - _last_poke.get(uid, 0) >= _POKE_RATE_LIMIT:
+            _last_poke[uid] = now
+            reply = random.choice(POKE_REPLIES)
+    if not reply:
+        return
     try:
         if event.group_id:
             await bot.send_group_msg(group_id=event.group_id, message=MessageSegment.text(reply))

@@ -123,7 +123,7 @@ def run_in_thread(func, *args, **kwargs):
 # ---------------- JSON 状态文件读写（统一模式：RLock + tmp + fsync + os.replace） ----------------
 
 def load_json_state(path: str, lock=None) -> dict:
-    """读取 JSON 状态文件；缺失/非对象返回 {}；损坏时先备份为 <path>.corrupt-<ts> 再返回 {}。"""
+    """读取 JSON 状态文件；缺失/非对象返回 {}；损坏/不可读时先备份留档再返回 {}。"""
     with (lock or _NULL_LOCK):
         try:
             with open(path, encoding="utf-8") as f:
@@ -135,7 +135,25 @@ def load_json_state(path: str, lock=None) -> dict:
             _backup_corrupt(path)
             return {}
         except OSError:
+            # 与 corrupt 备份防护对等：文件存在但读不了（权限/IO 错误）时先留档，
+            # 否则后续 save 会把真实状态覆盖为空且无从排查
+            _logger.warning("状态文件读取失败: %s", path, exc_info=True)
+            _backup_unreadable(path)
             return {}
+
+
+def _backup_unreadable(path: str) -> None:
+    """不可读的状态文件在文件仍存在时先留档（.unreadable-<ts>）再放弃。"""
+    import shutil
+
+    if not os.path.isfile(path):
+        return
+    backup = f"{path}.unreadable-{int(time.time())}"
+    try:
+        shutil.copy2(path, backup)
+        _logger.warning("状态文件不可读，已备份为 %s", backup)
+    except OSError:
+        _logger.warning("状态文件不可读且备份失败: %s", path, exc_info=True)
 
 
 def _backup_corrupt(path: str) -> None:

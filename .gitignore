@@ -26,6 +26,11 @@ plugins/**/join_state.json
 *.log
 .deleted/
 
+# 审计文档（含服务器 IP、SSH 用户、内部路径等运维细节，禁止上传）
+AUDIT-*.md
+REVIEW-*.md
+SECURITY-FIX-*.md
+
 # Python
 __pycache__/
 *.pyc

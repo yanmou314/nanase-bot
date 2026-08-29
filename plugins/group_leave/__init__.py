@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import random
 import time
@@ -13,6 +14,8 @@ from nonebot.adapters.onebot.v11 import (
 )
 
 from common import load_json_state, save_json_state
+
+_logger = logging.getLogger(__name__)
 
 leave_matcher = on_notice(priority=1, block=False)
 welcome_matcher = on_notice(priority=1, block=False)
@@ -71,7 +74,7 @@ def _save_state(snapshot: dict | None = None) -> None:
         data = snapshot if snapshot is not None else _join_ts
         save_json_state(STATE_FILE, {f"{g}:{u}": t for (g, u), t in data.items()})
     except Exception:
-        pass
+        _logger.warning("group_leave 状态写入失败: %s", STATE_FILE, exc_info=True)
 
 
 async def _save_state_async() -> None:
@@ -127,16 +130,21 @@ def _pop_join(gid: int, uid: int):
     return _join_ts.pop((gid, uid), None)
 
 
-async def _import_group_members(bot: Bot, gid: int) -> None:
-    """拉取群成员列表，用 API 的 join_time 补录老成员的入群时间。"""
+async def _import_group_members(bot: Bot, gid: int) -> bool:
+    """拉取群成员列表，用 API 的 join_time 补录老成员的入群时间。
+
+    返回本轮是否新增了成员记录。已导入过的群直接跳过（避免重复拉取）；
+    重连期间新加入的群不在 _imported_groups 中，重连时会被正常补录。
+    """
     if gid in _imported_groups:
-        return
+        return False
     try:
         members = await bot.get_group_member_list(group_id=gid)
     except Exception:
-        return
+        return False
     _imported_groups.add(gid)
     now = time.time()
+    added = 0
     for m in members:
         uid = m.get("user_id")
         if not uid or str(uid) == str(bot.self_id):
@@ -149,20 +157,29 @@ async def _import_group_members(bot: Bot, gid: int) -> None:
         except (TypeError, ValueError):
             ts = 0.0
         _join_ts[key] = ts if ts > 0 else now
+        added += 1
     _prune()
-    # 落盘由 _import_existing_members 在所有群导完后统一执行一次，不再每群写一次盘
+    # 落盘由 _import_existing_members 在所有群导完后统一判断执行
+    return added > 0
 
 
 @get_driver().on_bot_connect
 async def _import_existing_members(bot: Bot):
-    """机器人连上后，一次性导入各群老成员的入群时间（join_time），全部导完只落盘一次。"""
+    """机器人连上后，一次性导入各群老成员的入群时间（join_time）。
+
+    仅当本轮确有新增记录时才落盘一次：WS 重连很频繁，无新增时全量写 2 万条
+    状态纯属浪费（同步盘只有 1.6G 小机的宝贵 IO）。
+    """
     try:
         groups = await bot.get_group_list()
     except Exception:
         return
+    added = False
     for g in groups:
-        await _import_group_members(bot, g["group_id"])
-    await _save_state_async()
+        if await _import_group_members(bot, g["group_id"]):
+            added = True
+    if added:
+        await _save_state_async()
 
 
 async def _get_name(bot: Bot, user_id: int) -> str:

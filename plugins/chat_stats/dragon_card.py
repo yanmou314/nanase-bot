@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import html as html_mod
+import logging
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -8,6 +9,8 @@ from zoneinfo import ZoneInfo
 from nonebot import get_driver
 
 from common import RENDER_SEM, close_http_clients, get_http_client, gradient_background, render_html_to_png
+
+_logger = logging.getLogger(__name__)
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 _SH = ZoneInfo("Asia/Shanghai")  # 与数据统计口径保持同一时区，避免海外部署时标题日期错一天
@@ -27,7 +30,7 @@ async def _fetch_avatar(user_id: int) -> bytes | None:
         if r.status_code == 200 and r.content:
             return r.content
     except Exception:
-        pass
+        _logger.debug("头像获取失败: %s", url, exc_info=True)
     return None
 
 

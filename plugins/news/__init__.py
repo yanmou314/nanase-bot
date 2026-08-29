@@ -14,13 +14,13 @@ from nonebot import get_bot, get_driver, on_command
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageEvent, MessageSegment
 from nonebot_plugin_apscheduler import scheduler
 
-from common import close_http_clients, get_http_client, is_owner, save_json_state
+from common import close_http_clients, get_http_client, is_owner, load_json_state, save_json_state
 
 _logger = logging.getLogger(__name__)
 _SH = ZoneInfo("Asia/Shanghai")
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()  # 必须可重入：_load_state 持锁迁移旧格式时会再调 _save_state
 
 NEWS_API = "https://60s.viki.moe/v2/60s"
 HITOKOTO_API = "https://v1.hitokoto.cn/"
@@ -54,13 +54,8 @@ def _sh_today() -> date:
 
 
 def _load_state() -> dict:
-    try:
-        with open(STATE_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
+    # common 的 load_json_state：损坏时先备份 .corrupt-<ts> 再返回 {}，避免静默丢全部订阅
+    data = load_json_state(STATE_FILE, _LOCK)
     # 旧格式 {"group_id": "xxx"} 自动迁移到多群格式
     if "groups" not in data and data.get("group_id"):
         data["groups"] = [str(data["group_id"])]
@@ -72,10 +67,8 @@ def _load_state() -> dict:
 
 
 def _save_state(data: dict) -> None:
-    tmp = STATE_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, STATE_FILE)
+    # common 的 save_json_state：tmp + fsync + os.replace 原子写，新文件 600
+    save_json_state(STATE_FILE, data, _LOCK)
 
 
 def _get_groups() -> list[str]:
@@ -403,6 +396,24 @@ async def _build_message(day: date) -> str:
 
 
 _push_running = False  # 推送进行中标记：定时触发与启动补发恰好并发时只跑一路
+_retry_day = ""  # 已安排过重试的日期：全群推送失败后每个自然日最多重试一次
+
+
+def _schedule_push_retry(today: str) -> None:
+    """全群推送失败时注册 10 分钟后的一次性重试；防重复推送由 state 的 last_push_date 兜底。"""
+    global _retry_day
+    if _retry_day == today:
+        return  # 今日已安排过重试，仅重试一次
+    _retry_day = today
+    run_at = datetime.now(_SH) + timedelta(minutes=10)
+    try:
+        scheduler.add_job(
+            daily_news_job, "date", run_date=run_at, timezone="Asia/Shanghai",
+            id=f"daily_news_retry_{today}", replace_existing=True, misfire_grace_time=300,
+        )
+        _logger.warning("晨报全群推送失败，已安排 %s 重试一次", run_at.strftime("%H:%M"))
+    except Exception:
+        _logger.exception("晨报重试任务注册失败")
 
 
 async def _send_daily() -> bool:
@@ -447,6 +458,8 @@ async def _send_daily() -> bool:
                 sent += 1
         if sent:
             _mark_pushed(_sh_today())  # 有群成功送达才记录，全失败保留补发机会
+        else:
+            _schedule_push_retry(today)  # 全群失败：10 分钟后重试一次
         return bool(sent)
     finally:
         _push_running = False

@@ -1,4 +1,4 @@
-"""指令使用统计：每天 00:00 汇总前一天指令使用情况并发送图片到所有已开启的群。"""
+"""指令使用统计：每天凌晨汇总前一天指令使用情况并发送图片到所有已开启的群。"""
 import asyncio
 import html as html_mod
 import logging
@@ -15,7 +15,7 @@ from nonebot.message import run_postprocessor
 from nonebot_plugin_apscheduler import scheduler
 
 from common import RENDER_SEM, gradient_background, is_owner, load_json_state, render_html_to_png, save_json_state
-from plugins.chat_stats.db_pg import exec, write_command as db_write_command
+from plugins.chat_stats.db_pg import exec, wait_writes_drained, write_command as db_write_command
 
 _logger = logging.getLogger(__name__)
 _SH = ZoneInfo("Asia/Shanghai")
@@ -184,7 +184,9 @@ async def _fetch_name(bot, group_id: int, user_id: int) -> str:
         _name_cache.move_to_end(key)
         return cached
     try:
-        info = await bot.get_group_member_info(group_id=group_id, user_id=user_id)
+        info = await asyncio.wait_for(
+            bot.get_group_member_info(group_id=group_id, user_id=user_id), 10
+        )
         name = info.get("card") or info.get("nickname") or str(user_id)
     except Exception:
         name = str(user_id)
@@ -202,11 +204,25 @@ async def _build_stats(day: str) -> dict:
     bot = get_bot()
     # TOP 用户昵称并行拉取，串行 await 会明显拖慢日报生成
     top = data["users_top"]
-    names = await asyncio.gather(*(
-        _fetch_name(bot, data["user_groups"][uid], uid) if uid in data["user_groups"] else str(uid)
-        for uid, _ in top
-    ))
-    data["users_named"] = [(name, cnt) for name, (_, cnt) in zip(names, top, strict=False)]
+
+    async def _name_or_id(uid: int) -> str:
+        group_id = data["user_groups"].get(uid)
+        if group_id is None:
+            return str(uid)
+        return await _fetch_name(bot, group_id, uid)
+
+    # 单次查询 10 秒超时（见 _fetch_name），整体 15 秒兜底：NapCat 卡死不致挂死日报任务
+    try:
+        names = await asyncio.wait_for(
+            asyncio.gather(*(_name_or_id(uid) for uid, _ in top), return_exceptions=True), 15
+        )
+    except asyncio.TimeoutError:
+        _logger.warning("指令统计昵称批量拉取超时，改用 QQ 号显示")
+        names = [str(uid) for uid, _ in top]
+    data["users_named"] = [
+        (name if isinstance(name, str) else str(uid), cnt)
+        for name, (uid, cnt) in zip(names, top, strict=False)
+    ]
     return data
 
 
@@ -294,7 +310,7 @@ body {{ width: {w}px; height: {h}px; font-family: "Noto Sans CJK SC", sans-serif
       <div class="ptitle">👤 指令达人 TOP {len(users_named)}</div>
       {users_html}
     </div>
-    <div class="foot">每天 00:00 自动统计 · 数据来源群聊记录</div>
+    <div class="foot">每天凌晨自动统计 · 数据来源群聊记录</div>
   </div>
 </body></html>"""
 
@@ -316,6 +332,9 @@ async def daily_cmd_stats_job():
     groups = _target_groups()
     if not groups:
         return
+    # 写路径有 0.5 秒批量 flush 窗口，先等队列清空再统计，避免漏掉临界消息；
+    # 30 秒超时兜底防止数据库异常时任务卡死
+    await wait_writes_drained(30)
     try:
         path = await _run_daily()
         bot = get_bot()
@@ -335,7 +354,7 @@ async def stats_on(event: GroupMessageEvent):
     if not is_owner(event):
         await stats_on_cmd.finish("❌ 你没有权限使用此功能")
     _add_group(event.group_id)
-    await stats_on_cmd.finish("✅ 本群已开启每日指令统计推送（每天 00:00 发送）")
+    await stats_on_cmd.finish("✅ 本群已开启每日指令统计推送（每天凌晨发送）")
 
 
 @stats_off_cmd.handle()
@@ -352,5 +371,5 @@ async def stats_status(event: GroupMessageEvent):
         await stats_status_cmd.finish("❌ 你没有权限使用此功能")
     groups = _target_groups()
     if groups:
-        await stats_status_cmd.finish(f"📈 每日指令统计已开启于 {len(groups)} 个群（每天 00:00 发送）：\n{'、'.join(map(str, groups))}")
+        await stats_status_cmd.finish(f"📈 每日指令统计已开启于 {len(groups)} 个群（每天凌晨发送）：\n{'、'.join(map(str, groups))}")
     await stats_status_cmd.finish("📈 每日指令统计：未开启")

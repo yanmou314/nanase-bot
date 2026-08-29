@@ -129,8 +129,9 @@ async def _generate_reply(gid: int) -> str:
     reply = await mod.chat_completion(messages, max_tokens=120)
     if not reply or reply.strip() == "[SKIP]":
         return ""
-    # 去掉 AI 偶尔自带的引号包裹
-    if len(reply) >= 2 and reply[0] == reply[-1] and reply[0] in "\"'「」『":
+    # 去掉 AI 偶尔自带的引号包裹（全角引号首尾不同字，需按配对映射判断）
+    quote_pairs = {"\"": "\"", "'": "'", "「": "」", "『": "』"}
+    if len(reply) >= 2 and reply[0] in quote_pairs and reply[-1] == quote_pairs[reply[0]]:
         reply = reply[1:-1].strip()
     return reply[:200]
 

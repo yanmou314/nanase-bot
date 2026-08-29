@@ -82,7 +82,9 @@ async def _get_name(bot: Bot, group_id: int, user_id: int) -> str:
         _nick_cache.move_to_end(key)
         return cached
     try:
-        info = await bot.get_group_member_info(group_id=group_id, user_id=user_id)
+        info = await asyncio.wait_for(
+            bot.get_group_member_info(group_id=group_id, user_id=user_id), 10
+        )
         name = info.get("card") or info.get("nickname") or str(user_id)
     except Exception:
         name = str(user_id)
@@ -130,7 +132,7 @@ async def _build_word_image(group_id: int, n: int) -> str | None:
                         counter[s] += 1
     if not counter:
         return None
-    cleanup_cache(WORD_CACHE)
+    await asyncio.to_thread(cleanup_cache, WORD_CACHE)  # 同步磁盘扫描不阻塞事件循环
     from .wordcloud_card import _render as render_cloud
     # PIL 渲染经全局渲染信号量串行化，避免小机器上并发渲染打爆内存
     async with RENDER_SEM:
@@ -199,7 +201,7 @@ async def words_on(event: GroupMessageEvent):
     if not is_owner(event):
         await words_on_cmd.finish("❌ 你没有权限使用此功能")
     _add_words_group(str(event.group_id))
-    await words_on_cmd.finish("✅ 本群已开启每日词云推送\n每天 00:00 自动发送前一天的热词词云到此群")
+    await words_on_cmd.finish("✅ 本群已开启每日词云推送\n每天凌晨自动发送前一天的热词词云到此群")
 
 
 @words_off_cmd.handle()
@@ -216,7 +218,7 @@ async def words_status(event: GroupMessageEvent):
         await words_status_cmd.finish("❌ 你没有权限使用此功能")
     groups = _words_groups()
     if groups:
-        await words_status_cmd.finish(f"📊 每日词云推送已开启于 {len(groups)} 个群（每天 00:00 发送）：\n{'、'.join(groups)}")
+        await words_status_cmd.finish(f"📊 每日词云推送已开启于 {len(groups)} 个群（每天凌晨发送）：\n{'、'.join(groups)}")
     await words_status_cmd.finish("📊 每日词云推送：未开启")
 
 

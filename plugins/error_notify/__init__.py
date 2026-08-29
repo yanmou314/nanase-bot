@@ -10,6 +10,7 @@ from nonebot import get_bot, get_driver, logger
 
 # 与 chat_stats/news 等插件一致：直接导入调度器单例。
 # 不能用 require()——该模块已被更早加载的插件按普通模块导入，二次按插件加载会报错。
+import apscheduler.events as _aps_events
 from apscheduler.events import EVENT_JOB_ERROR
 from nonebot_plugin_apscheduler import scheduler
 
@@ -23,6 +24,9 @@ from common import OWNER
 _COOLDOWN = 10 * 60  # 同一插件同一错误 10 分钟内只提醒一次
 _last_notified: dict[str, float] = {}
 _loop: asyncio.AbstractEventLoop | None = None
+
+# 定时任务错过触发（misfire）的事件码；测试 stub 未提供该常量，真实 APScheduler 中为 1 << 7
+EVENT_JOB_MISSED = getattr(_aps_events, "EVENT_JOB_MISSED", 1 << 7)
 
 
 def _plugin_label(matcher: Matcher) -> str:
@@ -61,6 +65,12 @@ def _should_notify(key: str, now: float) -> bool:
     return True
 
 
+def _rollback_cooldown(key: str) -> None:
+    """发送失败时回滚 _should_notify 预占的冷却：失败不占冷却，恢复后可立即重试。"""
+    if key:
+        _last_notified.pop(key, None)
+
+
 def _build_message(plugin: str, exc: Exception, loc: str) -> str:
     detail = f"{type(exc).__name__}: {exc}"
     if len(detail) > 300:
@@ -80,10 +90,14 @@ async def _send_notice(text: str) -> None:
     await bot.send_private_msg(user_id=int(OWNER), message=MessageSegment.text(text))
 
 
-def _log_notice_result(fut) -> None:
-    """run_coroutine_threadsafe 的 future 无人 await，异常需在此显式记日志而不是等 GC 报警。"""
+def _log_notice_result(fut, key: str = "") -> None:
+    """run_coroutine_threadsafe 的 future 无人 await，异常需在此显式记日志而不是等 GC 报警。
+
+    发送失败时同时回滚冷却预占（key 非空时），保留立即重试的机会。
+    """
     exc = fut.exception()
     if exc is not None:
+        _rollback_cooldown(key)
         logger.opt(exception=exc).warning("定时任务报错通知发送失败")
 
 
@@ -94,14 +108,18 @@ async def notify_plugin_error(matcher: Matcher, exception: Exception | None) -> 
         exception, (MatcherException, SkippedException, IgnoredException)
     ):
         return
+    key = ""
     try:
         plugin = _plugin_label(matcher)
         loc = _deepest_location(exception)
-        if not _should_notify(_error_key(plugin, exception, loc), time.time()):
+        key = _error_key(plugin, exception, loc)
+        if not _should_notify(key, time.time()):
             return
         await _send_notice(_build_message(plugin, exception, loc))
     except Exception:
-        # 通知钩子自身绝不向上抛，避免拖垮事件分发
+        # 通知钩子自身绝不向上抛，避免拖垮事件分发；发送失败（如 NapCat 断连、
+        # get_bot 抛 ValueError）时回滚冷却预占，恢复后同类告警可立即重发而不是空烧 10 分钟
+        _rollback_cooldown(key)
         logger.exception("插件报错通知发送失败")
 
 
@@ -132,15 +150,48 @@ def _on_job_error(event) -> None:
             return
         label = _job_label(event)
         loc = _deepest_location(exc)
-        if not _should_notify(_error_key(label, exc, loc), time.time()):
+        key = _error_key(label, exc, loc)
+        if not _should_notify(key, time.time()):
             return
         text = _build_message(label, exc, loc)
         if _loop is not None and not _loop.is_closed():
-            asyncio.run_coroutine_threadsafe(_send_notice(text), _loop).add_done_callback(_log_notice_result)
+            asyncio.run_coroutine_threadsafe(_send_notice(text), _loop).add_done_callback(
+                lambda fut, key=key: _log_notice_result(fut, key)
+            )
         else:
+            _rollback_cooldown(key)
             logger.error("定时任务报错但事件循环未就绪，无法私发通知：%s", text)
     except Exception:
         logger.exception("定时任务报错通知分发失败")
 
 
+def _build_missed_message(label: str) -> str:
+    return (
+        f"⏰ 定时任务错过\n"
+        f"🔔 任务：{label}\n"
+        f"🕐 {datetime.now().strftime('%m-%d %H:%M')}\n"
+        f"（同一任务 {_COOLDOWN // 60} 分钟内不重复提醒）"
+    )
+
+
+def _on_job_missed(event) -> None:
+    """APScheduler 事件监听器：定时任务错过触发（misfire）时通知主人。"""
+    try:
+        label = _job_label(event)
+        key = f"missed|{label}"
+        if not _should_notify(key, time.time()):
+            return
+        text = _build_missed_message(label)
+        if _loop is not None and not _loop.is_closed():
+            asyncio.run_coroutine_threadsafe(_send_notice(text), _loop).add_done_callback(
+                lambda fut, key=key: _log_notice_result(fut, key)
+            )
+        else:
+            _rollback_cooldown(key)
+            logger.error("定时任务错过但事件循环未就绪，无法私发通知：%s", text)
+    except Exception:
+        logger.exception("定时任务错过通知分发失败")
+
+
 scheduler.add_listener(_on_job_error, EVENT_JOB_ERROR)
+scheduler.add_listener(_on_job_missed, EVENT_JOB_MISSED)
