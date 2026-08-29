@@ -27,6 +27,13 @@ from nonebot_plugin_apscheduler import scheduler
 
 from common import RENDER_SEM, get_http_client, is_owner, load_json_state, render_html_to_png, save_json_state
 
+try:  # 插件以包形式加载时用相对导入；兜底按顶层模块名导入
+    from . import rushgen
+    from .rushgen import generate_boss_rush as _generate_boss_rush
+except ImportError:  # pragma: no cover
+    import rushgen
+    from rushgen import generate_boss_rush as _generate_boss_rush
+
 _logger = logging.getLogger(__name__)
 _SH = ZoneInfo("Asia/Shanghai")
 
@@ -3197,45 +3204,70 @@ _RUSH_BOSSES = [
 ]
 
 
+# Boss 名 → 本地头像（Diamondback 暂无专属素材，走 boss-event.png 兜底）
+_RUSH_BOSS_ART = {name: png for name, png, _emoji in _RUSH_BOSSES}
+
+_REWARD_LABELS = {
+    "MonkeyMoney": "猴币", "Trophy": "奖杯", "TeamTrophy": "战队奖杯",
+    "CollectionEvent": "收集事件", "RandomPower": "随机强化", "RandomInstaMonkey": "随机香蕉",
+}
+
+
+def _rush_stage_rewards_text(reward_str: str) -> str:
+    """把 StageRewards 配置串（K:V#K:V）转成中文摘要。"""
+    parts = []
+    for chunk in (reward_str or "").split("#"):
+        if ":" not in chunk:
+            continue
+        k, v = chunk.split(":", 1)
+        parts.append(f"{_REWARD_LABELS.get(k, k)} {v}")
+    return " · ".join(parts)
+
+
 async def collect_rush() -> dict:
-    """模仿 collect_odyssey：拉 /btd6/events，过滤 bossRush，
-    单 difficulty（"default"）含 5 岛路线（按 _RUSH_BOSSES 顺序）。"""
+    """拉 /btd6/events 取 bossRush 摘要，用 rushgen 从活动种子生成逐阶段配置。
+
+    NK 开放 API 不提供 Boss Rush 明细（/btd6/bossRush 为 404），逐阶段数据由
+    rushgen（BTD6 API Explorer Lucy 逆向算法的 Python 移植）从活动 ID 确定性生成。
+    """
     now = bucket_now()
     events = await fetch_body(URL_EVENTS)
     rush_list = [e for e in events if isinstance(e, dict) and e.get("type") == "bossRush"]
     ev = pick_active(rush_list, now) or pick_next(rush_list, now) or fallback_latest(rush_list)
     if not ev:
         return {"empty": "当前没有 Boss Rush 活动"}
+    br = rushgen.load_constants()["bossRush"]
+    scores = br.get("StageScores") or []
+    rewards = br.get("StageRewards") or []
+    gen = rushgen.generate_boss_rush(str(ev.get("id") or ""))
     islands = []
-    for idx, (name, png, _emoji_hex) in enumerate(_RUSH_BOSSES, 1):
-        boss_url = _ui_asset_data_url(png) or _ui_asset_data_url("boss-event.png") or ""
+    for st in gen["stages"]:
+        idx = st["stage"] - 1
+        boss_name = st["boss"]
+        art = _RUSH_BOSS_ART.get(boss_name)
+        boss_url = (_ui_asset_data_url(art) if art else "") or _ui_asset_data_url("boss-event.png") or ""
         islands.append({
-            "name": f"Island {idx} · {name}",
-            "map": name,
+            "stage": st["stage"],
+            "name": f"Island {st['stage']} · {boss_name}",
+            "map": boss_name,
+            "map_name": st["map"],
+            "boss": boss_name,
+            "kills": scores[idx] if idx < len(scores) else 0,
+            "reward_text": _rush_stage_rewards_text(rewards[idx] if idx < len(rewards) else ""),
+            "towers": st["towers"],
+            "removed": st["removed"],
+            "relics": st["relics"],
+            "new_relic": st["newRelic"],
             "img": boss_url,
-            "difficulty": "",
-            "mode": "Boss Rush",
-            "startingCash": 0,
-            "startRound": 1,
-            "endRound": 140,
-            "lives": 0,
-            "maxLives": 0,
-            "maxTowers": 0,
-            "maxParagons": 0,
-            "roundSets": [],
-            "_bloonModifiers": {},
-            "disableMK": False,
-            "disablePowers": False,
-            "disableInstas": False,
-            "disableSelling": False,
-            "noContinues": False,
-            "disableDoubleCash": False,
         })
-    return {"ev": ev, "diffs": {"default": {"meta": {"isExtreme": False, "_availablePowers": [], "_availableTowers": []}, "maps": islands}}}
+    hero = gen.get("hero")
+    return {"ev": ev,
+            "hero": "队长自选英雄" if hero == "ChosenPrimaryHero" else (hero or ""),
+            "diffs": {"default": {"meta": {"isExtreme": False}, "maps": islands}}}
 
 
 def _rush_text(col: dict) -> str:
-    """模仿 odyssey_text：文字版岛屿路线。"""
+    """模仿 odyssey_text：文字版阶段路线。"""
     if col.get("empty"):
         return col["empty"]
     ev, diffs = col["ev"], col["diffs"]
@@ -3244,23 +3276,21 @@ def _rush_text(col: dict) -> str:
         "🏝️ Boss Rush",
         f"{(ev.get('name') or '').strip() or 'Boss Rush'}（{state}）",
         _fmt_range(ev),
-        "⚠️ NK 官方仅 /btd6/events 摘要，岛屿/排行暂未开放",
         "",
     ]
     diff = diffs.get("default") or {}
     for mp in diff.get("maps") or []:
-        lines.append(f"  👹 {mp['name']}")
+        lines.append(f"  第{mp['stage']}阶段 · {mp['map_name']} · {mp['boss']} · 击杀 {mp['kills']}")
+        lines.append(f"    奖励：{mp['reward_text']}")
+        if mp.get("removed"):
+            lines.append(f"    移除：{'、'.join(mp['removed'])}")
+    if col.get("hero"):
+        lines.append(f"英雄：{col['hero']}")
     return "\n".join(lines).rstrip()
 
 
 def _rush_diff_html(col: dict, d: str = "default", label: str = "") -> str:
-    """Boss Rush 专用紧凑卡片。
-
-    NK 官方 /btd6/events 对 bossRush 只提供摘要（名称/起止/状态），没有队伍、
-    奖励、逐岛规则等明细，因此不再套用远征模板渲染占位区块（历史上导致卡片
-    大面积空白、看起来"什么都没有"），只展示官方真实提供的摘要 + 社区默认
-    Boss 轮换顺序。
-    """
+    """Boss Rush 专用卡片：版式对照游戏内活动页（逐阶段行：地图/Boss/击杀/奖励/塔池）。"""
     if col.get("empty"):
         return _odyssey_shell(f"<div class='ody-panel ody-map-empty'>{_esc(col['empty'])}</div>", 260)
     ev = col["ev"]
@@ -3269,45 +3299,97 @@ def _rush_diff_html(col: dict, d: str = "default", label: str = "") -> str:
     state = _state_of(ev, bucket_now())
     event_name = (ev.get("name") or "Boss Rush").strip() or "Boss Rush"
 
-    # 顶部三丝带
     lives_icon = _odyssey_top_icon("lives")
     seats_icon = _odyssey_top_icon("seats")
     towers_icon = _odyssey_top_icon("towers")
     lives_img = f"<img class='ody-ribbon-icon' src='{_esc(lives_icon)}'/>" if lives_icon else "❤"
     seats_img = f"<img class='ody-ribbon-icon' src='{_esc(seats_icon)}'/>" if seats_icon else "🚻"
     towers_img = f"<img class='ody-ribbon-icon' src='{_esc(towers_icon)}'/>" if towers_icon else "🐵"
+
+    rows = []
+    for mp in maps:
+        tower_chips = "".join(
+            f"<span style='display:inline-block;margin:0 4px 4px 0;padding:1px 7px;border-radius:4px;"
+            f"background:rgba(255,244,222,.14);border:1px solid rgba(255,244,222,.22);"
+            f"font-size:10px;color:#efe6d2;line-height:16px;'>{_esc(t)}</span>"
+            for t in mp["towers"])
+        relic_chips = "".join(
+            f"<span style='display:inline-block;margin:0 4px 0 0;padding:1px 7px;border-radius:4px;"
+            f"background:rgba(255,214,90,.16);border:1px solid rgba(255,214,90,.4);"
+            f"font-size:10px;color:#ffd964;line-height:16px;'>{_esc(r)}"
+            + ("<b style='color:#fff;'> 新!</b>" if r == mp.get("new_relic") else "")
+            + "</span>"
+            for r in mp["relics"])
+        removed_chips = "".join(
+            f"<span style='display:inline-block;margin:0 4px 0 0;padding:1px 7px;border-radius:4px;"
+            f"background:rgba(255,90,70,.14);border:1px solid rgba(255,90,70,.4);"
+            f"font-size:10px;color:#ff9a8a;line-height:16px;text-decoration:line-through;'>{_esc(t)}</span>"
+            for t in mp.get("removed") or [])
+        removed_html = (f"<div style='margin-top:4px;font-size:10px;color:#c9bda6;'>"
+                        f"本阶段移除：{removed_chips}</div>") if removed_chips else ""
+        rows.append(
+            "<div style='position:relative;display:flex;align-items:stretch;gap:10px;"
+            "margin:0 16px 10px;padding:10px 12px;background:#45413a;border:1px solid #2e2b25;"
+            "border-radius:6px;text-align:left;'>"
+            "<div style='position:relative;flex:none;width:92px;'>"
+            f"<div style='width:92px;height:58px;border-radius:4px;display:flex;align-items:center;"
+            f"justify-content:center;background:linear-gradient(160deg,#3f6f5e,#26473c);'>"
+            f"<span style='font-size:11px;font-weight:900;color:#d9efe2;letter-spacing:1px;'>{_esc(mp['map_name'])}</span></div>"
+            f"<div style='position:absolute;left:-3px;bottom:-8px;padding:1px 8px;border-radius:3px;"
+            f"background:linear-gradient(180deg,#ff9a3d,#e2611b);border:1px solid #93400f;"
+            f"font-size:11px;font-weight:900;color:#fff;box-shadow:0 1px 0 rgba(0,0,0,.4);'>STAGE {mp['stage']}</div>"
+            "</div>"
+            + (f"<img src='{_esc(mp['img'])}' alt='' style='flex:none;width:56px;object-fit:contain;'/>" if mp.get("img") else "")
+            + "<div style='flex:1;min-width:0;'>"
+            + f"<div style='font-size:14px;font-weight:900;color:#fff;line-height:18px;'>"
+            + f"{_esc(mp['map_name'])} <span style='color:#ffb95e;'>· {_esc(mp['boss'])}</span></div>"
+            + "<div style='margin:3px 0 4px;'>"
+            + f"<span style='display:inline-block;margin-right:8px;padding:1px 8px;border-radius:4px;"
+            + f"background:rgba(255,90,70,.16);border:1px solid rgba(255,90,70,.4);font-size:11px;"
+            + f"color:#ffb0a0;line-height:17px;'>☠ 击杀需求 {_esc(mp['kills'])}</span>"
+            + f"<span style='display:inline-block;margin-right:8px;padding:1px 8px;border-radius:4px;"
+            + f"background:rgba(255,214,90,.14);border:1px solid rgba(255,214,90,.38);font-size:11px;"
+            + f"color:#ffe08a;line-height:17px;'>奖励 {_esc(mp['reward_text'])}</span>"
+            + "</div>"
+            + f"<div style='font-size:10px;color:#c9bda6;margin-bottom:2px;'>塔池 {len(mp['towers'])} 种：</div>"
+            + f"<div>{tower_chips}</div>"
+            + (f"<div style='margin-top:3px;font-size:10px;color:#c9bda6;'>遗物：{relic_chips}</div>" if relic_chips else "")
+            + removed_html
+            + "</div></div>"
+        )
+
+    hero = col.get("hero") or ""
+    hero_html = (f"<div style='margin:0 16px 8px;font-size:12px;color:#ffd964;text-align:left;'>"
+                 f"英雄：{_esc(hero)}</div>") if hero else ""
+    tower_pool = []
+    for mp in maps:
+        for t in mp["towers"]:
+            if t not in tower_pool:
+                tower_pool.append(t)
+    pool_chips = "".join(
+        f"<span style='display:inline-block;margin:0 4px 4px 0;padding:1px 7px;border-radius:4px;"
+        f"background:rgba(255,244,222,.14);border:1px solid rgba(255,244,222,.22);"
+        f"font-size:10px;color:#efe6d2;line-height:16px;'>{_esc(t)}</span>"
+        for t in tower_pool)
     top = (
         "<div class='ody-ribbons'>"
-        f"<div class='ody-ribbon-cell'><div class='ody-ribbon'>{lives_img} 岛数：{len(maps)}</div></div>"
+        f"<div class='ody-ribbon-cell'><div class='ody-ribbon'>{lives_img} 阶段：{len(maps)}</div></div>"
         f"<div class='ody-ribbon-cell'><div class='ody-ribbon'>{seats_img} Boss：{len(maps)} 轮</div></div>"
         f"<div class='ody-ribbon-cell'><div class='ody-ribbon'>{towers_img} 状态：{_STATE_TXT[state]}</div></div>"
         "</div>"
         f"<div class='ody-event'>{_esc(event_name)} · 团队冲刺 · {_esc(_fmt_range(ev))} · {_esc(_STATE_TXT[state])}</div>"
         + "<div class='ody-extreme-badge'>Boss Rush 模式</div>"
-        + "<div class='ody-panel' style='margin:12px 16px 0;'>"
-        + "<div class='ody-panel-title'><span>Boss 顺序 · 社区默认轮换</span></div>"
-        + "".join(
-            "<div style='display:flex;align-items:center;gap:12px;margin:0 12px 8px;"
-            "padding:6px 12px;background:rgba(255,244,222,.16);border-radius:8px;'>"
-            + (f"<img src='{_esc(isl.get('img') or '')}' alt='' style='width:42px;height:42px;"
-               "object-fit:contain;border-radius:8px;background:#96805f;'/>" if isl.get("img")
-               else "<div style='width:42px;height:42px;'></div>")
-            + "<div style='flex:1;text-align:left;'>"
-            + f"<div style='font-size:15px;font-weight:900;color:#3d2a17;line-height:20px;'>"
-            + f"第 {idx} 岛 · {_esc(isl.get('name', '').split('·', 1)[-1].strip() or f'Island {idx}')}</div>"
-            + f"<div style='font-size:11px;color:#6b5238;line-height:16px;'>Boss Rush · 共 {len(maps)} 轮</div>"
-            + "</div></div>"
-            for idx, isl in enumerate(maps, 1)
-        )
-        + "</div>"
-        + "<div class='ody-event-desc' style='margin-top:10px;'>⚠ NK 官方暂未开放 Boss Rush 的队伍/奖励/地图/排行数据，开放后本卡会自动补充</div>"
+        + hero_html
+        + "<div style='margin:0 16px 10px;padding:8px 10px;background:rgba(255,244,222,.08);"
+        + "border-radius:8px;text-align:left;'>"
+        + f"<div style='font-size:10px;color:#c9bda6;margin-bottom:3px;'>全部可用塔（{len(tower_pool)} 种，随阶段推进逐步解锁/移除）：</div>"
+        + f"<div>{pool_chips}</div></div>"
+        + "".join(rows)
+        + "<div class='ody-event-desc' style='margin-top:6px;'>⚠ 阶段配置由活动种子确定性生成（与游戏内一致）；官方 API 未提供队伍实时进度与道具图标</div>"
     )
-    # 紧凑高度：丝带38 + 活动行30 + 徽章22 + 面板(标题22 + 5行×66 + 边距24) + 说明24 + 底部留白
-    height = 38 + 30 + 22 + (46 + len(maps) * 66 + 24) + 24 + 20
+    # 高度：丝带38 + 活动行30 + 徽章22 + 英雄18 + 塔池块(约78) + 5×阶段行(~114) + 说明26 + 边距
+    height = 38 + 30 + 22 + 26 + 78 + len(maps) * 165 + 26 + 24
     return _odyssey_shell(top, height)
-
-
-
 
 def _ct_html(ev: dict, tiles: list, now: int) -> str:
     """争夺领土专属卡片：模仿竞速 UI，展示当前 CT 事件的领地与时间。"""
