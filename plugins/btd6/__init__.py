@@ -2466,7 +2466,7 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
 .ody-unit-card img {{ display: block; width: 51px; height: 51px; margin: 0 auto; object-fit: contain;
                        filter: drop-shadow(0 1px 0 rgba(0,0,0,.15)); }}
 .ody-crew-panel .ody-unit-card.big {{ width: 80px; height: 100px; border-radius: 14px;
-                       background: linear-gradient(180deg, #f7ecd2 0%, #e9d5a4 70%, #d8bf8a 100%); }}
+                       background: linear-gradient(180deg, #f0a24a 0%, #d97b1c 75%, #b25e10 100%); }}
 .ody-unit-card.big img {{ width: 76px; height: 76px; }}
 /* 数量徽章（默认队伍用：右上） */
 .ody-unit-quantity {{ position: absolute; right: 1px; top: 1px; min-width: 25px; padding: 1px 3px;
