@@ -1169,7 +1169,7 @@ def tower_limit_lines(towers: list) -> list[str]:
         mx = t.get("max")
         blocked = {
             p: n for p in (1, 2, 3)
-            if (n := int(t.get(f"path{p}NumBlockedTiers") or 0)) > 0
+            if (n := int(t.get(f"path{p}NumBlockedTiers") or 0)) != 0
         }
         if bool(t.get("isHero")):
             if isinstance(mx, (int, float)) and mx > 0:  # 允许的英雄（如 max=99 表示仅此英雄）
@@ -1370,9 +1370,10 @@ def _odyssey_upgrade_caps(t: dict) -> str:
         return ""
     def cap(blocked) -> int:
         try:
-            return max(0, 5 - int(blocked or 0))
+            n = int(blocked or 0)
         except (TypeError, ValueError):
             return 5
+        return 0 if n == -1 else max(0, 5 - n)
     return f"{cap(t.get('path1NumBlockedTiers'))}-{cap(t.get('path2NumBlockedTiers'))}-{cap(t.get('path3NumBlockedTiers'))}"
 
 
@@ -3698,8 +3699,12 @@ def leaderboard_html(col: dict) -> str:
 
 
 def _path_max_txt(blocked: dict) -> str:
-    """路径限制 → 3-2-3（每条路可升到的最高层数，BTD6 每路满级 5 层）。"""
-    return "-".join(str(5 - blocked.get(p, 0)) for p in (1, 2, 3))
+    """路径限制 → 3-2-3（每条路可升到的最高层数，BTD6 每路满级 5 层）。
+    封锁值 -1 表示整路禁用 → 显示 0（与游戏/BTD6 API Explorer 一致）。"""
+    def cap(p: int) -> str:
+        n = int(blocked.get(p, 0) or 0)
+        return "0" if n == -1 else str(max(0, 5 - n))
+    return "-".join(cap(p) for p in (1, 2, 3))
 
 
 def _monkey_cell(raw: str, is_hero: bool, mx, blocked: dict) -> str:
@@ -3737,7 +3742,7 @@ def _monkey_grid(towers: list) -> str:
             continue  # 禁用：直接不显示
         blocked = {
             p: n for p in (1, 2, 3)
-            if (n := int(t.get(f"path{p}NumBlockedTiers") or 0)) > 0
+            if (n := int(t.get(f"path{p}NumBlockedTiers") or 0)) != 0
         }
         is_hero = bool(t.get("isHero"))
         limited = isinstance(mx, (int, float)) and 0 < mx < 99
@@ -3748,6 +3753,29 @@ def _monkey_grid(towers: list) -> str:
         return "<div class='empty'>本活动没有猴子限制</div>"
     return "<div class='mkgrid'>" + "".join(cells) + "</div>"
 
+
+def _daily_monkey_grid(meta: dict) -> str:
+    """每日挑战：全塔总览——官方 _towers 里有记录的塔带限制角标，
+    未记录的塔表示无限制（正常可放、可满级），max=0 的塔灰化并标记禁用。"""
+    restrictions = {}
+    for t in meta.get("_towers") or []:
+        raw = str(t.get("tower") or "").strip()
+        if raw and raw != "ChosenPrimaryHero":
+            restrictions[raw] = t
+    constants = rushgen.load_constants()
+    cells = []
+    for name in constants["towersInOrder"]:
+        entry = dict(restrictions.get(name) or {"tower": name})
+        entry.setdefault("tower", name)
+        try:
+            if float(entry.get("max")) == 0:
+                entry["_banned"] = True
+        except (TypeError, ValueError):
+            pass
+        cells.append(_race_monkey_cell(entry))
+    if not cells:
+        return "<div class='mkgrid race-mkgrid'><div class='race-mk-fallback'>无</div></div>"
+    return "<div class='mkgrid race-mkgrid' style='height:auto;overflow:visible;'>" + "".join(cells) + "</div>"
 
 def _race_visible_towers(towers: list) -> list[dict]:
     """截图中的默认视图：显示所有可用/限购塔，隐藏 max=0 与占位英雄。"""
@@ -3778,31 +3806,36 @@ def _race_monkey_cell(tower: dict) -> str:
         max_num = float(mx)
     except (TypeError, ValueError):
         max_num = None
+    banned = bool(tower.get("_banned"))
     limited = max_num is not None and 0 < max_num < 99
     blocked = {
         p: n for p in (1, 2, 3)
-        if (n := int(tower.get(f"path{p}NumBlockedTiers") or 0)) > 0
+        if (n := int(tower.get(f"path{p}NumBlockedTiers") or 0)) != 0
     }
     tags = []
     if limited:
         tags.append(f"×{int(max_num)}")
     if blocked:
         tags.append(_path_max_txt(blocked))
+    if banned:
+        tags.append("禁用")
     title = name + (f" · {' '.join(tags)}" if tags else "")
+    grey = " style='filter:grayscale(.85);opacity:.82;'" if banned else ""
     if icon:
-        cell = f"<div class='race-mk {category}' title='{_esc(title)}'>"
+        cell = f"<div class='race-mk {category}' title='{_esc(title)}'{grey}>"
         cell += f"<img src='{_esc(icon)}' alt='{_esc(name)}'/>"
     else:
-        cell = f"<div class='race-mk {category}' title='{_esc(title)}'>"
+        cell = f"<div class='race-mk {category}' title='{_esc(title)}'{grey}>"
         cell += f"<div class='race-mk-fallback'>{_esc(name)}</div>"
-    if limited:
-        cell += f"<div class='race-lim'>×{int(max_num)}</div>"
-    if blocked:
-        cell += f"<div class='race-path'>{_esc(_path_max_txt(blocked))}</div>"
+    if banned:
+        cell += f"<div class='race-path' style='background:#8f2f22;'>禁用</div>"
+    else:
+        if limited:
+            cell += f"<div class='race-lim'>×{int(max_num)}</div>"
+        if blocked:
+            cell += f"<div class='race-path'>{_esc(_path_max_txt(blocked))}</div>"
     cell += "</div>"
     return f"<div class='race-mkwrap'>{cell}</div>"
-
-
 def _race_monkey_grid(towers: list) -> str:
     cells = [_race_monkey_cell(tower) for tower in _race_visible_towers(towers)]
     if not cells:
@@ -3873,7 +3906,7 @@ def rules_html(col: dict) -> str:
              f"<div class='race-stat-col'>{stat_right}</div></div></div></div>"
               "<div class='race-monkey-section'><div class='race-options'>"
               "<div class='race-available'>可用猴子：</div></div>"
-              f"{_race_monkey_grid(meta.get('_towers'))}</div>")
+              f"{_daily_monkey_grid(meta) if str(meta.get('id') or '').startswith('rot') else _race_monkey_grid(meta.get('_towers'))}</div>")
 
     modifier_html = _race_modifier_html(meta.get("_bloonModifiers"))
     custom_round_details = _custom_round_details(meta)
@@ -3945,7 +3978,7 @@ def _rules_compat_html(meta: dict, prefix: str, scoring: str, ev: dict | None) -
             tags.append(f"×{int(max_num)}")
         blocked = {
             p: n for p in (1, 2, 3)
-            if (n := int(tower.get(f"path{p}NumBlockedTiers") or 0)) > 0
+            if (n := int(tower.get(f"path{p}NumBlockedTiers") or 0)) != 0
         }
         if blocked:
             tags.append(_path_max_txt(blocked))
