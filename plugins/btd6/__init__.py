@@ -1725,11 +1725,14 @@ def _odyssey_rewards_html(rewards: list) -> str:
             items.append(f"<div class='ody-reward-cell'>{icon_html}"
                          f"<div class='ody-reward-value'>{_esc(_odyssey_power_name(power))}</div></div>")
         elif raw.startswith("InstaMonkey:"):
-            tower = raw.split(":", 1)[1]
+            spec = raw.split(":", 1)[1]
+            tower, _, tiers = spec.partition(",")
+            tier_txt = "-".join(tiers) if tiers else ""
             icon = _tower_icon(tower, False)
             icon_html = _odyssey_img(icon, "ody-reward-icon", tower_cn(tower), tower_cn(tower))
+            value_txt = "即时猴" + (f" {tier_txt}" if tier_txt else "")
             items.append(f"<div class='ody-reward-cell'>{icon_html}"
-                         f"<div class='ody-reward-value'>即时猴</div></div>")
+                         f"<div class='ody-reward-value'>{_esc(value_txt)}</div></div>")
     return ("<div class='ody-panel ody-reward-panel'>"
             "<div class='ody-ribbon ody-panel-title'><span>奖励</span></div>"
             "<div class='ody-reward-grid'>" + ("".join(items) or "<div class='ody-reward-value'>无</div>") +
