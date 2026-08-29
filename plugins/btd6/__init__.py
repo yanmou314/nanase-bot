@@ -1838,8 +1838,6 @@ def odyssey_diff_html(col: dict, d: str, label: str) -> str:
         f"<div class='ody-ribbon-cell'><div class='ody-ribbon'>{seats_img} 猴位：{seats}</div></div>"
         f"<div class='ody-ribbon-cell'><div class='ody-ribbon'>{towers_img} 猴子上限：{towers_cap}</div></div>"
         "</div>"
-        f"<div class='ody-event'>{_esc(event_name)} · {_esc(label)}难度 · {_esc(_fmt_range(ev))} · {_esc(state)}</div>"
-        + (f"<div class='ody-event-desc'>{_esc(description)}</div>" if description else "")
         + ("<div class='ody-extreme-badge'>极限模式</div>" if is_extreme else "")
         + "<div class='ody-top-grid'><div class='ody-top-cell crew'>"
         f"{_odyssey_default_crew_html(meta)}"
@@ -1847,8 +1845,15 @@ def odyssey_diff_html(col: dict, d: str, label: str) -> str:
         f"{_odyssey_rewards_html(meta.get('_rewards') or [])}"
         "</div></div>"
         f"{_odyssey_available_html(meta)}"
-        "<div class='ody-ribbon ody-section-banner'><span>岛屿规则</span></div>"
+        "<div style='text-align:center;margin:14px auto 8px;'>"
+        "<span style='position:relative;display:inline-block;padding:4px 26px;"
+        "background:linear-gradient(180deg,#46c8f1 0%,#129ed0 56%,#087eaf 100%);"
+        "border:2px solid #076b99;border-radius:2px;color:#ffffff;font-size:15px;"
+        "font-weight:900;letter-spacing:0.5px;text-shadow:0 2px 0 #075b8b;"
+        "box-shadow:inset 0 1px 0 rgba(255,255,255,.75),0 2px 0 rgba(0,59,79,.28);'>岛屿规则</span></div>"
         f"{_odyssey_maps_html(diff.get('maps') or [])}"
+        + f"<div class='ody-event-desc' style='margin-top:6px;text-align:center;'>"
+        + f"{_esc(event_name)} · {_esc(label)}难度 · {_esc(_fmt_range(ev))} · {_esc(state)}</div>"
     )
     height = _odyssey_card_height(meta, len(diff.get("maps") or []))
     # 由调用方传入统一高度时，直接使用以保证三图在 QQ 预览中显示宽度一致（QQ 按最大边缩放，较矮的图会被等比放大导致视觉宽度不一）
@@ -2334,17 +2339,17 @@ def _odyssey_shell(body: str, h: int) -> str:
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
-@page {{ size: {ODYSSEY_CARD_W}px {h}px; margin: 0; background: #0b7180; }}
+@page {{ size: {ODYSSEY_CARD_W}px {h}px; margin: 0; background: #d5c295; }}
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #ffffff;
+html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #4a3c28;
         font-family: "WenQuanYi Micro Hei", "Noto Sans CJK SC", sans-serif;
-        background: #0b7180; margin: 0; padding: 0; overflow: hidden; }}
+        background: #d5c295; margin: 0; padding: 0; overflow: hidden; }}
 .ody-page {{ width: {ODYSSEY_CARD_W}px; height: {h}px; padding: 0;
              background: transparent; box-sizing: border-box; }}
 .ody-paper {{ width: {ODYSSEY_CARD_W}px; height: {h}px; padding: 0 0 8px; overflow: hidden; margin: 0;
-              background: #0b7180; border: 0; border-radius: 3px;
+              background: #d5c295; border: 0; border-radius: 3px;
               box-sizing: border-box;
-              box-shadow: 0 2px 0 rgba(0,0,0,.35), inset 0 0 0 1px #b99470; }}
+              box-shadow: 0 2px 0 rgba(0,0,0,.18), inset 0 0 0 1px #b99470; }}
 
 /* ===== 顶部三条蓝丝带（带切口 + 阴影 + 图标） ===== */
 .ody-ribbons {{ display: table; width: 100%; height: 38px; table-layout: fixed; text-align: center; }}
