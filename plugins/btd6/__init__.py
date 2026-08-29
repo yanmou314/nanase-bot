@@ -2444,6 +2444,7 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
 /* ===== 默认队伍 ===== */
 .ody-crew-panel {{ min-height: 204px; padding: 8px 8px 8px; }}
 .ody-crew-body {{ display: flex; align-items: stretch; gap: 0; width: 100%; min-height: 169px; }}
+.ody-crew-hero .ody-unit-wrap {{ width: 84px; height: 104px; margin: 27px 0 0; }}
 .ody-crew-hero {{ flex: none; width: 88px; display: flex; align-items: center; justify-content: center;
                   background: linear-gradient(180deg, #b58a52 0%, #a37c48 55%, #936e44 100%);
                   border-radius: 8px 0 0 8px;
