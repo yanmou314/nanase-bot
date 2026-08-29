@@ -1743,7 +1743,12 @@ def _odyssey_rewards_html(rewards: list) -> str:
             spec = raw.split(":", 1)[1]
             tower, _, tiers = spec.partition(",")
             tier_txt = "-".join(tiers) if tiers else ""
-            icon = _tower_icon(tower, False)
+            icon = ""
+            if re.fullmatch(r"[0-9]{3}", tiers):
+                # 奖励是升级后的即时猴，用对应品阶立绘（如 302-SpikeFactory）
+                icon = _game_asset_data_url(f"{tiers}-{tower}.webp")
+            if not icon:
+                icon = _tower_icon(tower, False)
             icon_html = _odyssey_img(icon, "ody-reward-icon", tower_cn(tower), tower_cn(tower))
             value_txt = "即时猴" + (f" {tier_txt}" if tier_txt else "")
             items.append(f"<div class='ody-reward-cell'>{icon_html}"
@@ -2430,7 +2435,7 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
 /* ===== 默认队伍 ===== */
 .ody-crew-panel {{ min-height: 204px; padding: 8px 8px 8px; }}
 .ody-crew-body {{ display: flex; align-items: flex-start; gap: 10px; width: 100%; min-height: 169px; }}
-.ody-crew-hero {{ flex: none; width: 88px; padding: 8px 20px 0 0; text-align: center; }}
+.ody-crew-hero {{ flex: none; width: 88px; padding: 38px 20px 0 0; text-align: center; }}
 .ody-crew-grid-cell {{ flex: 1; min-width: 0; padding: 14px 0 0 14px; white-space: nowrap; }}
 .ody-default-grid {{ text-align: left; white-space: nowrap; }}
 .ody-default-grid .ody-unit-wrap {{ width: 46px; height: 58px; }}
@@ -2457,7 +2462,7 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
 .ody-unit-card img {{ display: block; width: 51px; height: 51px; margin: 0 auto; object-fit: contain;
                        filter: drop-shadow(0 1px 0 rgba(0,0,0,.15)); }}
 .ody-unit-card.big {{ width: 80px; height: 100px; border-radius: 14px;
-                       background: linear-gradient(180deg, #f0a24a 0%, #d97b1c 75%, #b25e10 100%); }}
+                       background: linear-gradient(180deg, #f8d9a0 0%, #eeb55e 70%, #db9a35 100%); }}
 .ody-unit-card.big img {{ width: 76px; height: 76px; }}
 /* 数量徽章（默认队伍用：右上） */
 .ody-unit-quantity {{ position: absolute; right: 1px; top: 1px; min-width: 25px; padding: 1px 3px;
