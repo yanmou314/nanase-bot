@@ -3088,6 +3088,17 @@ def _overview_panel_html(
     )
 
 
+# NK /btd6/events 的 name 字段为英文固定模板名，这里统一汉化
+_EVENT_NAME_CN = {
+    "A Boss Rush Event": "Boss 竞速冲刺",
+    "A Contested Territory": "争夺领土",
+    "A Social Season Event": "社交赛季活动",
+    "A Boss Event": "Boss 战活动",
+    "A Race Event": "竞速活动",
+    "An Odyssey Event": "远征活动",
+}
+
+
 def overview_html(data: dict) -> str:
     """活动总览：三段式 - 正在进行 / 即将开始 / 已结束(近5)，从上到下排列。"""
     now = data["now"]
@@ -3132,18 +3143,27 @@ def overview_html(data: dict) -> str:
             icon_html = f"<img class='ev-icon' src='{_esc(icon_data)}'/>"
         # 名称：按 kind 翻译为中文，保留 NK API 原文作小字副标题
         raw_name = (ev.get("name") or "").strip()
+        generic = _EVENT_NAME_CN.get(raw_name)
         if kind == "race":
-            name = f"每周竞赛 · {raw_name or 'Race Event'}"
+            name = "每周竞速活动" if generic else f"每周竞赛 · {raw_name or 'Race Event'}"
         elif kind == "boss":
             bt_cn = boss_cn(ev.get("bossType"))
-            display = f"{raw_name}（{bt_cn}）" if bt_cn and bt_cn not in raw_name else raw_name
-            name = display or "Boss 事件"
+            if not bt_cn:
+                # bossType 为空时从 ID 提取（格式：{Boss}{编号}_{哈希}，如 Diamondback7_mtbx7lb9）
+                base = str(ev.get("id") or "").split("_", 1)[0]
+                bt_cn = boss_cn(re.sub(r"\d+$", "", base))
+            if generic:
+                name = f"Boss 战 · {bt_cn}" if bt_cn else generic
+            else:
+                name = f"{raw_name}（{bt_cn}）" if bt_cn and bt_cn not in raw_name else (raw_name or "Boss 事件")
         elif kind == "odyssey":
-            name = f"远征 · {raw_name or 'Odyssey Event'}"
+            name = "远征活动" if generic else f"远征 · {raw_name or 'Odyssey Event'}"
         elif kind == "rush":
-            name = f"Boss Rush · {raw_name or 'Boss Rush'}"
+            name = "Boss 竞速冲刺" if generic else f"Boss Rush · {raw_name}"
         elif kind == "ct":
             name = "争夺领土（CT）"
+        else:
+            name = generic or raw_name or "未知活动"
         # 日期
         s, e = int(ev.get("start") or 0), int(ev.get("end") or 0)
         date1 = fmt_date(s)
