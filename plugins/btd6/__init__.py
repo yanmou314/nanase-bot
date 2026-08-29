@@ -1390,6 +1390,9 @@ def _odyssey_top_icon(kind: str) -> str:
     return _ui_asset_data_url(fname)
 
 
+# 当前远征的完成奖杯数：游戏内活动页显示，开放 API 的 _rewards 未包含，逐期转录
+_ODYSSEY_TROPHY = {"mt7bsc6c": 15}
+
 _ODYSSEY_REWARD_ICON = {
     # reward 标签 → (source, filename)；game 用 .webp, ui 用 .png
     "MonkeyMoney": ("ui",   "cash.png"),
@@ -1476,6 +1479,14 @@ async def collect_odyssey() -> dict:
     async def collect_diff(d: str) -> tuple[str, dict]:
         url = ev.get(f"metadata_{d}")
         meta = await _safe(fetch_body(url)) if url else None
+        if meta is not None:
+            # 游戏内活动页的奖励含完成奖杯，开放 API 未返回——按期转录补齐
+            trophy = _ODYSSEY_TROPHY.get(str(ev.get("id") or ""))
+            if trophy:
+                rewards = [r for r in (meta.get("_rewards") or [])
+                           if not str(r).startswith("Trophy:")]
+                rewards.append(f"Trophy:{trophy}")
+                meta["_rewards"] = rewards
         maps = []
         maps_url = (meta or {}).get("maps")
         if maps_url:
