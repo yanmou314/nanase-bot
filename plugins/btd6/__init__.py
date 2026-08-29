@@ -2367,9 +2367,6 @@ ODYSSEY_CARD_W = 800
 
 def _odyssey_shell(body: str, h: int, theme: str = "teal") -> str:
     """通用外壳（teal 青色为多数活动卡使用）；远征难度卡传 theme="tan" 复刻游戏内米色纸张。"""
-    # 时间戳注释：确保任何 CSS/布局调整后 html 哈希必定变化，渲染文件名随之更新，
-    # 避免 QQ 端按旧文件名复用缓存的图片
-    body = f"<!-- render:{int(time.time())} -->" + body
     page_bg = "#e4d0bc" if theme == "tan" else "#0b7180"
     text_color = "#4a3c28" if theme == "tan" else "#ffffff"
     return f"""<!DOCTYPE html>
