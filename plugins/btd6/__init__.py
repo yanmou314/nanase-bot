@@ -3308,6 +3308,7 @@ async def collect_rush() -> dict:
     scores = br.get("StageScores") or []
     rewards = br.get("StageRewards") or []
     gen = rushgen.generate_boss_rush(str(ev.get("id") or ""))
+    maps_meta = rushgen.load_constants()["mapsInOrder"]
     islands = []
     for st in gen["stages"]:
         idx = st["stage"] - 1
@@ -3319,8 +3320,10 @@ async def collect_rush() -> dict:
             "name": f"Island {st['stage']} · {boss_name}",
             "map": boss_name,
             "map_name": st["map"],
+            "theme": (maps_meta.get(st["map"]) or {}).get("theme", ""),
             "boss": boss_name,
             "kills": scores[idx] if idx < len(scores) else 0,
+            "rewards": _rush_rewards_pairs(rewards[idx] if idx < len(rewards) else ""),
             "reward_text": _rush_stage_rewards_text(rewards[idx] if idx < len(rewards) else ""),
             "towers": st["towers"],
             "removed": st["removed"],
@@ -3333,6 +3336,16 @@ async def collect_rush() -> dict:
             "hero": "ChosenPrimaryHero" if hero == "ChosenPrimaryHero" else (hero or ""),
             "diffs": {"default": {"meta": {"isExtreme": False}, "maps": islands}}}
 
+
+def _rush_rewards_pairs(reward_str: str) -> list:
+    """把 StageRewards 配置串解析为 [(中文标签, 数值)]。"""
+    pairs = []
+    for chunk in (reward_str or "").split("#"):
+        if ":" not in chunk:
+            continue
+        k, v = chunk.split(":", 1)
+        pairs.append((_REWARD_LABELS.get(k, k), v))
+    return pairs
 
 def _rush_text(col: dict) -> str:
     """模仿 odyssey_text：文字版阶段路线。"""
@@ -3360,152 +3373,164 @@ def _rush_text(col: dict) -> str:
     return "\n".join(lines).rstrip()
 
 
+def _rush_shell(body: str, h: int) -> str:
+    """Boss Rush 专属外壳：复刻游戏内活动页的深色底版式。"""
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+@page {{ size: {ODYSSEY_CARD_W}px {h}px; margin: 0; background: #4a453c; }}
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #e8dcc0;
+        font-family: "WenQuanYi Micro Hei", "Noto Sans CJK SC", sans-serif;
+        background: #4a453c; overflow: hidden; }}
+.rush-pool {{ display: flex; flex-wrap: wrap; justify-content: center; margin-bottom: 12px; }}
+.rush-cell {{ width: 88px; height: 88px; border-radius: 8px; border: 1px solid rgba(0,0,0,.28);
+              display: flex; align-items: center; justify-content: center; margin: 0 3px 3px 0;
+              box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 1px 0 rgba(0,0,0,.25); }}
+.rush-cell img {{ width: 74px; height: 74px; object-fit: contain;
+                  filter: drop-shadow(0 1px 1px rgba(0,0,0,.35)); }}
+.rush-stage {{ position: relative; display: flex; gap: 12px; background: #3f3b33;
+               border: 1px solid #2b2823; border-radius: 10px; padding: 10px 12px;
+               margin-bottom: 10px; box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 1px 0 rgba(0,0,0,.2); }}
+.rush-map {{ position: relative; flex: none; width: 168px; height: 120px; }}
+.rush-mapph {{ width: 100%; height: 100%; border-radius: 6px; border: 2px solid #26231f;
+               display: flex; align-items: flex-end; justify-content: center; overflow: hidden; }}
+.rush-mapname {{ width: 100%; text-align: left; padding-left: 8px; background: rgba(20,18,14,.78); color: #ffd964;
+                 font-size: 13px; font-weight: 900; line-height: 24px; letter-spacing: 1px; }}
+.rush-stagebanner {{ position: absolute; top: -8px; left: -6px; padding: 2px 10px; z-index: 2;
+                     background: linear-gradient(180deg,#ff9a3d,#e2611b); border: 2px solid #93400f;
+                     border-radius: 4px; color: #ffffff; font-size: 13px; font-weight: 900;
+                     box-shadow: 0 2px 0 rgba(0,0,0,.35); }}
+.rush-bossimg {{ position: absolute; right: -16px; bottom: 22px; width: 86px; object-fit: contain;
+                 z-index: 3; filter: drop-shadow(0 2px 3px rgba(0,0,0,.45)); }}
+.rush-mid {{ flex: 1; min-width: 0; }}
+.rush-chips {{ display: flex; flex-wrap: wrap; gap: 6px; }}
+.rush-chip {{ display: flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 5px;
+              background: #514c41; border: 1px solid #2c2924; color: #e8dcc0;
+              font-size: 12px; line-height: 18px; font-weight: 700; white-space: nowrap; }}
+.rush-chip img {{ width: 15px; height: 15px; object-fit: contain; }}
+.rush-relics {{ display: flex; gap: 12px; margin-top: 9px; align-items: flex-start; }}
+.rush-relic {{ position: relative; width: 48px; height: 48px; border-radius: 50%; background: #33302a;
+               border: 2px solid #6b6355; display: flex; align-items: center; justify-content: center;
+               text-align: center; font-size: 9px; color: #e8dcc0; line-height: 11px; padding: 2px; }}
+.rush-relic.new {{ border-color: #ffc63d; box-shadow: 0 0 0 1px #ffc63d; }}
+.rush-newtag {{ position: absolute; top: -9px; right: -6px; background: #d63a14; color: #ffffff;
+                font-size: 9px; font-weight: 900; padding: 0 4px; border-radius: 3px; line-height: 13px; }}
+.rush-lost {{ flex: none; width: 158px; background: #35322b; border: 1px solid #26231f;
+              border-radius: 6px; padding: 6px 8px; }}
+.rush-lost-title {{ color: #e05545; font-size: 11px; font-weight: 900; margin-bottom: 5px; }}
+.rush-lost-body {{ display: flex; flex-wrap: wrap; gap: 4px; min-height: 34px; align-items: center; }}
+.rush-crossed {{ position: relative; display: inline-block; width: 30px; height: 30px; opacity: .85; }}
+.rush-crossed img {{ width: 30px; height: 30px; object-fit: contain; filter: grayscale(.7); }}
+.rush-crossed i {{ position: absolute; inset: 0;
+                   background: linear-gradient(135deg, transparent 42%, #e0442e 46%, #e0442e 54%, transparent 58%); }}
+.rush-none {{ color: #9a9284; font-size: 11px; }}
+.rush-note {{ margin-top: 4px; text-align: center; font-size: 10px; color: #857e70; }}
+</style></head><body>{body}</body></html>"""
+
+
 def _rush_diff_html(col: dict, d: str = "default", label: str = "") -> str:
-    """Boss Rush 专用卡片：汉化 + 游戏立绘版式（对照游戏内活动页）。"""
+    """Boss Rush 卡片：1:1 复刻游戏内活动页版式（塔池墙 + 逐阶段行，全汉化）。"""
     if col.get("empty"):
-        return _odyssey_shell(f"<div class='ody-panel ody-map-empty'>{_esc(col['empty'])}</div>", 260)
+        return _rush_shell(f"<div style='padding:30px;text-align:center;font-size:15px;'>{_esc(col['empty'])}</div>", 160)
     ev = col["ev"]
     maps = ((col.get("diffs") or {}).get("default") or {}).get("maps") or []
 
     state = _state_of(ev, bucket_now())
     event_name = (ev.get("name") or "Boss Rush").strip() or "Boss Rush"
 
-    lives_icon = _odyssey_top_icon("lives")
-    seats_icon = _odyssey_top_icon("seats")
-    towers_icon = _odyssey_top_icon("towers")
-    lives_img = f"<img class='ody-ribbon-icon' src='{_esc(lives_icon)}'/>" if lives_icon else "❤"
-    seats_img = f"<img class='ody-ribbon-icon' src='{_esc(seats_icon)}'/>" if seats_icon else "🚻"
-    towers_img = f"<img class='ody-ribbon-icon' src='{_esc(towers_icon)}'/>" if towers_icon else "🐵"
+    # ---- 顶部塔池墙（对照截图两行猴子头像） ----
+    pool = maps[0]["towers"] if maps else []
+    _pool_palette = ["#5b9fd4,#2f6da0", "#54c1bd,#2b8a86", "#83c963,#4c9440",
+                     "#a584dc,#6f4ab5", "#dfa05f,#b06f35", "#dd7663,#ad4433"]
+    pool_cells = []
+    for i, t in enumerate(pool):
+        img = _tower_portrait(t)
+        c = _pool_palette[i % len(_pool_palette)].split(",")
+        face = (f"<img src='{img}' alt='{_esc(_tower_cn(t))}' style='width:74px;height:74px;"
+                f"object-fit:contain;filter:drop-shadow(0 1px 1px rgba(0,0,0,.35));'/>" if img
+                else f"<div style='font-size:10px;color:#e8dcc0;'>{_esc(_tower_cn(t))}</div>")
+        pool_cells.append(
+            f"<div class='rush-cell' style='background:linear-gradient(180deg,{c[0]},{c[1]});'>{face}</div>")
+    pool_block = f"<div class='rush-pool'>{''.join(pool_cells)}</div>"
 
+    _theme_grad = {
+        "Snow": ("#e8f2f8", "#9fc4da", "#2a3a4a"), "Dirt": ("#c9a06a", "#8a6238", "#3a2a15"),
+        "Water": ("#6db8e8", "#2d6e9e", "#e8f4fc"), "Grass": ("#8ec660", "#56913f", "#1e3a12"),
+        "DarkGrass": ("#5d9c3f", "#35682a", "#d8ecd0"), "MountainCave": ("#8d8279", "#57504a", "#e8e2da"),
+        "City": ("#b0b8c0", "#707880", "#262a2e"),
+    }
+
+    skull = ("<svg width='14' height='14' viewBox='0 0 24 24' fill='#e05545' style='flex:none;'>"
+             "<path d='M12 2C7 2 3 6 3 11c0 2.4 1.2 4.5 3 5.7V19c0 1.1.9 2 2 2h1v-2h2v2h2v-2h2v2h1c1.1 0 2-.9 2-2v-2.3"
+             "c1.8-1.2 3-3.3 3-5.7 0-5-4-9-9-9zM8.5 13a1.8 1.8 0 110-3.6 1.8 1.8 0 010 3.6zm7 0a1.8 1.8 0 110-3.6"
+             " 1.8 1.8 0 010 3.6z'/></svg>")
     coin_icon = _game_asset_data_url("UI_CoinIcon.webp")
     trophy_icon = _game_asset_data_url("UI_TrophyIcon.webp")
 
-    def chip(icon: str, text: str, bg: str, border: str, color: str) -> str:
-        ico = f"<img src='{icon}' style='width:13px;height:13px;object-fit:contain;vertical-align:-2px;margin-right:3px;'/>" if icon else ""
-        return (f"<span style='display:inline-block;margin-right:8px;padding:2px 9px;border-radius:4px;"
-                f"background:{bg};border:1px solid {border};font-size:11px;{color}line-height:17px;'>{ico}{text}</span>")
-
-    # ---- 顶部：全部塔池立绘墙（对照游戏内活动页顶部） ----
-    tower_pool = []
-    for mp in maps:
-        for t in mp["towers"]:
-            if t not in tower_pool:
-                tower_pool.append(t)
-    pool_cells = []
-    for t in tower_pool:
-        img = _tower_portrait(t)
-        face = (f"<img src='{img}' style='width:42px;height:42px;object-fit:contain;'/>" if img
-                else f"<div style='width:42px;height:42px;line-height:42px;font-size:9px;color:#c9bda6;'>{_esc(_tower_cn(t))}</div>")
-        pool_cells.append(
-            "<div style='display:inline-block;width:66px;margin:0 5px 6px 0;text-align:center;'>"
-            + face
-            + f"<div style='font-size:9px;color:#d8ccb2;line-height:13px;'>{_esc(_tower_cn(t))}</div></div>")
-    pool_rows = math_ceil(len(tower_pool) / 8)
-    pool_block = (
-        "<div style='margin:0 16px 10px;padding:8px 10px 4px;background:rgba(255,244,222,.08);"
-        "border-radius:8px;text-align:left;'>"
-        f"<div style='font-size:10px;color:#c9bda6;margin-bottom:4px;'>"
-        f"全部可用塔（{len(tower_pool)} 种，随阶段推进逐步解锁/移除）：</div>"
-        + "".join(pool_cells)
-        + "</div>")
-
-    # ---- 阶段行 ----
     rows = []
     for mp in maps:
         boss_cn = _BOSS_CN.get(mp["boss"], mp["boss"])
-        tower_icons = []
-        removed_set = set(mp.get("removed") or [])
-        for t in mp["towers"]:
-            img = _tower_portrait(t)
-            if img:
-                tower_icons.append(
-                    f"<span style='display:inline-block;margin:0 4px 4px 0;'>"
-                    f"<img src='{img}' title='{_esc(_tower_cn(t))}' "
-                    f"style='width:30px;height:30px;object-fit:contain;vertical-align:middle;'/></span>")
-            else:
-                tower_icons.append(
-                    f"<span style='display:inline-block;margin:0 4px 4px 0;padding:1px 6px;border-radius:4px;"
-                    f"background:rgba(255,244,222,.14);font-size:10px;color:#efe6d2;line-height:16px;'>{_esc(_tower_cn(t))}</span>")
-        removed_icons = []
+        grad = _theme_grad.get(mp.get("theme") or "", ("#8d8279", "#57504a", "#e8e2da"))
+        rewards = mp.get("rewards") or []
+        mm = next((v for k, v in rewards if k == "猴币"), "-")
+        tr = [v for k, v in rewards if k == "奖杯"]
+        tt = [v for k, v in rewards if k == "战队奖杯"]
+        others = " · ".join(f"{k} {v}" for k, v in rewards if k not in ("猴币", "奖杯", "战队奖杯"))
+
+        relic_badges = []
+        for r in mp["relics"]:
+            is_new = r == mp.get("new_relic")
+            relic_badges.append(
+                f"<div class='rush-relic{' new' if is_new else ''}'>{_esc(_relic_cn(r))}"
+                + ("<div class='rush-newtag'>新</div>" if is_new else "")
+                + "</div>")
+        lost_body = []
         for t in mp.get("removed") or []:
             img = _tower_portrait(t)
             if img:
-                removed_icons.append(
-                    "<span style='position:relative;display:inline-block;margin:0 4px 4px 0;opacity:.8;'>"
-                    f"<img src='{img}' style='width:30px;height:30px;object-fit:contain;filter:grayscale(.65);'/>"
-                    "<span style='position:absolute;inset:0;background:linear-gradient(135deg,"
-                    "transparent 42%,#e0442e 46%,#e0442e 54%,transparent 58%);'></span></span>")
+                lost_body.append(
+                    f"<span class='rush-crossed'><img src='{img}' alt='{_esc(_tower_cn(t))}'/><i></i></span>")
             else:
-                removed_icons.append(
-                    f"<span style='display:inline-block;margin:0 4px 4px 0;padding:1px 6px;border-radius:4px;"
-                    f"background:rgba(255,90,70,.14);border:1px solid rgba(255,90,70,.4);"
-                    f"font-size:10px;color:#ff9a8a;line-height:16px;text-decoration:line-through;'>{_esc(_tower_cn(t))}</span>")
-        relic_chips = "".join(
-            f"<span style='display:inline-block;margin:0 5px 0 0;padding:1px 8px;border-radius:4px;"
-            f"background:rgba(255,214,90,.16);border:1px solid rgba(255,214,90,.4);"
-            f"font-size:10px;color:#ffd964;line-height:16px;'>{_esc(_relic_cn(r))}"
-            + ("<b style='color:#fff;'> 新!</b>" if r == mp.get("new_relic") else "")
-            + "</span>"
-            for r in mp["relics"])
+                lost_body.append(
+                    f"<span style='padding:1px 6px;border-radius:4px;background:rgba(255,90,70,.14);"
+                    f"border:1px solid rgba(255,90,70,.4);font-size:10px;color:#ff9a8a;"
+                    f"line-height:16px;text-decoration:line-through;'>{_esc(_tower_cn(t))}</span>")
+        lost_inner = "".join(lost_body) if lost_body else "<span class='rush-none'>暂无</span>"
+
         rows.append(
-            "<div style='position:relative;display:flex;align-items:stretch;gap:10px;"
-            "margin:0 16px 10px;padding:10px 12px;background:#45413a;border:1px solid #2e2b25;"
-            "border-radius:6px;text-align:left;'>"
-            "<div style='position:relative;flex:none;width:96px;'>"
-            f"<div style='width:96px;height:58px;border-radius:4px;display:flex;align-items:center;"
-            f"justify-content:center;background:linear-gradient(160deg,#3f6f5e,#26473c);'>"
-            f"<span style='font-size:12px;font-weight:900;color:#d9efe2;letter-spacing:1px;'>{_esc(mp['map_name'])}</span></div>"
-            f"<div style='position:absolute;left:-3px;bottom:-8px;padding:1px 8px;border-radius:3px;"
-            f"background:linear-gradient(180deg,#ff9a3d,#e2611b);border:1px solid #93400f;"
-            f"font-size:11px;font-weight:900;color:#fff;box-shadow:0 1px 0 rgba(0,0,0,.4);'>第 {mp['stage']} 阶段</div>"
-            "</div>"
-            + (f"<img src='{_esc(mp['img'])}' alt='' style='flex:none;width:56px;object-fit:contain;'/>" if mp.get("img") else "")
-            + "<div style='flex:1;min-width:0;'>"
-            + f"<div style='font-size:14px;font-weight:900;color:#fff;line-height:18px;'>"
-            + f"{_esc(mp['map_name'])} <span style='color:#ffb95e;'>· {_esc(boss_cn)}</span></div>"
-            + "<div style='margin:3px 0 4px;'>"
-            + chip("", f"☠ 击杀需求 {mp['kills']}", "rgba(255,90,70,.16)", "rgba(255,90,70,.4)", "color:#ffb0a0;")
-            + chip(coin_icon, f"猴币 {_rush_reward_part(mp['reward_text'], '猴币')}", "rgba(255,214,90,.14)", "rgba(255,214,90,.38)", "color:#ffe08a;")
-            + chip(trophy_icon, f"奖杯 {_rush_reward_part(mp['reward_text'], '奖杯')}", "rgba(160,220,255,.14)", "rgba(160,220,255,.38)", "color:#bfe3ff;")
-            + chip("", f"塔池 {len(mp['towers'])} 种", "rgba(255,244,222,.10)", "rgba(255,244,222,.24)", "color:#efe6d2;")
+            "<div class='rush-stage'>"
+            "<div class='rush-map'>"
+            f"<div class='rush-mapph' style='background:linear-gradient(160deg,{grad[0]},{grad[1]});'>"
+            f"<div class='rush-mapname' style='color:{grad[2]};'>{_esc(mp['map_name'])}</div></div>"
+            f"<div class='rush-stagebanner'>第 {mp['stage']} 阶段</div>"
+            + (f"<img class='rush-bossimg' src='{_esc(mp['img'])}' alt=''/>" if mp.get("img") else "")
             + "</div>"
-            + f"<div style='font-size:10px;color:#c9bda6;margin-bottom:2px;'>本阶段塔池：</div>"
-            + f"<div>{''.join(tower_icons)}</div>"
-            + (f"<div style='margin-top:3px;font-size:10px;color:#c9bda6;'>阶段遗物：{relic_chips}</div>" if relic_chips else "")
-            + (f"<div style='margin-top:4px;font-size:10px;color:#c9bda6;'>移除猴子：{''.join(removed_icons)}</div>" if removed_icons else "")
-            + "</div></div>"
+            + "<div class='rush-mid'>"
+            + "<div class='rush-chips'>"
+            + f"<span class='rush-chip'>{skull}<span style='color:#ffb0a0;'>{mp['kills']} 击杀需求</span></span>"
+            + (f"<span class='rush-chip'><img src='{coin_icon}'/>{mm} 猴币</span>" if coin_icon
+               else f"<span class='rush-chip'>{mm} 猴币</span>")
+            + (f"<span class='rush-chip'><img src='{trophy_icon}'/>{tr[0] if tr else '-'} 奖杯"
+               + (f" · {tt[0]} 战队奖杯" if tt else "") + "</span>" if trophy_icon
+               else f"<span class='rush-chip'>{tr[0] if tr else '-'} 奖杯"
+                    + (f" · {tt[0]} 战队奖杯" if tt else "") + "</span>")
+            + (f"<span class='rush-chip'>{_esc(others)}</span>" if others else "")
+            + "</div>"
+            + f"<div class='rush-relics'>{''.join(relic_badges)}</div>"
+            + "</div>"
+            + f"<div class='rush-lost'><div class='rush-lost-title'>损失猴子：</div>"
+            + f"<div class='rush-lost-body'>{lost_inner}</div></div>"
+            + "</div>"
         )
 
-    hero = col.get("hero") or ""
-    if hero == "ChosenPrimaryHero":
-        hero_html = ("<div style='margin:0 16px 8px;font-size:12px;color:#ffd964;text-align:left;'>"
-                     "英雄：队长自选（由队长决定出场英雄）</div>")
-    elif hero:
-        h_img = _hero_portrait(hero)
-        h_ico = (f"<img src='{h_img}' style='width:22px;height:22px;object-fit:contain;"
-                 f"vertical-align:-6px;margin-right:5px;'/>" if h_img else "")
-        hero_html = (f"<div style='margin:0 16px 8px;font-size:12px;color:#ffd964;text-align:left;'>"
-                     f"英雄：{h_ico}{_esc(_hero_cn(hero))}</div>")
-    else:
-        hero_html = ""
-
-    top = (
-        "<div class='ody-ribbons'>"
-        f"<div class='ody-ribbon-cell'><div class='ody-ribbon'>{lives_img} 阶段：{len(maps)}</div></div>"
-        f"<div class='ody-ribbon-cell'><div class='ody-ribbon'>{seats_img} Boss：{len(maps)} 轮</div></div>"
-        f"<div class='ody-ribbon-cell'><div class='ody-ribbon'>{towers_img} 状态：{_STATE_TXT[state]}</div></div>"
-        "</div>"
-        f"<div class='ody-event'>{_esc(event_name)} · 团队冲刺 · {_esc(_fmt_range(ev))} · {_esc(_STATE_TXT[state])}</div>"
-        + "<div class='ody-extreme-badge'>Boss Rush 模式</div>"
-        + hero_html
-        + pool_block
-        + "".join(rows)
-        + "<div class='ody-event-desc' style='margin-top:6px;'>⚠ 阶段配置由活动种子确定性生成（与游戏内一致）；官方 API 未提供队伍实时进度与道具图标</div>"
-    )
-    # 高度：丝带38 + 活动行30 + 徽章22 + 英雄20 + 塔池墙(标题18 + 行数×52) + 阶段行×175 + 说明26 + 边距
-    height = 38 + 30 + 22 + 20 + (22 + pool_rows * 52 + 12) + len(maps) * 192 + 26 + 24
-    return _odyssey_shell(top, height)
-
+    body = (pool_block
+            + "".join(rows)
+            + f"<div class='rush-note'>{_esc(event_name)} · {_esc(_fmt_range(ev))} · "
+            + f"阶段配置由活动种子确定性生成，与游戏内一致</div>")
+    # 高度：塔池墙(2行×91+标题间距≈200) + 阶段行×152 + 底部注释24
+    height = 200 + len(maps) * 152 + 30
+    return _rush_shell(body, height)
 
 def _rush_reward_part(reward_text: str, key: str) -> str:
     """从奖励摘要里取出某一货币的数值（如「猴币 100」→ 100）。"""
