@@ -2468,7 +2468,6 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #4a3c28;
 .ody-av-cell.towers {{ width: 47%; padding: 0 3px; }}
 .ody-av-cell.powers {{ width: 32%; padding-left: 6px; }}
 .ody-av-panel {{ min-height: 300px; padding: 14px 7px 8px; }}
-.ody-av-cell.powers .ody-av-panel {{ height: 300px; overflow: hidden; }}
 .ody-av-title {{ height: 22px; color: #ffffff; font-size: 15px; line-height: 22px; font-weight: 900;
                  text-shadow: 0 1px 0 #58432f; text-align: center; white-space: nowrap; }}
 .ody-av-title-dark {{ color: #3d2a1a; text-shadow: 0 1px 0 rgba(255,244,222,.4); margin: 2px 0 6px; }}
@@ -2497,17 +2496,17 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #4a3c28;
 
 /* ===== 力量（六边形 + 蓝色圆形计数） ===== */
 .ody-power-grid {{ text-align: center; padding-top: 4px; }}
-.ody-power-wrap {{ display: inline-block; width: 68px; height: 72px; margin: 0 0 6px; vertical-align: top; }}
-.ody-power-tile {{ position: relative; width: 64px; height: 64px; margin: 4px auto 0; overflow: hidden;
+.ody-power-wrap {{ display: inline-block; width: 46px; height: 50px; margin: 0 0 4px; vertical-align: top; }}
+.ody-power-tile {{ position: relative; width: 42px; height: 42px; margin: 3px auto 0; overflow: hidden;
                    background: linear-gradient(145deg, #ffd64a 0%, #f6a70d 58%, #d86b05 100%);
-                   border: 3px solid #9b5b0b;
+                   border: 2px solid #9b5b0b;
                    /* 六边形切口 */
                    clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
                    box-shadow: inset 0 2px 0 rgba(255,255,255,.55), 0 2px 0 rgba(78,49,15,.28); }}
-.ody-power-tile img {{ display: block; width: 50px; height: 50px; margin: 8px auto 0; object-fit: contain; }}
-.ody-power-count {{ position: absolute; left: -6px; top: -6px; width: 24px; height: 24px; padding-top: 3px;
+.ody-power-tile img {{ display: block; width: 32px; height: 32px; margin: 4px auto 0; object-fit: contain; }}
+.ody-power-count {{ position: absolute; left: -5px; top: -5px; width: 18px; height: 18px; padding-top: 2px;
                     color: #ffffff; background: #1596d2; border: 2px solid #e7f8ff; border-radius: 50%;
-                    font-size: 12px; line-height: 16px; font-weight: 900; text-shadow: 0 1px 0 #135d8b;
+                    font-size: 9px; line-height: 12px; font-weight: 900; text-shadow: 0 1px 0 #135d8b;
                     z-index: 2; }}
 .ody-power-fallback {{ padding-top: 19px; color: #fff; font-size: 9px; line-height: 11px; font-weight: 900;
                        text-shadow: 0 1px 0 #5b3212; }}
