@@ -1641,15 +1641,15 @@ def _odyssey_default_crew_html(meta: dict) -> str:
         max_count = info.get("max")
         denom = int(max_count) if isinstance(max_count, (int, float)) and max_count > 0 else quantity
         img = _tower_portrait(raw)
-        face = (f"<img src='{img}' style='width:33px;height:33px;object-fit:contain;'/>" if img
+        face = (f"<img src='{img}' style='width:38px;height:38px;object-fit:contain;'/>" if img
                 else f"<span style='font-size:8px;color:#ffffff;line-height:10px;'>{_esc(_tower_cn(raw))}</span>")
         tower_html.append(
-            "<span style='position:relative;display:inline-block;width:45px;margin:10px 1px 0 0;"
+            "<span style='position:relative;display:inline-block;width:49px;margin:10px 1px 0 0;"
             "vertical-align:top;text-align:center;'>"
             "<span style='position:absolute;top:-8px;left:-3px;z-index:2;background:#1596d2;"
             "border:2px solid #e7f8ff;border-radius:6px;color:#ffffff;font-size:10px;line-height:14px;"
             "padding:0 4px;font-weight:900;'>{}/{}".format(quantity, denom) + "</span>"
-            "<span style='display:flex;align-items:center;justify-content:center;width:41px;height:41px;"
+            "<span style='display:flex;align-items:center;justify-content:center;width:46px;height:46px;"
             "border-radius:50%;background:linear-gradient(180deg,#8fc460,#4d8f3c);"
             "border:2px solid rgba(0,0,0,.3);box-shadow:inset 0 1px 0 rgba(255,255,255,.4);'>" + face + "</span></span>")
     return ("<div class='ody-panel ody-crew-panel'>"
@@ -2439,7 +2439,7 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
 /* ===== 默认队伍 ===== */
 .ody-crew-panel {{ min-height: 204px; padding: 8px 8px 8px; }}
 .ody-crew-body {{ display: flex; align-items: stretch; gap: 0; width: 100%; min-height: 169px; }}
-.ody-crew-hero {{ flex: none; width: 96px; display: flex; align-items: center; justify-content: center;
+.ody-crew-hero {{ flex: none; width: 88px; display: flex; align-items: center; justify-content: center;
                   background: #cdbb92;
                   border-radius: 8px 0 0 8px;
                   box-shadow: inset 0 1px 0 rgba(255,255,255,.15); }}
@@ -2471,9 +2471,9 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
 .ody-unit-card.hero {{ background: linear-gradient(180deg, #ffe94d 0%, #ffc516 78%, #dd9300 100%); }}
 .ody-unit-card img {{ display: block; width: 51px; height: 51px; margin: 0 auto; object-fit: contain;
                        filter: drop-shadow(0 1px 0 rgba(0,0,0,.15)); }}
-.ody-crew-panel .ody-unit-card.big {{ width: 80px; height: 100px; border-radius: 14px;
-                       background: linear-gradient(180deg, #f0a24a 0%, #d97b1c 75%, #b25e10 100%); }}
-.ody-unit-card.big img {{ width: 76px; height: 76px; }}
+.ody-crew-panel .ody-unit-card.big {{ width: 84px; height: 104px; border-radius: 14px;
+                       background: linear-gradient(180deg, #f2e3bd 0%, #e5cd9d 70%, #d5b87e 100%); }}
+.ody-unit-card.big img {{ width: 80px; height: 80px; }}
 /* 数量徽章（默认队伍用：右上） */
 .ody-unit-quantity {{ position: absolute; right: 1px; top: 1px; min-width: 25px; padding: 1px 3px;
                       color: #ffffff; background: #1879bf; border: 2px solid #e8f7ff; border-radius: 12px;
