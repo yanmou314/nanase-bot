@@ -2443,11 +2443,11 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
 .ody-crew-panel {{ min-height: 204px; padding: 8px 8px 8px; }}
 .ody-crew-body {{ display: flex; align-items: stretch; gap: 0; width: 100%; min-height: 169px; }}
 .ody-crew-hero {{ flex: none; width: 88px; display: flex; align-items: center; justify-content: center;
-                  background: #cdbb92;
+                  background: linear-gradient(180deg, #b58a52 0%, #a37c48 55%, #936e44 100%);
                   border-radius: 8px 0 0 8px;
                   box-shadow: inset 0 1px 0 rgba(255,255,255,.15); }}
 .ody-crew-grid-cell {{ flex: 1; min-width: 0; padding: 12px 0 8px 10px; white-space: nowrap;
-                        background: linear-gradient(90deg, #cdbb92 0px, #8a7355 80px, #8a7355 100%);
+                        background: #936e44;
                         border-radius: 0 8px 8px 0;
                         box-shadow: inset 0 1px 0 rgba(255,244,222,.25); }}
 .ody-default-grid {{ text-align: left; white-space: nowrap; }}
