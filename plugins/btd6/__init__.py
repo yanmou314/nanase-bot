@@ -1643,14 +1643,16 @@ def _odyssey_default_crew_html(meta: dict) -> str:
         img = _tower_portrait(raw)
         face = (f"<img src='{img}' style='width:38px;height:38px;object-fit:contain;'/>" if img
                 else f"<span style='font-size:8px;color:#ffffff;line-height:10px;'>{_esc(_tower_cn(raw))}</span>")
+        cat = _rush_tower_category(raw)
+        c0, c1 = _TOWER_CAT_COLORS.get(cat, ("#c67b27", "#8a5630"))
         tower_html.append(
             "<span style='position:relative;display:inline-block;width:49px;margin:10px 1px 0 0;"
             "vertical-align:top;text-align:center;'>"
-            "<span style='position:absolute;top:-8px;left:-3px;z-index:2;background:#1596d2;"
-            "border:2px solid #e7f8ff;border-radius:6px;color:#ffffff;font-size:10px;line-height:14px;"
-            "padding:0 4px;font-weight:900;'>{}/{}".format(quantity, denom) + "</span>"
+            "<span style='position:absolute;top:-9px;left:50%;width:30px;margin-left:-15px;z-index:2;"
+            "background:#1596d2;border:2px solid #e7f8ff;border-radius:6px;color:#ffffff;"
+            "font-size:10px;line-height:14px;font-weight:900;text-align:center;'>{}/{}".format(quantity, denom) + "</span>"
             "<span style='display:flex;align-items:center;justify-content:center;width:46px;height:46px;"
-            "border-radius:10px;background:linear-gradient(180deg,#c67b27 0%,#8a5630 100%);"
+            "border-radius:10px;background:linear-gradient(180deg," + c0 + " 0%," + c1 + " 100%);"
             "border:2px solid rgba(0,0,0,.3);box-shadow:inset 0 1px 0 rgba(255,255,255,.4);'>" + face + "</span></span>")
     return ("<div class='ody-panel ody-crew-panel'>"
             "<div class='ody-ribbon ody-panel-title'><span>默认队伍</span></div>"
