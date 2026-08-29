@@ -1815,13 +1815,13 @@ def _odyssey_card_height(meta: dict | None, maps_count: int) -> int:
 def odyssey_diff_html(col: dict, d: str, label: str) -> str:
     """远征单张难度卡片：按游戏内远征页布局展示队伍、奖励、猴子、力量和逐岛规则。"""
     if col.get("empty"):
-        return _odyssey_shell(f"<div class='ody-panel ody-map-empty'>{_esc(col['empty'])}</div>", 260)
+        return _odyssey_shell(f"<div class='ody-panel ody-map-empty'>{_esc(col['empty'])}</div>", 260, theme="tan")
     ev = col["ev"]
     diff = col["diffs"].get(d) or {}
     meta = diff.get("meta")
     if not meta:
         return _odyssey_shell(f"<div class='ody-event'>{_esc((ev.get('name') or '').strip())} · {label}难度</div>"
-                              "<div class='ody-panel ody-map-empty'>（该难度数据缺失）</div>", 260)
+                              "<div class='ody-panel ody-map-empty'>（该难度数据缺失）</div>", 260, theme="tan")
 
     lives = int(meta.get("startingHealth") or 0)
     seats = int(meta.get("maxMonkeySeats") or 0)
@@ -1865,7 +1865,7 @@ def odyssey_diff_html(col: dict, d: str, label: str) -> str:
     uh = diff.get("_unified_h")
     if isinstance(uh, int) and uh > height:
         height = uh
-    return _odyssey_shell(top, height)
+    return _odyssey_shell(top, height, theme="tan")
 
 
 _PLAYER_ID_RE = re.compile(r"[0-9a-f]{40,}")
@@ -2339,20 +2339,22 @@ body {{ width: {CARD_W}px; height: {h}px; font-family: "WenQuanYi Micro Hei", "N
 ODYSSEY_CARD_W = 800
 
 
-def _odyssey_shell(body: str, h: int) -> str:
-    """远征选择页：尽量复刻 BTD6 游戏内的米色纸张、蓝色横幅和分区卡片。"""
+def _odyssey_shell(body: str, h: int, theme: str = "teal") -> str:
+    """通用外壳（teal 青色为多数活动卡使用）；远征难度卡传 theme="tan" 复刻游戏内米色纸张。"""
+    page_bg = "#d5c295" if theme == "tan" else "#0b7180"
+    text_color = "#4a3c28" if theme == "tan" else "#ffffff"
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
-@page {{ size: {ODYSSEY_CARD_W}px {h}px; margin: 0; background: #d5c295; }}
+@page {{ size: {ODYSSEY_CARD_W}px {h}px; margin: 0; background: {page_bg}; }}
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #4a3c28;
+html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
         font-family: "WenQuanYi Micro Hei", "Noto Sans CJK SC", sans-serif;
-        background: #d5c295; margin: 0; padding: 0; overflow: hidden; }}
+        background: {page_bg}; margin: 0; padding: 0; overflow: hidden; }}
 .ody-page {{ width: {ODYSSEY_CARD_W}px; height: {h}px; padding: 0;
              background: transparent; box-sizing: border-box; }}
 .ody-paper {{ width: {ODYSSEY_CARD_W}px; height: {h}px; padding: 0 0 8px; overflow: hidden; margin: 0;
-              background: #d5c295; border: 0; border-radius: 3px;
+              background: {page_bg}; border: 0; border-radius: 3px;
               box-sizing: border-box;
               box-shadow: 0 2px 0 rgba(0,0,0,.18), inset 0 0 0 1px #b99470; }}
 
