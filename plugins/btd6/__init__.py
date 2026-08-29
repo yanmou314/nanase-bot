@@ -3271,7 +3271,7 @@ def _tower_portrait(t: str) -> str:
     return _game_asset_data_url(_TOWER_PORTRAIT_SPECIAL.get(t, f"000-{t}.webp"))
 
 
-def _tower_category(t: str) -> str:
+def _rush_tower_category(t: str) -> str:
     return (rushgen.load_constants()["towersInOrder"].get(t) or {}).get("category", "")
 
 
@@ -3283,7 +3283,7 @@ _TOWER_CAT_COLORS = {
 
 
 def _tower_cat_grad(t: str) -> tuple:
-    return _TOWER_CAT_COLORS.get(_tower_category(t), ("#8d8279", "#57504a"))
+    return _TOWER_CAT_COLORS.get(_rush_tower_category(t), ("#8d8279", "#57504a"))
 
 
 def _hero_cn(h: str) -> str:
