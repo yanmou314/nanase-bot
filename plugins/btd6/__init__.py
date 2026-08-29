@@ -1853,7 +1853,8 @@ def odyssey_diff_html(col: dict, d: str, label: str) -> str:
         "box-shadow:inset 0 1px 0 rgba(255,255,255,.75),0 2px 0 rgba(0,59,79,.28);'>岛屿规则</span></div>"
         f"{_odyssey_maps_html(diff.get('maps') or [])}"
         + f"<div class='ody-event-desc' style='margin-top:6px;text-align:center;'>"
-        + f"{_esc(event_name)} · {_esc(label)}难度 · {_esc(_fmt_range(ev))} · {_esc(state)}</div>"
+        + f"{_esc(event_name)} · {_esc(label)}难度 · {_esc(_fmt_range(ev))} · {_esc(state)}"
+        + (f" · {_esc(description)}" if description else "") + "</div>"
     )
     height = _odyssey_card_height(meta, len(diff.get("maps") or []))
     # 由调用方传入统一高度时，直接使用以保证三图在 QQ 预览中显示宽度一致（QQ 按最大边缩放，较矮的图会被等比放大导致视觉宽度不一）
