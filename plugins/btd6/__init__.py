@@ -2431,7 +2431,7 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
 .ody-crew-panel {{ min-height: 204px; padding: 8px 8px 8px; }}
 .ody-crew-body {{ display: flex; align-items: flex-start; gap: 10px; width: 100%; min-height: 169px; }}
 .ody-crew-hero {{ flex: none; width: 96px; padding-top: 8px; text-align: center; }}
-.ody-crew-grid-cell {{ flex: 1; min-width: 0; padding: 14px 0 0 0; white-space: nowrap; }}
+.ody-crew-grid-cell {{ flex: 1; min-width: 0; padding: 14px 0 0 10px; white-space: nowrap; }}
 .ody-default-grid {{ text-align: left; white-space: nowrap; }}
 .ody-default-grid .ody-unit-wrap {{ width: 46px; height: 58px; }}
 .ody-default-grid .ody-unit-card {{ width: 44px; height: 54px; border-radius: 9px; }}
