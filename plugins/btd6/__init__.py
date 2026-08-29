@@ -609,6 +609,8 @@ def _classify_overview_events(
 BOSS_CN = {
     "bloonarius": "膨胀气球神", "lych": "巫妖", "vortex": "漩涡",
     "dreadbloon": "恐惧气球岩", "phayze": "幻影", "blastapopoulos": "爆裂魔炎",
+    "diamondback": "菱背龙",
+    "blastapopolous": "爆裂魔炎",
 }
 DIFFICULTY_CN = {
     # 地图分级
@@ -3147,11 +3149,12 @@ def overview_html(data: dict) -> str:
         if kind == "race":
             name = "每周竞速活动" if generic else f"每周竞赛 · {raw_name or 'Race Event'}"
         elif kind == "boss":
-            bt_cn = boss_cn(ev.get("bossType"))
-            if not bt_cn:
-                # bossType 为空时从 ID 提取（格式：{Boss}{编号}_{哈希}，如 Diamondback7_mtbx7lb9）
-                base = str(ev.get("id") or "").split("_", 1)[0]
-                bt_cn = boss_cn(re.sub(r"\d+$", "", base))
+            bt_raw = str(ev.get("bossType") or "").strip()
+            if not bt_raw:
+                bt_raw = re.sub(r"\d+$", "", str(ev.get("id") or "").split("_", 1)[0])
+            bt_cn = boss_cn(bt_raw)
+            if not bt_cn or bt_cn == bt_raw:
+                bt_cn = _BOSS_CN.get(bt_raw, bt_raw)
             if generic:
                 name = f"Boss 战 · {bt_cn}" if bt_cn else generic
             else:
