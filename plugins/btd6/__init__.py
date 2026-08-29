@@ -1838,6 +1838,8 @@ def odyssey_diff_html(col: dict, d: str, label: str) -> str:
         f"<div class='ody-ribbon-cell'><div class='ody-ribbon'>{seats_img} 猴位：{seats}</div></div>"
         f"<div class='ody-ribbon-cell'><div class='ody-ribbon'>{towers_img} 猴子上限：{towers_cap}</div></div>"
         "</div>"
+        f"<div class='ody-event'>{_esc(event_name)} · {_esc(label)}难度 · {_esc(_fmt_range(ev))} · {_esc(state)}</div>"
+        + (f"<div class='ody-event-desc'>{_esc(description)}</div>" if description else "")
         + ("<div class='ody-extreme-badge'>极限模式</div>" if is_extreme else "")
         + "<div class='ody-top-grid'><div class='ody-top-cell crew'>"
         f"{_odyssey_default_crew_html(meta)}"
@@ -1845,16 +1847,8 @@ def odyssey_diff_html(col: dict, d: str, label: str) -> str:
         f"{_odyssey_rewards_html(meta.get('_rewards') or [])}"
         "</div></div>"
         f"{_odyssey_available_html(meta)}"
-        "<div style='text-align:center;margin:14px auto 8px;'>"
-        "<span style='position:relative;display:inline-block;padding:4px 26px;"
-        "background:linear-gradient(180deg,#46c8f1 0%,#129ed0 56%,#087eaf 100%);"
-        "border:2px solid #076b99;border-radius:2px;color:#ffffff;font-size:15px;"
-        "font-weight:900;letter-spacing:0.5px;text-shadow:0 2px 0 #075b8b;"
-        "box-shadow:inset 0 1px 0 rgba(255,255,255,.75),0 2px 0 rgba(0,59,79,.28);'>岛屿规则</span></div>"
+        "<div class='ody-ribbon ody-section-banner'><span>岛屿规则</span></div>"
         f"{_odyssey_maps_html(diff.get('maps') or [])}"
-        + f"<div class='ody-event-desc' style='margin-top:6px;text-align:center;'>"
-        + f"{_esc(event_name)} · {_esc(label)}难度 · {_esc(_fmt_range(ev))} · {_esc(state)}"
-        + (f" · {_esc(description)}" if description else "") + "</div>"
     )
     height = _odyssey_card_height(meta, len(diff.get("maps") or []))
     # 由调用方传入统一高度时，直接使用以保证三图在 QQ 预览中显示宽度一致（QQ 按最大边缩放，较矮的图会被等比放大导致视觉宽度不一）
@@ -2340,17 +2334,17 @@ def _odyssey_shell(body: str, h: int) -> str:
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
-@page {{ size: {ODYSSEY_CARD_W}px {h}px; margin: 0; background: #d5c295; }}
+@page {{ size: {ODYSSEY_CARD_W}px {h}px; margin: 0; background: #0b7180; }}
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #4a3c28;
+html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #ffffff;
         font-family: "WenQuanYi Micro Hei", "Noto Sans CJK SC", sans-serif;
-        background: #d5c295; margin: 0; padding: 0; overflow: hidden; }}
+        background: #0b7180; margin: 0; padding: 0; overflow: hidden; }}
 .ody-page {{ width: {ODYSSEY_CARD_W}px; height: {h}px; padding: 0;
              background: transparent; box-sizing: border-box; }}
 .ody-paper {{ width: {ODYSSEY_CARD_W}px; height: {h}px; padding: 0 0 8px; overflow: hidden; margin: 0;
-              background: #d5c295; border: 0; border-radius: 3px;
+              background: #0b7180; border: 0; border-radius: 3px;
               box-sizing: border-box;
-              box-shadow: 0 2px 0 rgba(0,0,0,.18), inset 0 0 0 1px #b99470; }}
+              box-shadow: 0 2px 0 rgba(0,0,0,.35), inset 0 0 0 1px #b99470; }}
 
 /* ===== 顶部三条蓝丝带（带切口 + 阴影 + 图标） ===== */
 .ody-ribbons {{ display: table; width: 100%; height: 38px; table-layout: fixed; text-align: center; }}
@@ -2409,11 +2403,9 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #4a3c28;
 /* ===== 默认队伍 ===== */
 .ody-crew-panel {{ min-height: 204px; padding: 8px 8px 8px; }}
 .ody-crew-body {{ display: table; width: 100%; min-height: 169px; table-layout: fixed; }}
-.ody-crew-hero {{ display: table-cell; width: 104px; vertical-align: top; padding-top: 8px; text-align: center; }}
+.ody-crew-hero {{ display: table-cell; width: 93px; vertical-align: top; padding-top: 13px; text-align: center; }}
 .ody-crew-grid-cell {{ display: table-cell; vertical-align: top; padding: 6px 0 0 4px; }}
-.ody-default-grid {{ text-align: left; white-space: nowrap; }}
-.ody-default-grid .ody-unit-wrap {{ width: 46px; height: 58px; }}
-.ody-default-grid .ody-unit-card {{ width: 44px; height: 54px; border-radius: 9px; }}
+.ody-default-grid {{ text-align: left; }}
 
 /* ===== 塔卡（通用：可用 + 默认队伍 共用） ===== */
 .ody-unit-wrap {{ display: inline-block; width: 55px; height: 67px; margin: 0 1px 3px; vertical-align: top; }}
@@ -2435,8 +2427,8 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #4a3c28;
 .ody-unit-card.hero {{ background: linear-gradient(180deg, #ffe94d 0%, #ffc516 78%, #dd9300 100%); }}
 .ody-unit-card img {{ display: block; width: 51px; height: 51px; margin: 0 auto; object-fit: contain;
                        filter: drop-shadow(0 1px 0 rgba(0,0,0,.15)); }}
-.ody-unit-card.big {{ width: 92px; height: 114px; border-radius: 16px; }}
-.ody-unit-card.big img {{ width: 88px; height: 88px; }}
+.ody-unit-card.big {{ width: 78px; height: 96px; border-radius: 14px; }}
+.ody-unit-card.big img {{ width: 75px; height: 75px; }}
 /* 数量徽章（默认队伍用：右上） */
 .ody-unit-quantity {{ position: absolute; right: 1px; top: 1px; min-width: 25px; padding: 1px 3px;
                       color: #ffffff; background: #1879bf; border: 2px solid #e8f7ff; border-radius: 12px;
@@ -2467,8 +2459,7 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #4a3c28;
 .ody-av-cell.heroes {{ width: 21%; padding-right: 6px; }}
 .ody-av-cell.towers {{ width: 47%; padding: 0 3px; }}
 .ody-av-cell.powers {{ width: 32%; padding-left: 6px; }}
-.ody-av-panel {{ min-height: 300px; padding: 14px 7px 8px; }}
-.ody-av-cell.powers .ody-av-panel {{ height: 300px; overflow: hidden; }}
+.ody-av-panel {{ min-height: 250px; padding: 14px 7px 8px; }}
 .ody-av-title {{ height: 22px; color: #ffffff; font-size: 15px; line-height: 22px; font-weight: 900;
                  text-shadow: 0 1px 0 #58432f; text-align: center; white-space: nowrap; }}
 .ody-av-title-dark {{ color: #3d2a1a; text-shadow: 0 1px 0 rgba(255,244,222,.4); margin: 2px 0 6px; }}
