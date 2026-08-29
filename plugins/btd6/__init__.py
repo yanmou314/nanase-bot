@@ -1641,15 +1641,15 @@ def _odyssey_default_crew_html(meta: dict) -> str:
         max_count = info.get("max")
         denom = int(max_count) if isinstance(max_count, (int, float)) and max_count > 0 else quantity
         img = _tower_portrait(raw)
-        face = (f"<img src='{img}' style='width:32px;height:32px;object-fit:contain;'/>" if img
+        face = (f"<img src='{img}' style='width:30px;height:30px;object-fit:contain;'/>" if img
                 else f"<span style='font-size:8px;color:#ffffff;line-height:10px;'>{_esc(_tower_cn(raw))}</span>")
         tower_html.append(
-            "<span style='position:relative;display:inline-block;width:44px;margin:14px 3px 0 0;"
+            "<span style='position:relative;display:inline-block;width:42px;margin:10px 2px 0 0;"
             "vertical-align:top;text-align:center;'>"
             "<span style='position:absolute;top:-8px;left:-3px;z-index:2;background:#1596d2;"
             "border:2px solid #e7f8ff;border-radius:6px;color:#ffffff;font-size:10px;line-height:14px;"
             "padding:0 4px;font-weight:900;'>{}/{}".format(quantity, denom) + "</span>"
-            "<span style='display:flex;align-items:center;justify-content:center;width:40px;height:40px;"
+            "<span style='display:flex;align-items:center;justify-content:center;width:38px;height:38px;"
             "border-radius:50%;background:linear-gradient(180deg,#8fc460,#4d8f3c);"
             "border:2px solid rgba(0,0,0,.3);box-shadow:inset 0 1px 0 rgba(255,255,255,.4);'>" + face + "</span></span>")
     return ("<div class='ody-panel ody-crew-panel'>"
@@ -2438,9 +2438,13 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
 
 /* ===== 默认队伍 ===== */
 .ody-crew-panel {{ min-height: 204px; padding: 8px 8px 8px; }}
-.ody-crew-body {{ display: flex; align-items: flex-start; gap: 10px; width: 100%; min-height: 169px; }}
-.ody-crew-hero {{ flex: none; width: 88px; padding: 38px 20px 0 0; text-align: center; }}
-.ody-crew-grid-cell {{ flex: 1; min-width: 0; padding: 14px 0 0 14px; white-space: nowrap; }}
+.ody-crew-body {{ display: flex; align-items: stretch; gap: 10px; width: 100%; min-height: 169px; }}
+.ody-crew-hero {{ flex: none; width: 96px; display: flex; align-items: center; justify-content: center;
+                  background: #9a8260; border: 1px solid rgba(58,44,26,.4); border-radius: 8px;
+                  box-shadow: inset 0 1px 0 rgba(255,255,255,.15); }}
+.ody-crew-grid-cell {{ flex: 1; min-width: 0; padding: 12px 0 8px 4px; white-space: nowrap;
+                        background: #b19a76; border: 1px solid rgba(58,44,26,.4); border-radius: 8px;
+                        box-shadow: inset 0 1px 0 rgba(255,244,222,.25); }}
 .ody-default-grid {{ text-align: left; white-space: nowrap; }}
 .ody-default-grid .ody-unit-wrap {{ width: 46px; height: 58px; }}
 .ody-default-grid .ody-unit-card {{ width: 44px; height: 54px; border-radius: 9px; }}
