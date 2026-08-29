@@ -1682,16 +1682,17 @@ def _odyssey_available_html(meta: dict) -> str:
             f"<div class='ody-power-wrap'><div class='ody-power-tile' title='{_esc(name)}'>"
             f"{icon_html}<span class='ody-power-count'>{count}</span></div></div>"
         )
+    # 面板直接作为表格单元格：同行单元格天然等高，三面板底部严格对齐
     return ("<div class='ody-available'>"
-            "<div class='ody-av-cell heroes'><div class='ody-panel ody-av-panel'>"
+            "<div class='ody-panel ody-av-panel heroes'>"
             f"<div class='ody-av-title ody-av-title-dark'>可用英雄：</div>"
-            f"<div class='ody-hero-grid'>{hero_html or '—'}</div></div></div>"
-            "<div class='ody-av-cell towers'><div class='ody-panel ody-av-panel'>"
+            f"<div class='ody-hero-grid'>{hero_html or '—'}</div></div>"
+            "<div class='ody-panel ody-av-panel towers'>"
             f"<div class='ody-av-title ody-av-title-dark'>可用猴子：</div>"
-            f"<div class='ody-tower-grid'>{tower_html or '—'}</div></div></div>"
-            "<div class='ody-av-cell powers'><div class='ody-panel ody-av-panel'>"
+            f"<div class='ody-tower-grid'>{tower_html or '—'}</div></div>"
+            "<div class='ody-panel ody-av-panel powers'>"
             f"<div class='ody-av-title ody-av-title-dark'>可用力量：</div>"
-            f"<div class='ody-power-grid'>{''.join(power_html) or '—'}</div></div></div>"
+            f"<div class='ody-power-grid'>{''.join(power_html) or '—'}</div></div>"
             "</div>")
 
 
@@ -2462,12 +2463,12 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: #4a3c28;
                      text-shadow: 0 2px 0 #5d4631; }}
 
 /* ===== 可用英雄/猴子/力量 ===== */
-.ody-available {{ display: table; width: 100%; padding: 12px 13px 0; table-layout: fixed; }}
-.ody-av-cell {{ display: table-cell; vertical-align: top; }}
-.ody-av-cell.heroes {{ width: 21%; padding-right: 6px; }}
-.ody-av-cell.towers {{ width: 47%; padding: 0 3px; }}
-.ody-av-cell.powers {{ width: 32%; padding-left: 6px; }}
-.ody-av-panel {{ min-height: 300px; padding: 14px 7px 8px; }}
+.ody-available {{ display: table; width: 100%; padding: 12px 7px 0; table-layout: fixed;
+                  border-spacing: 7px 0; }}
+.ody-av-panel {{ display: table-cell; vertical-align: top; padding: 14px 7px 8px; }}
+.ody-av-panel.heroes {{ width: 21%; }}
+.ody-av-panel.towers {{ width: 47%; }}
+.ody-av-panel.powers {{ width: 32%; }}
 .ody-av-title {{ height: 22px; color: #ffffff; font-size: 15px; line-height: 22px; font-weight: 900;
                  text-shadow: 0 1px 0 #58432f; text-align: center; white-space: nowrap; }}
 .ody-av-title-dark {{ color: #3d2a1a; text-shadow: 0 1px 0 rgba(255,244,222,.4); margin: 2px 0 6px; }}
