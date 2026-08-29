@@ -1630,6 +1630,7 @@ def _odyssey_default_crew_html(meta: dict) -> str:
         hero_html = _odyssey_tower_card(raw, True, f"{quantity}/{denom}", "big",
                                         category="hero")
 
+    # 对照游戏内活动页：英雄左侧放大，猴子单行排列在右侧，圆形分类色底 + 左上角数量角标
     tower_html = []
     for item in defaults:
         raw = str(item.get("name") or "").strip()
@@ -1639,12 +1640,24 @@ def _odyssey_default_crew_html(meta: dict) -> str:
         quantity = int(item.get("quantity") or 0)
         max_count = info.get("max")
         denom = int(max_count) if isinstance(max_count, (int, float)) and max_count > 0 else quantity
-        tower_html.append(_odyssey_tower_card(raw, bool(info.get("isHero")), f"{quantity}/{denom}"))
+        c0, c1 = _tower_cat_grad(raw)
+        img = _tower_portrait(raw)
+        face = (f"<img src='{img}' style='width:36px;height:36px;object-fit:contain;'/>" if img
+                else f"<span style='font-size:8px;color:#ffffff;line-height:11px;'>{_esc(_tower_cn(raw))}</span>")
+        tower_html.append(
+            "<span style='position:relative;display:inline-block;width:46px;margin:14px 5px 0 0;"
+            "vertical-align:top;text-align:center;'>"
+            "<span style='position:absolute;top:-8px;left:-3px;z-index:2;background:#1596d2;"
+            "border:2px solid #e7f8ff;border-radius:6px;color:#ffffff;font-size:10px;line-height:14px;"
+            "padding:0 4px;font-weight:900;'>{}/{}".format(quantity, denom) + "</span>"
+            "<span style='display:flex;align-items:center;justify-content:center;width:44px;height:44px;"
+            "border-radius:50%;background:linear-gradient(180deg," + c0 + "," + c1 + ");"
+            "border:2px solid rgba(0,0,0,.3);box-shadow:inset 0 1px 0 rgba(255,255,255,.4);'>" + face + "</span></span>")
     return ("<div class='ody-panel ody-crew-panel'>"
             "<div class='ody-ribbon ody-panel-title'><span>默认队伍</span></div>"
             "<div class='ody-crew-body'><div class='ody-crew-hero'>" + hero_html +
-            "</div><div class='ody-crew-grid-cell'><div class='ody-default-grid'>" +
-            "".join(tower_html) + "</div></div></div></div>")
+            "</div><div class='ody-crew-grid-cell'><div class='ody-default-grid' style='white-space:nowrap;'>"
+            + "".join(tower_html) + "</div></div></div></div>")
 
 
 def _odyssey_available_html(meta: dict) -> str:
