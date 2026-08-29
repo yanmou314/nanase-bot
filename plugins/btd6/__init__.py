@@ -3254,19 +3254,22 @@ def _rush_text(col: dict) -> str:
 
 
 def _rush_diff_html(col: dict, d: str = "default", label: str = "") -> str:
-    """模仿 odyssey_diff_html：使用 _odyssey_shell + _odyssey_default_crew_html + _odyssey_rewards_html + _odyssey_maps_html 渲染 5 岛路线。"""
+    """Boss Rush 专用紧凑卡片。
+
+    NK 官方 /btd6/events 对 bossRush 只提供摘要（名称/起止/状态），没有队伍、
+    奖励、逐岛规则等明细，因此不再套用远征模板渲染占位区块（历史上导致卡片
+    大面积空白、看起来"什么都没有"），只展示官方真实提供的摘要 + 社区默认
+    Boss 轮换顺序。
+    """
     if col.get("empty"):
         return _odyssey_shell(f"<div class='ody-panel ody-map-empty'>{_esc(col['empty'])}</div>", 260)
     ev = col["ev"]
-    diff = (col.get("diffs") or {}).get("default") or {"meta": None, "maps": []}
-    meta = diff.get("meta")
-    maps = diff.get("maps") or []
+    maps = ((col.get("diffs") or {}).get("default") or {}).get("maps") or []
 
     state = _state_of(ev, bucket_now())
-    is_extreme = bool((meta or {}).get("isExtreme"))
     event_name = (ev.get("name") or "Boss Rush").strip() or "Boss Rush"
 
-    # 顶部三丝带（取自 _rush_html 已有素材）
+    # 顶部三丝带
     lives_icon = _odyssey_top_icon("lives")
     seats_icon = _odyssey_top_icon("seats")
     towers_icon = _odyssey_top_icon("towers")
@@ -3276,23 +3279,31 @@ def _rush_diff_html(col: dict, d: str = "default", label: str = "") -> str:
     top = (
         "<div class='ody-ribbons'>"
         f"<div class='ody-ribbon-cell'><div class='ody-ribbon'>{lives_img} 岛数：{len(maps)}</div></div>"
-        f"<div class='ody-ribbon-cell'><div class='ody-ribbon'>{seats_img} Boss：5 轮</div></div>"
+        f"<div class='ody-ribbon-cell'><div class='ody-ribbon'>{seats_img} Boss：{len(maps)} 轮</div></div>"
         f"<div class='ody-ribbon-cell'><div class='ody-ribbon'>{towers_img} 状态：{_STATE_TXT[state]}</div></div>"
         "</div>"
         f"<div class='ody-event'>{_esc(event_name)} · 团队冲刺 · {_esc(_fmt_range(ev))} · {_esc(_STATE_TXT[state])}</div>"
-        + "<div class='ody-event-desc'>⚠ NK 官方仅 /btd6/events 摘要，岛屿/地图/排行暂未开放，5岛 Boss 顺序按社区默认轮换</div>"
-        + ("<div class='ody-extreme-badge'>Boss Rush 模式</div>" if not is_extreme else "")
-        + "<div class='ody-top-grid'><div class='ody-top-cell crew'>"
-        + _odyssey_default_crew_html(meta or {"_availablePowers": [], "_availableTowers": [], "_defaultTowers": []})
-        + "</div><div class='ody-top-cell reward'>"
-        + _odyssey_rewards_html([])
-        + "</div></div>"
-        + _odyssey_maps_html(maps)
+        + "<div class='ody-extreme-badge'>Boss Rush 模式</div>"
+        + "<div class='ody-panel' style='margin:12px 16px 0;'>"
+        + "<div class='ody-panel-title'><span>Boss 顺序 · 社区默认轮换</span></div>"
+        + "".join(
+            "<div style='display:flex;align-items:center;gap:12px;margin:0 12px 8px;"
+            "padding:6px 12px;background:rgba(255,244,222,.16);border-radius:8px;'>"
+            + (f"<img src='{_esc(isl.get('img') or '')}' alt='' style='width:42px;height:42px;"
+               "object-fit:contain;border-radius:8px;background:#96805f;'/>" if isl.get("img")
+               else "<div style='width:42px;height:42px;'></div>")
+            + "<div style='flex:1;text-align:left;'>"
+            + f"<div style='font-size:15px;font-weight:900;color:#3d2a17;line-height:20px;'>"
+            + f"第 {idx} 岛 · {_esc(isl.get('name', '').split('·', 1)[-1].strip() or f'Island {idx}')}</div>"
+            + f"<div style='font-size:11px;color:#6b5238;line-height:16px;'>Boss Rush · 共 {len(maps)} 轮</div>"
+            + "</div></div>"
+            for idx, isl in enumerate(maps, 1)
+        )
+        + "</div>"
+        + "<div class='ody-event-desc' style='margin-top:10px;'>⚠ NK 官方暂未开放 Boss Rush 的队伍/奖励/地图/排行数据，开放后本卡会自动补充</div>"
     )
-    height = _odyssey_card_height(meta, len(maps))
-    uh = diff.get("_unified_h")
-    if isinstance(uh, int) and uh > height:
-        height = uh
+    # 紧凑高度：丝带38 + 活动行30 + 徽章22 + 面板(标题22 + 5行×66 + 边距24) + 说明24 + 底部留白
+    height = 38 + 30 + 22 + (46 + len(maps) * 66 + 24) + 24 + 20
     return _odyssey_shell(top, height)
 
 
