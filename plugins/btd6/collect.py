@@ -212,7 +212,17 @@ async def collect_daily(advanced: bool) -> dict:
     if not ev:
         return {"empty": "暂无每日挑战数据"}
     meta = await nkapi.fetch_body(ev["metadata"])
-    map_img = await _safe(assets._asset_data_url(meta.get("mapURL")), "daily_map") if meta.get("mapURL") else ""
+    # 地图：优先用开放 API 的 mapURL（按钮图），缺失/下载失败则回退用 map 名拼本地素材
+    raw_map_url = str(meta.get("mapURL") or "").strip()
+    map_img = ""
+    if raw_map_url:
+        map_img = await _safe(assets._asset_data_url(raw_map_url), "daily_map") or ""
+    if not map_img:
+        fallback_map = str(meta.get("map") or "").strip()
+        if fallback_map:
+            map_img = await _safe(assets._game_asset_data_url(f"MapSelect{fallback_map}Button.webp"), "daily_map_fallback") or ""
+            if not map_img:
+                map_img = await _safe(assets._asset_data_url(f"MapSelect{fallback_map}Button.png"), "daily_map_fallback2") or ""
     return {
         "prefix": _daily_prefix(str(ev.get("name") or ""), advanced),
         "meta": meta, "map_img": map_img or "", "side_img": "", "scoring_cn": "固定种子",
