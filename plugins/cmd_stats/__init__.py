@@ -4,8 +4,6 @@ import html as html_mod
 import logging
 import os
 import threading
-import time
-from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -14,7 +12,16 @@ from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
 from nonebot.message import run_postprocessor
 from nonebot_plugin_apscheduler import scheduler
 
-from common import RENDER_SEM, gradient_background, is_owner, load_json_state, render_html_to_png, save_json_state
+from common import (
+    RENDER_SEM,
+    get_member_name,
+    gradient_background,
+    is_owner,
+    load_json_state,
+    render_html_to_png,
+    save_json_state,
+    save_json_state_async,
+)
 from plugins.chat_stats.db_pg import exec, wait_writes_drained, write_command as db_write_command
 
 _logger = logging.getLogger(__name__)
@@ -22,8 +29,6 @@ _SH = ZoneInfo("Asia/Shanghai")
 
 TOP_CMDS = 10
 TOP_USERS = 5
-NICK_TTL = 300
-NICK_CACHE_MAX = 10000
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "push_config.json")
 ACCENT = "#D9A94E"
@@ -33,9 +38,6 @@ _config_lock = threading.RLock()  # 必须可重入：_add_group/_remove_group �
 stats_on_cmd = on_command("统计开启", priority=5, block=True)
 stats_off_cmd = on_command("统计关闭", priority=5, block=True)
 stats_status_cmd = on_command("统计状态", priority=5, block=True)
-
-_name_cache: OrderedDict = OrderedDict()
-_name_ts: dict = {}
 
 
 def _command_from_matcher(matcher, state: dict) -> str:
@@ -115,22 +117,24 @@ def _valid_groups(data: dict) -> set[int]:
     return groups
 
 
-def _add_group(gid: int) -> None:
+async def _add_group(gid: int) -> None:
     with _config_lock:
         data = load_json_state(CONFIG_FILE, _config_lock)
         groups = _valid_groups(data)
         groups.add(gid)
         data["groups"] = sorted(groups)
-        save_json_state(CONFIG_FILE, data, _config_lock)
+    # 锁释放后再落盘：save_json_state_async 在工作线程会重新申请 _config_lock，
+    # 协程持锁跨 await 会死锁
+    await save_json_state_async(CONFIG_FILE, data, _config_lock)
 
 
-def _remove_group(gid: int) -> None:
+async def _remove_group(gid: int) -> None:
     with _config_lock:
         data = load_json_state(CONFIG_FILE, _config_lock)
         groups = _valid_groups(data)
         groups.discard(gid)
         data["groups"] = sorted(groups)
-        save_json_state(CONFIG_FILE, data, _config_lock)
+    await save_json_state_async(CONFIG_FILE, data, _config_lock)
 
 
 def _prev_day() -> str:
@@ -176,27 +180,7 @@ async def _collect(day: str) -> dict:
     }
 
 
-async def _fetch_name(bot, group_id: int, user_id: int) -> str:
-    key = (group_id, user_id)
-    now = time.time()
-    cached = _name_cache.get(key)
-    if cached and now - _name_ts.get(key, 0) < NICK_TTL:
-        _name_cache.move_to_end(key)
-        return cached
-    try:
-        info = await asyncio.wait_for(
-            bot.get_group_member_info(group_id=group_id, user_id=user_id), 10
-        )
-        name = info.get("card") or info.get("nickname") or str(user_id)
-    except Exception:
-        name = str(user_id)
-    _name_cache[key] = name
-    _name_ts[key] = now
-    _name_cache.move_to_end(key)
-    while len(_name_cache) > NICK_CACHE_MAX:  # 简单 LRU，防止长期运行内存增长
-        old = _name_cache.popitem(last=False)
-        _name_ts.pop(old[0], None)
-    return name
+# 昵称获取统一走 common.get_member_name（带 TTL 的跨插件共享 LRU 缓存）
 
 
 async def _build_stats(day: str) -> dict:
@@ -209,9 +193,9 @@ async def _build_stats(day: str) -> dict:
         group_id = data["user_groups"].get(uid)
         if group_id is None:
             return str(uid)
-        return await _fetch_name(bot, group_id, uid)
+        return await get_member_name(bot, group_id, uid)
 
-    # 单次查询 10 秒超时（见 _fetch_name），整体 15 秒兜底：NapCat 卡死不致挂死日报任务
+    # common.get_member_name 单次查询 10 秒超时，整体 15 秒兜底：NapCat 卡死不致挂死日报任务
     try:
         names = await asyncio.wait_for(
             asyncio.gather(*(_name_or_id(uid) for uid, _ in top), return_exceptions=True), 15
@@ -353,7 +337,7 @@ async def daily_cmd_stats_job():
 async def stats_on(event: GroupMessageEvent):
     if not is_owner(event):
         await stats_on_cmd.finish("❌ 你没有权限使用此功能")
-    _add_group(event.group_id)
+    await _add_group(event.group_id)
     await stats_on_cmd.finish("✅ 本群已开启每日指令统计推送（每天凌晨发送）")
 
 
@@ -361,7 +345,7 @@ async def stats_on(event: GroupMessageEvent):
 async def stats_off(event: GroupMessageEvent):
     if not is_owner(event):
         await stats_off_cmd.finish("❌ 你没有权限使用此功能")
-    _remove_group(event.group_id)
+    await _remove_group(event.group_id)
     await stats_off_cmd.finish("✅ 本群已关闭每日指令统计推送")
 
 

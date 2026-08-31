@@ -255,9 +255,11 @@ async def _wait_queue(matcher, event: MessageEvent) -> None:
     等待名额在进入队列前同步扣减（事件循环内原子），不再依赖 locked() 检查与
     acquire 之间「恰好没有 await」的窗口；用户提示统一由抢到锁之后各 handler
     发送的「正在生成/查询」消息承担，提示与实际开始处理严格对应，无漏发竞态。
+    满员被拒时退还 handler 已记的查询冷却：用户没有实际查询，不应白吃 10 秒冷却。
     """
     global _queue_waiters
     if _queue_waiters >= _QUEUE_MAX_WAITERS:
+        _last_query.pop(str(event.user_id), None)
         await matcher.finish(at_prefix(event) + Message("⏳ 查询排队已满，请稍后再试～"))
     _queue_waiters += 1
     try:

@@ -25,8 +25,8 @@ _COOLDOWN = 10 * 60  # 同一插件同一错误 10 分钟内只提醒一次
 _last_notified: dict[str, float] = {}
 _loop: asyncio.AbstractEventLoop | None = None
 
-# 定时任务错过触发（misfire）的事件码；测试 stub 未提供该常量，真实 APScheduler 中为 1 << 7
-EVENT_JOB_MISSED = getattr(_aps_events, "EVENT_JOB_MISSED", 1 << 7)
+# 定时任务错过触发（misfire）的事件码；测试 stub 未提供该常量，真实 APScheduler 3.x 中为 1 << 14
+EVENT_JOB_MISSED = getattr(_aps_events, "EVENT_JOB_MISSED", 1 << 14)
 
 
 def _plugin_label(matcher: Matcher) -> str:

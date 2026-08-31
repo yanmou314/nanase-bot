@@ -11,6 +11,7 @@ import subprocess
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime
 
 from nonebot.adapters.onebot.v11 import Message, MessageEvent, MessageSegment
@@ -191,6 +192,54 @@ def save_json_state(path: str, data: dict, lock=None) -> None:
         os.replace(tmp, path)
 
 
+async def save_json_state_async(path: str, data: dict, lock=None) -> None:
+    """save_json_state 的异步封装（to_thread），事件循环内请使用本函数。
+
+    传自定义锁时调用方必须在 await 之前已释放该锁：to_thread 的工作线程会重新
+    申请同一把锁，协程持锁跨 await 会死锁。正确姿势是先在锁内完成读改写，
+    锁外再 await 本函数落盘。
+    """
+    return await asyncio.to_thread(save_json_state, path, data, lock)
+
+
+# ---------------- 群成员昵称（带 TTL 的 LRU，跨插件共享单例） ----------------
+
+_NAME_TTL = 300.0  # 昵称缓存有效期（秒），沿用 chat_stats/cmd_stats 原实现
+_NAME_CACHE_MAX = 10000  # 简单 LRU 上限，防止长期运行内存增长
+_member_name_cache: OrderedDict = OrderedDict()
+_member_name_ts: dict = {}
+_member_name_lock = threading.Lock()  # 缓存本体跨事件循环/线程共享，统一加锁
+
+
+async def get_member_name(bot, group_id: int, user_id: int) -> str:
+    """取群成员群名片/昵称，失败回退 QQ 号字符串；结果带 TTL 缓存（插件间共享）。
+
+    单次查询 10 秒超时：NapCat 卡死时不致挂死调用方（日报等批量拉取场景）。
+    """
+    key = (group_id, user_id)
+    now = time.time()
+    with _member_name_lock:
+        cached = _member_name_cache.get(key)
+        if cached and now - _member_name_ts.get(key, 0) < _NAME_TTL:
+            _member_name_cache.move_to_end(key)
+            return cached
+    try:
+        info = await asyncio.wait_for(
+            bot.get_group_member_info(group_id=group_id, user_id=user_id), 10
+        )
+        name = info.get("card") or info.get("nickname") or str(user_id)
+    except Exception:
+        name = str(user_id)
+    with _member_name_lock:
+        _member_name_cache[key] = name
+        _member_name_ts[key] = now
+        _member_name_cache.move_to_end(key)
+        while len(_member_name_cache) > _NAME_CACHE_MAX:
+            old = _member_name_cache.popitem(last=False)
+            _member_name_ts.pop(old[0], None)
+    return name
+
+
 # ---------------- 图片渲染（weasyprint → PDF → pdftoppm → PNG） ----------------
 
 def render_html_to_png(html: str, prefix: str, cache_dir: str, max_age: int = 24 * 60 * 60,
@@ -227,11 +276,20 @@ def render_html_to_png(html: str, prefix: str, cache_dir: str, max_age: int = 24
     return path
 
 
+# 渲染整体超时（weasyprint 无内建超时；wait_for 无法强杀线程，但能释放
+# RENDER_SEM 让后续渲染继续，与 pdftoppm 的 60s 防护对齐，防止挂死渲染
+# 永久占住全站唯一的渲染槽）
+RENDER_TOTAL_TIMEOUT = 180
+
+
 async def render_html_to_png_async(html: str, prefix: str, cache_dir: str,
                                     max_age: int = 24 * 60 * 60, dpi: int = 144) -> str:
     """render_html_to_png 的异步封装：经 RENDER_SEM 全局串行化后在线程池执行。"""
     async with RENDER_SEM:
-        return await asyncio.to_thread(render_html_to_png, html, prefix, cache_dir, max_age, dpi)
+        return await asyncio.wait_for(
+            asyncio.to_thread(render_html_to_png, html, prefix, cache_dir, max_age, dpi),
+            timeout=RENDER_TOTAL_TIMEOUT,
+        )
 
 
 def gradient_background(w: int, h: int, top=(249, 248, 250), bottom=(243, 241, 246)) -> str:
@@ -253,6 +311,8 @@ def gradient_background(w: int, h: int, top=(249, 248, 250), bottom=(243, 241, 2
 # ---------------- httpx 客户端单例 ----------------
 
 _http_clients: dict[float, object] = {}
+# 并发首调同一 timeout 时败者的客户端无法放回注册表，记入孤儿表由关停统一关闭
+_orphan_clients: list = []
 
 
 def get_http_client(timeout: float = 30.0):
@@ -261,17 +321,23 @@ def get_http_client(timeout: float = 30.0):
 
     client = _http_clients.get(timeout)
     if client is None or client.is_closed:
-        client = httpx.AsyncClient(timeout=timeout)
-        _http_clients[timeout] = client
+        new_client = httpx.AsyncClient(timeout=timeout)
+        existing = _http_clients.setdefault(timeout, new_client)
+        if existing is new_client:
+            client = new_client
+        else:
+            _orphan_clients.append(new_client)
+            client = existing
     return client
 
 
 async def close_http_clients() -> None:
     """关闭全部公共 httpx 客户端（幂等，可被多个插件重复注册调用）。"""
-    for client in list(_http_clients.values()):
+    for client in list(_http_clients.values()) + _orphan_clients:
         if not client.is_closed:
             await client.aclose()
     _http_clients.clear()
+    _orphan_clients.clear()
 
 
 # 关闭职责收敛到 common 自身，不再依赖个别插件恰好注册了关闭钩子

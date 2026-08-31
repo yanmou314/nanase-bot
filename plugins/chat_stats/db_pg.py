@@ -245,7 +245,12 @@ async def _write_loop() -> None:
                     try:
                         queue.put_nowait(item)
                     except asyncio.QueueFull:
-                        _log_queue_full(f"重试消息被丢弃 (group={item[0]} user={item[1]})")
+                        # cmd 条目 ("cmd", group_id, user_id, ...) 与消息条目
+                        # (group_id, user_id, ...) 字段位置不同，按 item[0] 区分取字段
+                        if item[0] == "cmd":
+                            _log_queue_full(f"重试指令记录被丢弃 (group={item[1]} user={item[2]})")
+                        else:
+                            _log_queue_full(f"重试消息被丢弃 (group={item[0]} user={item[1]})")
                 await asyncio.sleep(1)
             else:
                 for _ in batch:

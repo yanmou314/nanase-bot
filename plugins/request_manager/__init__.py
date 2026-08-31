@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import re
@@ -17,12 +16,22 @@ from nonebot.adapters.onebot.v11 import (
 from nonebot.matcher import Matcher
 from nonebot.params import CommandArg
 
-from common import OWNER, is_owner, load_json_state, now_str, save_json_state
+from common import (
+    OWNER,
+    is_owner,
+    load_json_state,
+    now_str,
+    save_json_state,
+    save_json_state_async,
+)
 
 _logger = logging.getLogger(__name__)
 
 request_matcher = on_request(priority=1, block=False)
-private_matcher = on_message(priority=20, block=False)
+# 私聊转发必须跑在 auto_chat 的 chat_matcher（priority=5, block=True）之前：
+# 私聊消息恒满足 to_me()，block=True 在 handler 结束后无条件 StopPropagation，
+# 若排在其后（原 priority=20）本 matcher 永远不会执行，转发功能静默失效
+private_matcher = on_message(priority=4, block=False)
 
 
 def _reply_message_id(event: MessageEvent) -> str:
@@ -111,24 +120,26 @@ def _guard_mark_approved(uid: int) -> None:
         _save_guard(data)
 
 
-def _guard_blacklist(nums: list[str]) -> None:
+async def _guard_blacklist(nums: list[str]) -> None:
     with _GUARD_LOCK:
         data = _load_guard()
         blacklist = data.get("blacklist") if isinstance(data.get("blacklist"), dict) else {}
         for n in nums:
             blacklist[n] = time.time()
         data["blacklist"] = blacklist
-        _save_guard(data)
+    # 锁释放后再落盘：save_json_state_async 在工作线程会重新申请 _GUARD_LOCK，
+    # 协程持锁跨 await 会死锁
+    await save_json_state_async(GUARD_FILE, data, _GUARD_LOCK)
 
 
-def _guard_unblacklist(nums: list[str]) -> list[str]:
+async def _guard_unblacklist(nums: list[str]) -> list[str]:
     with _GUARD_LOCK:
         data = _load_guard()
         blacklist = data.get("blacklist") if isinstance(data.get("blacklist"), dict) else {}
         removed = [n for n in nums if blacklist.pop(n, None) is not None]
         data["blacklist"] = blacklist
-        _save_guard(data)
-        return removed
+    await save_json_state_async(GUARD_FILE, data, _GUARD_LOCK)
+    return removed
 
 auto_on_cmd = on_command("自动通过", aliases={"自动同意"}, priority=5, block=True)
 auto_off_cmd = on_command("自动通过关闭", aliases={"自动同意关闭"}, priority=5, block=True)
@@ -137,7 +148,8 @@ auto_count_cmd = on_command("自动通过数量", aliases={"自动同意数量",
 
 _pending: dict[str, dict] = {}
 _notify_index: dict[str, str] = {}  # 机器人发给主人的申请通知 message_id -> pending flag
-_save_lock = threading.Lock()
+# 可重入：_save_keywords 持锁期间会经 _load_config/save_json_state 再次申请同一把锁
+_save_lock = threading.RLock()
 _PENDING_TTL = 48 * 3600  # 与 QQ 侧 flag 有效期一致
 
 
@@ -167,21 +179,9 @@ def _remember_notify(resp, flag: str) -> None:
 
 
 def _load_config() -> dict:
-    try:
-        with open(CONFIG_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except FileNotFoundError:
-        return {}
-    except Exception:
-        # 文件损坏/读取失败时先备份现场再返回空，防止后续保存把其他群的配置静默清掉
-        backup = f"{CONFIG_FILE}.corrupt-{int(time.time())}"
-        try:
-            os.replace(CONFIG_FILE, backup)
-        except OSError:
-            pass
-        _logger.error("自动通过配置读取失败，原文件已备份为 %s", backup, exc_info=True)
-        return {}
+    # common 的 load_json_state：损坏/不可读时先备份留档（.corrupt-<ts>/.unreadable-<ts>）
+    # 再返回 {}，防止后续保存把其他群的配置静默清掉；权限沿用现状/新文件 600（暗号敏感）
+    return load_json_state(CONFIG_FILE, _save_lock)
 
 
 def _load_keywords(group_id: int) -> list[str]:
@@ -198,10 +198,9 @@ def _save_keywords(group_id: int, kw: list[str], merge: bool = False) -> list[st
         else:
             keywords = list(dict.fromkeys(keywords))
         data[str(group_id)] = keywords
-        temporary = CONFIG_FILE + ".tmp"
-        with open(temporary, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(temporary, CONFIG_FILE)
+        # common 的 save_json_state：tmp + fsync + os.replace 原子写，
+        # 权限沿用现状、新文件 600——auto_approve.json 存各群进群暗号，不能掉回 644
+        save_json_state(CONFIG_FILE, data, _save_lock)
         return keywords
 
 
@@ -324,7 +323,7 @@ async def blk_add(bot: Bot, event: MessageEvent, arg=CommandArg()):
     nums = _parse_qq_args(arg)
     if not nums:
         await blk_on_cmd.finish("用法：.进群拉黑 <QQ号> [更多QQ号...]\n例如：.进群拉黑 123456 789012\n拉黑后这些号码的进群申请将永不自动通过")
-    _guard_blacklist(nums)
+    await _guard_blacklist(nums)
     await _finish_owner_config(bot, blk_on_cmd, event,
                                f"⛔ 已拉黑 {len(nums)} 个 QQ：{'、'.join(nums)}\n其进群申请将不再自动通过，一律转人工")
 
@@ -336,7 +335,7 @@ async def blk_remove(bot: Bot, event: MessageEvent, arg=CommandArg()):
     nums = _parse_qq_args(arg)
     if not nums:
         await blk_off_cmd.finish("用法：.解除拉黑 <QQ号> [更多QQ号...]\n例如：.解除拉黑 123456")
-    removed = _guard_unblacklist(nums)
+    removed = await _guard_unblacklist(nums)
     missing = [n for n in nums if n not in removed]
     text = f"✅ 已移出拉黑：{'、'.join(removed)}" if removed else "没有匹配的记录"
     if missing:
@@ -385,6 +384,22 @@ async def auto_count(bot: Bot, event: MessageEvent, arg=CommandArg()):
     await _finish_owner_config(bot, auto_count_cmd, event, f"🔑 群 {gid} 当前没有配置自动通过关键字（共 0 个）")
 
 
+def _is_bnet_managed(group_id: int) -> bool:
+    """该群的加群申请是否已由战网ID验证插件（bnet_verify）托管。
+
+    延迟导入避免插件加载顺序耦合；插件未加载/读取失败时按未托管处理。
+    """
+    try:
+        from plugins.bnet_verify import is_managed_group
+    except Exception:
+        return False
+    try:
+        return bool(is_managed_group(group_id))
+    except Exception:
+        _logger.warning("查询 bnet_verify 托管状态失败，按未托管处理", exc_info=True)
+        return False
+
+
 @request_matcher.handle()
 async def handle_request(bot: Bot, event):
     if event.user_id == int(OWNER):
@@ -392,6 +407,8 @@ async def handle_request(bot: Bot, event):
     _purge_pending()
     ts = now_str()
     if isinstance(event, GroupRequestEvent) and event.sub_type in ("add", "apply"):
+        if _is_bnet_managed(event.group_id):
+            return  # 该群由战网ID验证插件（bnet_verify）全权处理，避免双重响应
         if await _auto_approve(bot, event, event.comment or ""):
             return
         # 诊断日志：记录未自动通过时的原始附言（验证问答的回答也在这里），便于排查

@@ -149,6 +149,7 @@ async def repeater(bot: Bot, event: GroupMessageEvent):
             # MessageSegment.text 包裹：用户输入的字面 [CQ:...] 不会被解析为真实 CQ 码
             await bot.send_group_msg(group_id=gid, message=MessageSegment.text(fp[2]))
         else:
+            # 图片 file_id 过期后发送失败常见，留痕避免插件静默失效无从察觉
             await bot.send_group_msg(group_id=gid, message=MessageSegment.image(fp[2]))
     except Exception:
-        pass
+        _logger.debug("复读发送失败（群 %s）", gid, exc_info=True)

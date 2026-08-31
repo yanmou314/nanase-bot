@@ -293,8 +293,9 @@ async def _fetch_bangumi_info(vid: str) -> dict | None:
             "tname": "番剧",
             "videos": len(episodes) or 1,
             "desc": _clean_desc(r.get("evaluate")),
-            "duration": int((ep or {}).get("duration") or 0) // 1000
-            if (ep or {}).get("duration", 0) and (ep or {}).get("duration", 0) >= 60000 else int((ep or {}).get("duration") or 0),
+            # 番剧 ep/ss 的 duration 单位是毫秒（普通视频 av/BV 是秒），一律转成秒；
+            # 旧写法按 >=60000 猜单位，短 PV（<60s）会被错当秒显示
+            "duration": int((ep or {}).get("duration") or 0) // 1000,
             "pubdate": int((ep or {}).get("pub_time") or 0),
             "link": f"https://www.bilibili.com/bangumi/play/{vid}",
             "stats_display": stats,
@@ -531,16 +532,25 @@ def _resized_cover_url(pic_url: str) -> str:
 
 
 async def _fetch_cover_bytes(pic_url: str) -> bytes | None:
-    """下载（缩放后的）封面字节；失败或超限返回 None。"""
+    """下载（缩放后的）封面字节；失败或超限返回 None。
+
+    流式读取并边读边计数：异常大响应（CDN 故障/被劫持）在到达上限时即中断，
+    不先整图吃进内存（生产 MemoryMax=700M）。"""
     if not pic_url:
         return None
     try:
         client = get_http_client(10.0)
-        resp = await client.get(_resized_cover_url(pic_url), headers=_HEADERS)
-        if len(resp.content) > _MAX_COVER_BYTES:
-            _logger.warning("封面图异常大(%d bytes)已跳过: %s", len(resp.content), pic_url)
-            return None
-        return resp.content
+        chunks: list[bytes] = []
+        total = 0
+        async with client.stream("GET", _resized_cover_url(pic_url), headers=_HEADERS) as resp:
+            resp.raise_for_status()
+            async for chunk in resp.aiter_bytes():
+                total += len(chunk)
+                if total > _MAX_COVER_BYTES:
+                    _logger.warning("封面图异常大(>%d bytes)已中断: %s", _MAX_COVER_BYTES, pic_url)
+                    return None
+                chunks.append(chunk)
+        return b"".join(chunks)
     except httpx.HTTPError:
         _logger.warning("封面下载失败: %s", pic_url)
         return None
@@ -597,24 +607,25 @@ async def handle_bili_link(event: GroupMessageEvent):
         return
 
     ids = extract_ids(raw)
-    # 短链解析限流：同消息相同 URL 去重保序、最多解析前 3 条，整体 20 秒兜底防挂死
+    # 短链解析限流：同消息相同 URL 去重保序、最多解析前 3 条，逐条 20 秒兜底防挂死
+    #（并行执行，整体墙钟仍 ≤20s；单条超时不作废其余已完成解析）
     urls = list(dict.fromkeys(_B23_RE.findall(raw)))[:3]
     if urls:
-        try:
-            resolved_list = await asyncio.wait_for(
-                asyncio.gather(*(resolve_b23(u) for u in urls)), 20
-            )
-        except asyncio.TimeoutError:
-            _logger.warning("b23.tv 短链解析超时（%d 条）已跳过: %s", len(urls), urls)
-            resolved_list = []
-        for resolved in resolved_list:
+        async def _resolve_limited(url: str):
+            try:
+                return await asyncio.wait_for(resolve_b23(url), 20)
+            except asyncio.TimeoutError:
+                _logger.warning("b23.tv 短链解析超时已跳过: %s", url)
+                return None
+        for resolved in await asyncio.gather(*(_resolve_limited(u) for u in urls)):
             if resolved and resolved not in ids:
                 ids.append(resolved)
     if not ids:
         return
 
     # 重复请求：60 秒内已答复过保持静默（防连点刷屏）；之后重发缓存图而非沉默。
-    # 先扫描完整消息，避免某个旧链接的缓存重发吞掉同消息中的新链接。
+    # 取消息中第一条有缓存的链接（保持消息顺序）；新链接由下方 vid 逻辑独立处理，
+    # 缓存重发仅在没有新链接时执行，不会吞掉新链接。
     cached_vid = None
     for v in ids:
         if now - _recent.get((gid, v), 0.0) < 60.0:
@@ -624,7 +635,7 @@ async def handle_bili_link(event: GroupMessageEvent):
             img = _img_cache.get(entry[1]["bvid"])
             if img and img[0] > now and os.path.exists(img[1]):
                 cached_vid = (v, img[1])
-                continue
+                break
 
     if now - _group_last.get(gid, 0.0) < _GROUP_COOLDOWN:
         return

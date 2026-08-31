@@ -101,8 +101,7 @@ def _now() -> datetime:
     return datetime.now(TIMEZONE)
 
 
-def _load_groups() -> set[int]:
-    data = load_json_state(STATE_FILE, STATE_LOCK)
+def _groups_from_data(data: dict) -> set[int]:
     groups = data.get("groups", []) if isinstance(data.get("groups"), list) else []
     result = set()
     for group_id in groups:
@@ -115,11 +114,8 @@ def _load_groups() -> set[int]:
     return result
 
 
-def _save_groups(groups: set[int]) -> None:
-    # 只更新 groups，保留同文件里的其他键（如 last_push_date）
-    data = load_json_state(STATE_FILE, STATE_LOCK)
-    data["groups"] = sorted(groups)
-    save_json_state(STATE_FILE, data, STATE_LOCK)
+def _load_groups() -> set[int]:
+    return _groups_from_data(load_json_state(STATE_FILE, STATE_LOCK))
 
 
 def _enabled_groups() -> set[int]:
@@ -127,17 +123,25 @@ def _enabled_groups() -> set[int]:
         return _load_groups()
 
 
-def _change_group(group_id: int, enabled: bool) -> bool:
+def _sync_change_group(group_id: int, enabled: bool) -> bool:
+    """load → mutate → save 在同一把锁内完成，只改 groups 保留其他键，
+    避免跨 await 的陈旧快照覆盖并发写入（如 17:00 推送的 _mark_pushed）。"""
     with STATE_LOCK:
-        groups = _load_groups()
+        data = load_json_state(STATE_FILE, STATE_LOCK)
+        groups = _groups_from_data(data)
         changed = (group_id not in groups) if enabled else (group_id in groups)
-        if enabled:
-            groups.add(group_id)
-        else:
-            groups.discard(group_id)
         if changed:
-            _save_groups(groups)
+            if enabled:
+                groups.add(group_id)
+            else:
+                groups.discard(group_id)
+            data["groups"] = sorted(groups)
+            save_json_state(STATE_FILE, data, STATE_LOCK)
         return changed
+
+
+async def _change_group(group_id: int, enabled: bool) -> bool:
+    return await asyncio.to_thread(_sync_change_group, group_id, enabled)
 
 
 def _last_push_date() -> str:
@@ -278,10 +282,9 @@ def _build_message(now: datetime | None = None) -> str:
 
 def _font(size: int, bold: bool = False):
     key = "noto_bold" if bold else "noto_reg"
-    try:
-        return ImageFont.truetype(FONTS[key], size)
-    except (OSError, TypeError, KeyError):
-        return ImageFont.load_default()
+    # 字体缺失时直接抛错，让上层 _build_image_message 捕获并回退文本消息；
+    # load_default() 无 CJK 字形，会产出整页豆腐块
+    return ImageFont.truetype(FONTS[key], size)
 
 
 def _right_text(draw: ImageDraw.ImageDraw, text: str, y: int, font, fill) -> None:
@@ -404,7 +407,7 @@ async def enable(event: MessageEvent):
         await enable_cmd.finish("❌ 你没有权限使用此功能")
     if not isinstance(event, GroupMessageEvent):
         await enable_cmd.finish("请在需要接收推送的群里使用此命令")
-    changed = _change_group(event.group_id, True)
+    changed = await _change_group(event.group_id, True)
     if changed:
         await enable_cmd.finish("✅ 本群已开启每日倒计时推送，每天 17:00 发送")
     await enable_cmd.finish("ℹ️ 本群已经开启每日倒计时推送")
@@ -416,7 +419,7 @@ async def disable(event: MessageEvent):
         await disable_cmd.finish("❌ 你没有权限使用此功能")
     if not isinstance(event, GroupMessageEvent):
         await disable_cmd.finish("请在需要关闭推送的群里使用此命令")
-    changed = _change_group(event.group_id, False)
+    changed = await _change_group(event.group_id, False)
     if changed:
         await disable_cmd.finish("✅ 本群已关闭每日倒计时推送")
     await disable_cmd.finish("ℹ️ 本群本来就没有开启每日倒计时推送")
