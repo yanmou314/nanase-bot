@@ -14,7 +14,13 @@ from nonebot import get_bot, get_driver, on_command
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageEvent, MessageSegment
 from nonebot_plugin_apscheduler import scheduler
 
-from common import close_http_clients, get_http_client, is_owner, load_json_state, save_json_state
+from common import (
+    close_http_clients,
+    get_http_client,
+    is_owner,
+    load_json_state,
+    save_json_state,
+)
 
 _logger = logging.getLogger(__name__)
 _SH = ZoneInfo("Asia/Shanghai")
@@ -77,22 +83,38 @@ def _get_groups() -> list[str]:
         return [str(g) for g in (state.get("groups") or []) if str(g)]
 
 
-def _add_group(gid: str) -> None:
+def _mutate_state(mutate) -> dict:
+    """load → mutate → save 在同一把锁内完成，避免跨 await 的陈旧快照覆盖并发写入
+    （如 17:00 推送的 _mark_pushed 与开关命令互相覆盖导致重复推送/丢订阅）。"""
     with _LOCK:
         state = _load_state()
+        mutate(state)
+        _save_state(state)
+        return state
+
+
+def _sync_add_group(gid: str) -> None:
+    def _do(state: dict) -> None:
         groups = {str(g) for g in (state.get("groups") or [])}
         groups.add(gid)
         state["groups"] = sorted(groups)
-        _save_state(state)
+    _mutate_state(_do)
 
 
-def _remove_group(gid: str) -> None:
-    with _LOCK:
-        state = _load_state()
+def _sync_remove_group(gid: str) -> None:
+    def _do(state: dict) -> None:
         groups = {str(g) for g in (state.get("groups") or [])}
         groups.discard(gid)
         state["groups"] = sorted(groups)
-        _save_state(state)
+    _mutate_state(_do)
+
+
+async def _add_group(gid: str) -> None:
+    await asyncio.to_thread(_sync_add_group, gid)
+
+
+async def _remove_group(gid: str) -> None:
+    await asyncio.to_thread(_sync_remove_group, gid)
 
 
 def _last_push_date() -> str:
@@ -359,9 +381,12 @@ async def _fetch_quote() -> str:
     return _parse_hitokoto(r.json())
 
 
-async def _build_message(day: date) -> str:
-    """组装晨报文本。问候优先用免费 AI 生成，失败回退本地拼接；日期与农历永在。"""
-    lunar_line, festival, legal = _lunar_info(day)
+async def _build_greeting_part(day: date, lunar_line: str, festival: str, legal: bool) -> str:
+    """问候优先用免费 AI 生成，失败回退本地拼接。
+
+    一言与 AI 并发拉取（互不依赖），AI 成功则弃用一言结果：
+    失败路径不再串行多等一跳，AI 正常时仅多一次廉价请求。"""
+    quote_task = asyncio.create_task(_fetch_quote())
     greeting = ""
     try:
         greeting = await _fetch_ai_greeting(day, lunar_line, festival, legal)
@@ -370,28 +395,45 @@ async def _build_message(day: date) -> str:
     if not greeting:
         quote = ""
         try:
-            quote = await _fetch_quote()
+            quote = await quote_task
         except Exception as exc:
             _logger.warning("一言获取失败，使用本地句子: %s", exc)
-        greeting = _build_greeting(day, quote, festival, legal)
-    head = f"今天是{day.month}月{day.day}日，星期{_WEEKDAY_CN[day.weekday()]}"
-    if festival:
-        head += f"，{_FESTIVAL_EMOJI.get(festival, '🎉')} {festival}"
-    lines = [
-        head + f"，🌙 {lunar_line}",
-        greeting,
-    ]
-    # 新闻取昨日（60s 每天早上更新的是前一天的内容）；昨日取不到时回退当日
+        return _build_greeting(day, quote, festival, legal)
+    quote_task.cancel()
+    try:
+        await quote_task
+    except BaseException:
+        pass  # 已取消的后台任务，结果不再需要
+    return greeting
+
+
+async def _build_news_section(day: date) -> list[str]:
+    """新闻取昨日（60s 每天早上更新的是前一天的内容）；昨日取不到时回退当日。"""
     for news_day in (day - timedelta(days=1), day):
         try:
             items = (await _fetch_news(news_day))[:10]
             if items:
-                lines.append("")
-                lines.append(f"📰 昨日新闻（{news_day.month}月{news_day.day}日）：")
-                lines.extend(f"· {x}" for x in items)
-                break
+                return [
+                    "",
+                    f"📰 昨日新闻（{news_day.month}月{news_day.day}日）：",
+                    *(f"· {x}" for x in items),
+                ]
         except Exception as exc:
             _logger.warning("新闻获取失败（%s）: %s", news_day, exc)
+    return []
+
+
+async def _build_message(day: date) -> str:
+    """组装晨报文本。问候与新闻两路外呼互不依赖，并发执行缩短整体耗时。"""
+    lunar_line, festival, legal = _lunar_info(day)
+    head = f"今天是{day.month}月{day.day}日，星期{_WEEKDAY_CN[day.weekday()]}"
+    if festival:
+        head += f"，{_FESTIVAL_EMOJI.get(festival, '🎉')} {festival}"
+    head += f"，🌙 {lunar_line}"
+    greeting_task = asyncio.create_task(_build_greeting_part(day, lunar_line, festival, legal))
+    news_task = asyncio.create_task(_build_news_section(day))
+    greeting = await greeting_task
+    lines = [head, greeting, *await news_task]
     return "\n".join(lines)
 
 
@@ -479,7 +521,7 @@ _register_catchup = getattr(get_driver(), "on_bot_connect", get_driver().on_star
 
 
 @_register_catchup
-async def _daily_news_catchup(bot: Bot) -> None:
+async def _daily_news_catchup(bot: Bot | None = None) -> None:
     now = datetime.now(_SH)
     if (now.hour, now.minute) < (_PUSH_HOUR, _PUSH_MINUTE):
         return  # 还没到当日推送时刻，交给定时任务
@@ -494,7 +536,7 @@ async def news_on(event: MessageEvent):
         await news_on_cmd.finish("❌ 你没有权限使用此功能")
     if not isinstance(event, GroupMessageEvent):
         await news_on_cmd.finish("请在有机器人的群里开启此功能")
-    _add_group(str(event.group_id))
+    await _add_group(str(event.group_id))
     await news_on_cmd.finish("✅ 本群已开启每日晨报推送\n每天 07:00 发送「早安问候 · 农历节气 · 昨日新闻」")
 
 
@@ -504,7 +546,7 @@ async def news_off(event: MessageEvent):
         await news_off_cmd.finish("❌ 你没有权限使用此功能")
     if not isinstance(event, GroupMessageEvent):
         await news_off_cmd.finish("请在有机器人的群里关闭此功能")
-    _remove_group(str(event.group_id))
+    await _remove_group(str(event.group_id))
     await news_off_cmd.finish("✅ 本群已关闭每日晨报推送")
 
 

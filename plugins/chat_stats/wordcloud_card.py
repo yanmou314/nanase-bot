@@ -2,6 +2,7 @@ import math
 import os
 import random
 import time
+import uuid
 from collections import Counter
 
 from PIL import Image, ImageDraw, ImageFont
@@ -108,6 +109,9 @@ def _render(counter: Counter, n: int, msg_count: int) -> str:
                   fill=(165, 161, 171), anchor="lt")
 
     os.makedirs(CACHE_DIR, exist_ok=True)
-    path = os.path.join(CACHE_DIR, f"words_{int(time.time() * 1000)}.png")
+    # 命名风格与 common.render_html_to_png 一致：时间戳 + uuid 片段，避免并发渲染同名互覆
+    path = os.path.join(
+        CACHE_DIR, f"words_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}.png"
+    )
     img.save(path, "PNG")
     return path

@@ -270,26 +270,44 @@ def test_render_and_save_produces_png():
 
 
 def test_fetch_cover_bytes(monkeypatch):
+    class _StreamCtx:
+        def __init__(self, resp):
+            self._resp = resp
+
+        async def __aenter__(self):
+            return self._resp
+
+        async def __aexit__(self, *exc):
+            return False
+
     class _Resp:
-        content = b"PNGDATA"
         headers = {"content-type": "image/jpeg"}
 
-    class _Client:
-        async def get(self, url, **kw):
-            assert url.endswith("@900w_506h_1c.jpg")
-            return _Resp()
+        def __init__(self, chunks):
+            self._chunks = chunks
 
-    monkeypatch.setattr(bili, "get_http_client", lambda t: _Client())
+        def raise_for_status(self):
+            pass
+
+        async def aiter_bytes(self):
+            for chunk in self._chunks:
+                yield chunk
+
+    class _Client:
+        def __init__(self, chunks):
+            self._chunks = chunks
+
+        def stream(self, method, url, **kw):
+            assert method == "GET" and url.endswith("@900w_506h_1c.jpg")
+            return _StreamCtx(_Resp(self._chunks))
+
+    monkeypatch.setattr(bili, "get_http_client", lambda t: _Client([b"PNGDATA"]))
     assert asyncio.run(bili._fetch_cover_bytes(_INFO["pic"])) == b"PNGDATA"
 
-    class _Big(_Resp):
-        content = b"x" * (bili._MAX_COVER_BYTES + 1)
-
-    class _BigClient:
-        async def get(self, url, **kw):
-            return _Big()
-
-    monkeypatch.setattr(bili, "get_http_client", lambda t: _BigClient())
+    # 分块流式累计超上限：在到达上限时中断，不再继续读
+    mb = 1024 * 1024
+    big_chunks = [b"x" * mb] * (bili._MAX_COVER_BYTES // mb + 1)
+    monkeypatch.setattr(bili, "get_http_client", lambda t: _Client(big_chunks))
     assert asyncio.run(bili._fetch_cover_bytes(_INFO["pic"])) is None
 
 

@@ -12,8 +12,11 @@ Python 等价实现，与其 JS 版本逐调用对齐（含失败重试消耗随
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 _DATA_PATH = os.path.join(os.path.dirname(__file__), "rushdata.json")
 _CONSTANTS: dict | None = None
@@ -23,12 +26,46 @@ WATER_TOWERS = {"MonkeySub", "MonkeyBuccaneer"}
 _DIFF_NAMES = {0: "Beginner", 1: "Intermediate", 2: "Advanced", 3: "Expert"}
 _DIFF_IDX = {"Beginner": 0, "Intermediate": 1, "Advanced": 2, "Expert": 3}
 
+# rushdata.json（裁剪自 Constants.json v3.0.0）的关键字段：缺失说明数据文件
+# 版本过期或损坏，生成结果将不可信，加载时 warning 提示（不抛异常，保底可渲染）。
+_REQUIRED_TOP_KEYS = ("bossRush", "mapsInOrder", "towersInOrder", "heroesInOrder")
+_REQUIRED_BR_KEYS = ("StageScores", "StageRewards", "RandomSettings")
+
+
+def _validate_constants(data: dict) -> None:
+    if not isinstance(data, dict):
+        _logger.warning("rushdata.json 结构异常：顶层不是对象，Boss Rush 数据可能过期")
+        return
+    missing_top = [k for k in _REQUIRED_TOP_KEYS if k not in data]
+    if missing_top:
+        _logger.warning("rushdata.json 缺少关键字段: %s（数据版本可能过期）", "、".join(missing_top))
+    br = data.get("bossRush")
+    if isinstance(br, dict):
+        missing_br = [k for k in _REQUIRED_BR_KEYS if k not in br]
+        if missing_br:
+            _logger.warning("rushdata.json bossRush 缺少字段: %s", "、".join(missing_br))
+        # 阶段数由 StageScores 长度决定，必须为非空列表（空表会生成 0 阶段）
+        scores = br.get("StageScores")
+        if not isinstance(scores, list) or not scores:
+            _logger.warning("rushdata.json bossRush.StageScores 必须为非空列表，Boss Rush 阶段数据可能过期")
+        rs = br.get("RandomSettings")
+        if not isinstance(rs, dict) or not isinstance(rs.get("TowerSettings"), dict):
+            _logger.warning("rushdata.json bossRush.RandomSettings/TowerSettings 异常，塔池生成可能不准")
+        if isinstance(rs, dict):
+            # 生成路径实际用到的两个池：为空时 generate_bosses_br/generate_relics 会退化
+            for key in ("AvailableBosses", "RelicChances"):
+                if key in rs and not rs.get(key):
+                    _logger.warning("rushdata.json bossRush.RandomSettings.%s 为空，Boss Rush 生成可能失败", key)
+    elif br is not None:
+        _logger.warning("rushdata.json bossRush 不是对象，Boss Rush 数据可能过期")
+
 
 def load_constants() -> dict:
     global _CONSTANTS
     if _CONSTANTS is None:
         with open(_DATA_PATH, encoding="utf-8") as f:
             _CONSTANTS = json.load(f)
+        _validate_constants(_CONSTANTS)
     return _CONSTANTS
 
 
@@ -54,7 +91,7 @@ class CompatPrng:
         seed_array[55] = sub
         mj = 1
         mk = 0
-        for i in range(1, 55):
+        for _i in range(1, 55):
             mk += 21
             if mk >= 55:
                 mk -= 55
@@ -63,7 +100,7 @@ class CompatPrng:
             if mj < 0:
                 mj += max_val
             sub = seed_array[mk]
-        for k in range(1, 5):
+        for _k in range(1, 5):
             for i in range(1, 56):
                 ii = i + 30
                 if ii >= 55:

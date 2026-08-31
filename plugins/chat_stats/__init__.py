@@ -3,8 +3,7 @@ import logging
 import os
 import re
 import threading
-import time
-from collections import Counter, OrderedDict
+from collections import Counter
 from contextlib import aclosing
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -15,7 +14,15 @@ from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegme
 from nonebot.params import CommandArg
 from nonebot_plugin_apscheduler import scheduler
 
-from common import RENDER_SEM, cleanup_cache, is_owner, load_json_state, save_json_state
+from common import (
+    RENDER_SEM,
+    cleanup_cache,
+    get_member_name,
+    is_owner,
+    load_json_state,
+    save_json_state,
+    save_json_state_async,
+)
 from .db_pg import exec, iter_rows, wait_writes_drained, write as db_write
 
 _logger = logging.getLogger(__name__)
@@ -24,10 +31,6 @@ _SH = ZoneInfo("Asia/Shanghai")
 WORD_CACHE = os.path.join(os.path.dirname(__file__), "cache")
 WORDS_STATE = os.path.join(os.path.dirname(__file__), "words_state.json")
 _state_lock = threading.RLock()  # 必须可重入：_words_groups 持锁时内部会再调保存
-_nick_cache: OrderedDict = OrderedDict()
-_nick_ts: dict = {}
-NICK_TTL = 300
-NICK_CACHE_MAX = 10000
 RETENTION_DAYS = 30
 WORDS_CUTOFF_HOUR = 0
 
@@ -38,7 +41,7 @@ words_on_cmd = on_command("词云开启", priority=5, block=True)
 words_off_cmd = on_command("词云关闭", priority=5, block=True)
 words_status_cmd = on_command("词云状态", priority=5, block=True)
 
-_COMMAND_START = tuple(get_driver().config.command_start)
+_COMMAND_START = tuple(s for s in get_driver().config.command_start if s)  # 过滤空串，与 auto_chat 等插件一致
 
 STOPWORDS = set("的了是在我有和你这不那啊呢吧吗哦嗯就都要也会没很他说她我们他们自己一个没什么可以"
                 "真的还是因为所以但是然后现在今天明天昨天知道觉得应该可能如果这样那样这个那个什么为什么怎么")
@@ -54,6 +57,8 @@ def _sh_today() -> date:
 async def _purge_old_records() -> None:
     cutoff = (_sh_today() - timedelta(days=RETENTION_DAYS)).isoformat()
     await exec("DELETE FROM messages WHERE day < %s", (cutoff,))
+    # 指令使用记录与消息同保留期清理，否则 command_usages 会无限增长
+    await exec("DELETE FROM command_usages WHERE day < %s", (cutoff,))
 
 
 @scheduler.scheduled_job("cron", hour=3, minute=0, id="purge_old_stats", timezone="Asia/Shanghai")
@@ -74,27 +79,7 @@ async def record(event: GroupMessageEvent):
 
 # ---------------- 工具 ----------------
 
-async def _get_name(bot: Bot, group_id: int, user_id: int) -> str:
-    key = (group_id, user_id)
-    now = time.time()
-    cached = _nick_cache.get(key)
-    if cached and now - _nick_ts.get(key, 0) < NICK_TTL:
-        _nick_cache.move_to_end(key)
-        return cached
-    try:
-        info = await asyncio.wait_for(
-            bot.get_group_member_info(group_id=group_id, user_id=user_id), 10
-        )
-        name = info.get("card") or info.get("nickname") or str(user_id)
-    except Exception:
-        name = str(user_id)
-    _nick_cache[key] = name
-    _nick_ts[key] = now
-    _nick_cache.move_to_end(key)
-    while len(_nick_cache) > NICK_CACHE_MAX:  # 简单 LRU，防止长期运行内存增长
-        old = _nick_cache.popitem(last=False)
-        _nick_ts.pop(old[0], None)
-    return name
+# 昵称获取统一走 common.get_member_name（带 TTL 的跨插件共享 LRU 缓存）
 
 
 async def _build_word_image(group_id: int, n: int) -> str | None:
@@ -156,7 +141,23 @@ async def dragon(bot: Bot, event: GroupMessageEvent):
         await dragon_cmd.finish(MessageSegment.text("统计服务暂时不可用，请稍后再试"))
     if not rows:
         await dragon_cmd.finish("今天还没有人发言哦～")
-    names = {r[0]: await _get_name(bot, event.group_id, r[0]) for r in rows}
+
+    # 昵称并行拉取 + 整体 15 秒兜底（get_member_name 单次 10 秒超时，
+    # 串行 await 遇 NapCat 卡死最坏挂 30 秒；与 cmd_stats 的处理一致）
+    async def _name_or_fallback(uid: int) -> str:
+        try:
+            return await get_member_name(bot, event.group_id, uid)
+        except Exception:
+            return str(uid)
+
+    try:
+        name_list = await asyncio.wait_for(
+            asyncio.gather(*(_name_or_fallback(uid) for uid, _ in rows)), 15
+        )
+    except asyncio.TimeoutError:
+        _logger.warning("龙王昵称批量拉取超时，改用 QQ 号显示")
+        name_list = [str(uid) for uid, _ in rows]
+    names = {uid: name for (uid, _), name in zip(rows, name_list, strict=False)}
     data = [(uid, names[uid], cnt) for uid, cnt in rows]
     from .dragon_card import build_card_async
     path = await build_card_async(data)
@@ -175,7 +176,7 @@ def _words_groups() -> list[str]:
     return [str(g) for g in (data.get("groups") or []) if str(g)]
 
 
-def _add_words_group(gid: str) -> None:
+async def _add_words_group(gid: str) -> None:
     data = load_json_state(WORDS_STATE, _state_lock)
     if data.get("group_id") and "groups" not in data:  # 旧格式迁移
         data["groups"] = [str(data["group_id"])]
@@ -183,24 +184,25 @@ def _add_words_group(gid: str) -> None:
     groups = {str(g) for g in (data.get("groups") or [])}
     groups.add(gid)
     data["groups"] = sorted(groups)
-    save_json_state(WORDS_STATE, data, _state_lock)
+    # 异步落盘不阻塞事件循环；锁此刻未持有，工作线程可安全申请同一把锁
+    await save_json_state_async(WORDS_STATE, data, _state_lock)
 
 
-def _remove_words_group(gid: str) -> None:
+async def _remove_words_group(gid: str) -> None:
     data = load_json_state(WORDS_STATE, _state_lock)
     if not data:
         return
     groups = {str(g) for g in (data.get("groups") or [])}
     groups.discard(gid)
     data["groups"] = sorted(groups)
-    save_json_state(WORDS_STATE, data, _state_lock)
+    await save_json_state_async(WORDS_STATE, data, _state_lock)
 
 
 @words_on_cmd.handle()
 async def words_on(event: GroupMessageEvent):
     if not is_owner(event):
         await words_on_cmd.finish("❌ 你没有权限使用此功能")
-    _add_words_group(str(event.group_id))
+    await _add_words_group(str(event.group_id))
     await words_on_cmd.finish("✅ 本群已开启每日词云推送\n每天凌晨自动发送前一天的热词词云到此群")
 
 
@@ -208,7 +210,7 @@ async def words_on(event: GroupMessageEvent):
 async def words_off(event: GroupMessageEvent):
     if not is_owner(event):
         await words_off_cmd.finish("❌ 你没有权限使用此功能")
-    _remove_words_group(str(event.group_id))
+    await _remove_words_group(str(event.group_id))
     await words_off_cmd.finish("✅ 本群已关闭每日词云推送")
 
 

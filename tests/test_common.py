@@ -1,3 +1,4 @@
+import asyncio
 import os
 import time
 
@@ -27,6 +28,34 @@ def test_save_json_state_no_tmp_leftover(tmp_path):
     p = str(tmp_path / "state.json")
     common.save_json_state(p, {"a": 1})
     assert not os.path.exists(p + ".tmp")
+
+
+def test_save_json_state_async_roundtrip(tmp_path):
+    p = str(tmp_path / "state.json")
+    asyncio.run(common.save_json_state_async(p, {"a": 1, "b": "中文"}))
+    assert common.load_json_state(p) == {"a": 1, "b": "中文"}
+    assert not os.path.exists(p + ".tmp")
+
+
+def test_get_member_name_caches_and_falls_back():
+    class _Bot:
+        calls = 0
+
+        async def get_group_member_info(self, group_id=None, user_id=None):
+            type(self).calls += 1
+            return {"card": "", "nickname": "小明"}
+
+    bot = _Bot()
+    assert asyncio.run(common.get_member_name(bot, 1, 2)) == "小明"
+    assert asyncio.run(common.get_member_name(bot, 1, 2)) == "小明"  # 命中缓存
+    assert _Bot.calls == 1
+
+    class _Broken:
+        async def get_group_member_info(self, **kw):
+            raise RuntimeError("api down")
+
+    # 查询失败回退 QQ 号字符串（与原 chat_stats/cmd_stats 实现一致）
+    assert asyncio.run(common.get_member_name(_Broken(), 1, 3)) == "3"
 
 
 def test_parse_tag():

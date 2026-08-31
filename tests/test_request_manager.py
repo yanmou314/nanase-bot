@@ -198,7 +198,7 @@ def _setup_approve(monkeypatch, tmp_path, gid=111):
 
 def test_auto_approve_blacklisted_user_requires_manual(monkeypatch, tmp_path, guard_file):
     _setup_approve(monkeypatch, tmp_path)
-    request_manager._guard_blacklist(["222"])
+    asyncio.run(request_manager._guard_blacklist(["222"]))
 
     bot = ApproveBot()
     ev = _group_request(flag="f1", gid=111, uid=222, comment="暗号")
@@ -237,7 +237,7 @@ def test_reapply_within_days_requires_manual_then_recovers(monkeypatch, tmp_path
 def test_guard_block_reason_classification(guard_file):
     mod = request_manager
     assert mod._guard_block_reason(999) == ""  # 无记录不阻断
-    mod._guard_blacklist(["111"])
+    asyncio.run(mod._guard_blacklist(["111"]))
     assert mod._guard_block_reason(111) == "blacklist"
     with open(guard_file, encoding="utf-8") as f:
         import json as _json
@@ -251,8 +251,8 @@ def test_guard_block_reason_classification(guard_file):
 
 def test_unblacklist_reports_missing(guard_file):
     mod = request_manager
-    mod._guard_blacklist(["111", "222"])
-    removed = mod._guard_unblacklist(["111", "333"])
+    asyncio.run(mod._guard_blacklist(["111", "222"]))
+    removed = asyncio.run(mod._guard_unblacklist(["111", "333"]))
     assert removed == ["111"]  # 只有存在的记录被移出，333 不在名单
     assert mod._guard_block_reason(111) == ""
     assert mod._guard_block_reason(222) == "blacklist"  # 未被请求移出的仍在名单
@@ -442,3 +442,28 @@ def test_private_config_command_finishes_with_full_text(monkeypatch, tmp_path):
     assert "暗号XYZ" in str(exc.value.message) and "111" in str(exc.value.message)
     assert bot.sent_private == []
     assert mod._load_keywords(111) == ["暗号XYZ"]
+
+
+# ---------------- bnet_verify 托管群守卫 ----------------
+
+def test_handle_request_skips_bnet_managed_groups(monkeypatch, tmp_path, guard_file):
+    """开启战网验证的群：申请由 bnet_verify 全权处理，本插件直接跳过。"""
+    monkeypatch.setattr(request_manager, "CONFIG_FILE", str(tmp_path / "auto_approve.json"))
+    monkeypatch.setattr(request_manager, "_is_bnet_managed", lambda gid: gid == 888)
+    bot = ApproveBot()
+    ev = _group_request(flag="fx", gid=888, uid=222, comment="暗号")
+    asyncio.run(request_manager.handle_request(bot, ev))
+
+    assert "fx" not in request_manager._pending  # 不转人工
+    assert bot.group_requests == []  # 不走关键字自动通过
+    assert bot.sent_private == []
+
+
+def test_handle_request_processes_unmanaged_groups(monkeypatch, tmp_path, guard_file):
+    monkeypatch.setattr(request_manager, "CONFIG_FILE", str(tmp_path / "auto_approve.json"))
+    monkeypatch.setattr(request_manager, "_is_bnet_managed", lambda gid: False)
+    bot = ApproveBot()
+    ev = _group_request(flag="fy", gid=999, uid=222, comment="随便看看")
+    asyncio.run(request_manager.handle_request(bot, ev))
+
+    assert "fy" in request_manager._pending  # 未托管群正常转人工

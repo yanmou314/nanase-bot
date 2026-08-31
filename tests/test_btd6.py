@@ -1,5 +1,7 @@
 import asyncio
+import logging
 import os
+import time
 
 import pytest
 from conftest import FinishedException, GroupMessageEvent, MessageSegment
@@ -15,19 +17,28 @@ NOW = 1_787_000_000_000  # 固定"当前时间"（毫秒）
 DAY = 86_400_000
 
 
+def _clear_all_caches():
+    btd6._cache.clear()
+    btd6._stale.clear()
+    btd6._stale_at.clear()
+    btd6._stale_served.clear()
+    btd6._cache_sizes.clear()
+    btd6._lb_next_cache.clear()
+    btd6._refresh_fail_counts.clear()
+    btd6._refreshing.clear()
+    btd6._refresh_tasks.clear()
+    btd6._asset_mem.clear()
+    btd6._game_mem.clear()
+    btd6._ui_mem.clear()
+    btd6._odyssey_thumb_mem.clear()
+    btd6._cooldowns.clear()
+
+
 @pytest.fixture(autouse=True)
 def _clear_cache():
-    btd6._cache.clear()
-    btd6._stale.clear()
-    btd6._asset_mem.clear()
-    btd6._game_mem.clear()
-    btd6._cooldowns.clear()
+    _clear_all_caches()
     yield
-    btd6._cache.clear()
-    btd6._stale.clear()
-    btd6._asset_mem.clear()
-    btd6._game_mem.clear()
-    btd6._cooldowns.clear()
+    _clear_all_caches()
 
 
 @pytest.fixture(autouse=True)
@@ -37,7 +48,7 @@ def _no_render(monkeypatch):
     async def broken(prefix, html_fn):
         raise RuntimeError("renderer disabled in tests")
 
-    monkeypatch.setattr(btd6, "_render_card", broken)
+    monkeypatch.setattr(btd6.cards, "_render_card", broken)
 
 
 def _ev(text: str) -> GroupMessageEvent:
@@ -126,10 +137,39 @@ def test_build_overview_sections():
 
 
 def test_race_overview_empty():
-    assert btd6._race_overview([], NOW) == ["🏁 每周竞赛：暂无数据"]
+    # 空数据场景由 build_overview 输出"暂无"；单场文本统一经 _single_event_text
+    lines = btd6._single_event_text(RACE_ACTIVE, "race", NOW)
+    assert "「Test Race」" in lines[0] and "36,745" in lines[2]
     ended = dict(RACE_ACTIVE, start=NOW - 9 * DAY, end=NOW - 8 * DAY)
-    lines = btd6._race_overview([ended], NOW)
-    assert "已于" in "\n".join(lines)
+    assert "已于" in "\n".join(btd6._single_event_text(ended, "race", NOW))
+
+
+def test_single_event_text_rush_branch():
+    """Boss Rush 不再落入 CT 分支：输出名称 + 起止时间线。"""
+    rush = {"id": "rush1", "name": "A Boss Rush Event", "type": "bossRush",
+            "start": NOW - DAY, "end": NOW + DAY}
+    lines = btd6._single_event_text(rush, "rush", NOW)
+    joined = "\n".join(lines)
+    assert "Boss 竞速冲刺" in joined
+    assert "剩余" in joined and "结束" in joined
+    assert "争夺领土" not in joined
+    # 未知名称回退为 Boss Rush 前缀 + 原名
+    custom = dict(rush, name="Custom Rush Name")
+    assert "Boss Rush「Custom Rush Name」" in "\n".join(btd6._single_event_text(custom, "rush", NOW))
+    # 总览分类含 rush 时不再显示成 CT
+    text = btd6.build_overview([RACE_ACTIVE], [], [], NOW, [], [rush])
+    assert "争夺领土（CT）" not in text
+    assert "Boss 竞速冲刺" in text
+
+
+def test_classify_overview_ended_not_truncated():
+    """分类层不再截断已结束列表（截断职责移至展示层 ENDED_SHOW）。"""
+    races = [dict(RACE_ACTIVE, id=f"r{i}", start=NOW - (i + 2) * DAY, end=NOW - (i + 1) * DAY)
+             for i in range(12)]
+    _, _, ended = btd6._classify_overview_events(races, [], [], NOW)
+    assert len(ended) == 12
+    text = btd6.build_overview(races, [], [], NOW)
+    assert f"最近 {btd6.ENDED_SHOW} 场" in text
 
 
 # ---------------- 规则渲染 ----------------
@@ -164,12 +204,25 @@ def test_format_rules_full():
     assert "塔位上限 无限制｜禁止 Paragon" in text
     assert "禁用：猴子知识" in text
     assert "气球速度 ×1.5" in text and "MOAB血量 ×2" in text
-    assert "塔禁用：飞镖猴" in text
+    assert "塔禁用" not in text  # 整塔禁用的猴子直接不显示
+    assert "飞镖猴" not in text  # 被禁塔名不得出现在任何行
     assert "塔限购：炼金术士×1" in text
     assert "路径限制：猴村（路1禁3层）" in text
     assert "英雄限定：艾蒂安" in text
     assert "ChosenPrimaryHero" not in text  # 内部占位符不外显
     assert "昆西" not in text  # 被禁英雄不进限定名单
+
+
+def test_daily_monkey_grid_hides_banned_towers():
+    """每日挑战卡：max=0（整塔禁用）的猴子直接不显示，可用塔正常带角标。"""
+    meta = {"_towers": [
+        {"tower": "DartMonkey", "max": 0},   # 禁用 → 不显示
+        {"tower": "Alchemist", "max": 1},    # 限购 → 正常显示
+    ]}
+    html = btd6._daily_monkey_grid(meta)
+    assert "飞镖猴" not in html
+    assert "禁用" not in html
+    assert "炼金术士" in html
 
 
 def test_bloon_mod_lines_default_silent():
@@ -187,9 +240,12 @@ def test_tower_cn_handles_api_camel_case():
 
 
 def test_tower_limit_lines_caps_long_lists():
-    towers = [{"tower": f"T{i}", "max": 0} for i in range(10)]
+    towers = [{"tower": f"T{i}", "max": 1} for i in range(10)]
     lines = btd6.tower_limit_lines(towers)
     assert len(lines) == 1 and "…等10项" in lines[0]
+    # 整塔禁用（max=0）的猴子直接不显示
+    banned_only = [{"tower": f"T{i}", "max": 0} for i in range(10)]
+    assert btd6.tower_limit_lines(banned_only) == []
 
 
 # ---------------- 参数解析 ----------------
@@ -223,10 +279,98 @@ def test_fetch_body_uses_cache(monkeypatch):
     def _boom(t):
         raise AssertionError("缓存命中时不应发起请求")
 
-    monkeypatch.setattr(btd6, "get_http_client", _boom)
+    monkeypatch.setattr(btd6.nkapi, "get_http_client", _boom)
     url = "https://data.ninjakiwi.com/btd6/races"
     btd6._cache_put(url, {"ok": 1})
     assert asyncio.run(btd6.fetch_body(url)) == {"ok": 1}
+
+
+def test_fetch_body_serves_stale_and_marks(monkeypatch):
+    """缓存过期时返回 stale 旧数据，并标记供 _stale_warn 提示；刷新成功后标记清除。"""
+    url = btd6.URL_RACES
+    btd6._stale[url] = {"old": 1}
+    btd6._stale_at[url] = time.monotonic() - 100
+
+    async def fake_refresh(u):
+        btd6._cache_put(u, {"new": 2})
+
+    monkeypatch.setattr(btd6.nkapi, "_refresh_url", fake_refresh)
+
+    async def main():
+        body = await btd6.fetch_body(url)
+        await asyncio.sleep(0.01)  # 让后台刷新任务执行
+        return body
+
+    assert asyncio.run(main()) == {"old": 1}
+    assert 0 <= btd6._stale_age(url) < 60
+    # 后台刷新成功写入新数据 → 过期标记清除、缓存更新
+    assert btd6._cache_get(url) == {"new": 2}
+    assert url not in btd6._stale_served
+
+
+def test_stale_age_and_warn():
+    url = btd6.URL_RACES
+    assert btd6._stale_age(url) is None  # 从未写入
+    btd6._cache_put(url, {"x": 1})
+    assert 0 <= btd6._stale_age(url) < 60
+    assert btd6._stale_warn(url) == ""
+    btd6._stale_at[url] = time.monotonic() - 25 * 3600  # 模拟 24h+ 未刷新
+    assert btd6._stale_warn(url) == ""  # 未实际以 stale 响应时不提示
+    btd6._stale_served.add(url)
+    assert "24+" in btd6._stale_warn(url)
+    assert btd6._stale_warn(btd6.URL_BOSSES) == ""  # 其他 URL 不受影响
+
+
+def test_json_cache_byte_budget(monkeypatch):
+    """JSON body 缓存有总字节上限，超限从最旧淘汰。"""
+    monkeypatch.setattr(btd6.nkapi, "MAX_JSON_MEM_BYTES", 1000)
+    for i in range(10):
+        btd6._cache_put(f"https://data.ninjakiwi.com/x{i}", {"pad": "a" * 400})
+    total = sum(btd6._cache_sizes.values())
+    assert total <= 1000
+    assert len(btd6._cache) < 10
+
+
+def test_safe_logs_warning(caplog):
+    async def boom():
+        raise RuntimeError("boom")
+
+    async def main():
+        return await btd6._safe(boom(), "unit")
+
+    with caplog.at_level(logging.WARNING):
+        assert asyncio.run(main()) is None
+    assert any("btd6 optional call failed" in r.message and "[unit]" in r.message
+               for r in caplog.records)
+
+
+def test_refresh_url_failure_counted(monkeypatch, caplog):
+    async def broken(url, timeout):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(btd6.nkapi, "_http_get", broken)
+    url = btd6.URL_RACES
+    before = btd6._refresh_fail_counts.get(url, 0)
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(btd6._refresh_url(url))
+    assert btd6._refresh_fail_counts[url] == before + 1
+    assert any("后台刷新失败" in r.message for r in caplog.records)
+
+
+def test_rushgen_constants_validation(caplog):
+    """rushdata.json 结构校验：关键字段缺失时 warning。"""
+    rg = btd6.rushgen
+    with caplog.at_level(logging.WARNING):
+        rg._validate_constants({})
+    assert any("缺少关键字段" in r.message for r in caplog.records)
+    with caplog.at_level(logging.WARNING):
+        rg._validate_constants({"bossRush": {"StageScores": []}})
+    assert any("RandomSettings" in r.message for r in caplog.records)
+    # 真实数据文件无告警
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        rg._validate_constants(rg.load_constants())
+    assert not caplog.records
 
 
 # ---------------- 处理器 ----------------
@@ -249,7 +393,7 @@ def test_handler_help(monkeypatch):
 def test_handler_events_overview(monkeypatch):
     calls = []
     bodies = {btd6.URL_RACES: [RACE_ACTIVE], btd6.URL_BOSSES: [BOSS_UPCOMING], btd6.URL_CT: [CT_ACTIVE]}
-    monkeypatch.setattr(btd6, "fetch_body", _fake_fetch_factory(bodies, calls))
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(bodies, calls))
     with pytest.raises(FinishedException):
         asyncio.run(btd6.events_cmd.handlers[0](_ev(".btd6活动")))
     seg = btd6.events_cmd.finished[-1]
@@ -263,7 +407,7 @@ def test_handler_events_failure(monkeypatch):
     async def broken(url):
         raise RuntimeError("down")
 
-    monkeypatch.setattr(btd6, "fetch_body", broken)
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", broken)
     with pytest.raises(FinishedException):
         asyncio.run(btd6.events_cmd.handlers[0](_ev(".btd6活动")))
     assert "获取 BTD6 活动信息失败" in str(btd6.events_cmd.finished[-1])
@@ -279,7 +423,7 @@ def test_handler_leaderboard_race(monkeypatch):
         btd6.URL_RACES: [RACE_ACTIVE],
         RACE_ACTIVE["leaderboard"]: entries,
     }
-    monkeypatch.setattr(btd6, "fetch_body", _fake_fetch_factory(bodies))
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(bodies))
     with pytest.raises(FinishedException):
         asyncio.run(btd6.lb_cmd.handlers[0](_ev(".btd6排行 竞赛")))
     text = str(btd6.lb_cmd.finished[-1])
@@ -297,7 +441,7 @@ def test_handler_leaderboard_race_page(monkeypatch):
         RACE_ACTIVE["leaderboard"]: entries_p1,
         RACE_ACTIVE["leaderboard"] + "?page=2": entries_p2,
     }
-    monkeypatch.setattr(btd6, "fetch_body", _fake_fetch_factory(bodies))
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(bodies))
     with pytest.raises(FinishedException):
         asyncio.run(btd6.lb_cmd.handlers[0](_ev(".btd6排行 竞赛 P2")))
     text = str(btd6.lb_cmd.finished[-1])
@@ -323,7 +467,7 @@ def test_handler_leaderboard_rank_returns_player(monkeypatch):
         RACE_ACTIVE["leaderboard"]: entries,
         btd6.URL_USERS + pid2: player_body,
     }
-    monkeypatch.setattr(btd6, "fetch_body", _fake_fetch_factory(bodies))
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(bodies))
     with pytest.raises(FinishedException):
         asyncio.run(btd6.lb_cmd.handlers[0](_ev(".btd6排行 竞赛 2")))
     text = str(btd6.lb_cmd.finished[-1])
@@ -349,7 +493,7 @@ def test_handler_leaderboard_boss_elite(monkeypatch):
         btd6.URL_BOSSES: [BOSS_UPCOMING],
         BOSS_UPCOMING["leaderboard_elite_players_1"]: [{"displayName": "top1", "score": 42}],
     }
-    monkeypatch.setattr(btd6, "fetch_body", _fake_fetch_factory(bodies, calls))
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(bodies, calls))
     with pytest.raises(FinishedException):
         asyncio.run(btd6.lb_cmd.handlers[0](_ev(".btd6排行 boss 精英")))
     assert BOSS_UPCOMING["leaderboard_elite_players_1"] in calls
@@ -367,7 +511,7 @@ def test_handler_leaderboard_failure(monkeypatch):
     async def broken(url):
         raise RuntimeError("down")
 
-    monkeypatch.setattr(btd6, "fetch_body", broken)
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", broken)
     with pytest.raises(FinishedException):
         asyncio.run(btd6.lb_cmd.handlers[0](_ev(".btd6排行 竞赛")))
     assert "获取 BTD6 排行榜失败" in str(btd6.lb_cmd.finished[-1])
@@ -381,7 +525,7 @@ def test_handler_rules_race_and_boss(monkeypatch):
         btd6.URL_BOSSES: [BOSS_UPCOMING],
         BOSS_UPCOMING["metadataElite"]: boss_meta,
     }
-    monkeypatch.setattr(btd6, "fetch_body", _fake_fetch_factory(bodies))
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(bodies))
     with pytest.raises(FinishedException):
         asyncio.run(btd6.rules_cmd.handlers[0](_ev(".btd6竞速")))
     assert "竞赛「Test Race」规则" in str(btd6.rules_cmd.finished[-1])
@@ -402,7 +546,7 @@ def test_handler_rules_ct_does_not_query_boss(monkeypatch):
             raise AssertionError("CT 规则不应查询 Boss 接口")
         raise AssertionError(f"不应请求 {url}")
 
-    monkeypatch.setattr(btd6, "fetch_body", fake_fetch)
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", fake_fetch)
     with pytest.raises(FinishedException):
         asyncio.run(btd6.rules_cmd.handlers[0](_ev(".btd6竞速 领土")))
     text = str(btd6.rules_cmd.finished[-1])
@@ -420,7 +564,7 @@ def test_validate_url_allows_nk_and_rejects_other_hosts():
 
 
 def test_tower_icon_rejects_path_like_names(monkeypatch, tmp_path):
-    monkeypatch.setattr(btd6, "GAME_ASSET_DIR", str(tmp_path))
+    monkeypatch.setattr(btd6.assets, "GAME_ASSET_DIR", str(tmp_path))
     btd6._game_mem.clear()
     assert btd6._tower_icon("../secret", True) == ""
     assert btd6._tower_icon("<x>", False) == ""
@@ -457,7 +601,7 @@ def test_handler_maps(monkeypatch):
         {"name": f"Map{i}", "createdAt": 1787000000000 + i} for i in range(5)
     ]
     bodies = {btd6.URL_MAP_FILTER.format("trending"): items}
-    monkeypatch.setattr(btd6, "fetch_body", _fake_fetch_factory(bodies))
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(bodies))
     with pytest.raises(FinishedException):
         asyncio.run(btd6.maps_cmd.handlers[0](_ev(".btd6地图 热门 3")))
     text = str(btd6.maps_cmd.finished[-1])
@@ -475,18 +619,19 @@ def test_handler_sends_image_when_render_ok(monkeypatch, tmp_path):
         assert prefix
         return str(card)
 
-    monkeypatch.setattr(btd6, "_render_card", fake_render)
+    monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
     bodies = {
         btd6.URL_RACES: [RACE_ACTIVE],
         btd6.URL_BOSSES: [BOSS_UPCOMING],
         btd6.URL_CT: [CT_ACTIVE],
     }
-    monkeypatch.setattr(btd6, "fetch_body", _fake_fetch_factory(bodies))
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(bodies))
     with pytest.raises(FinishedException):
         asyncio.run(btd6.events_cmd.handlers[0](_ev(".btd6活动")))
     seg = btd6.events_cmd.finished[-1]
     assert isinstance(seg, MessageSegment) and seg.type == "image"
-    assert str(card) in seg.data["file"]
+    # 处理器发送 Path(path).as_uri()：与本地 card 的 file URI 全等（跨平台，Windows 下不含反斜杠）
+    assert seg.data["file"] == card.as_uri()
 
 
 def test_overview_html_escapes_and_sections():
@@ -537,7 +682,7 @@ def test_rules_html_grid_and_escape(monkeypatch, tmp_path):
     (gdir / "000-MonkeyVillage.webp").write_bytes(b"w")
     (gdir / "QuincyPortrait.webp").write_bytes(b"w")
     (gdir / "CorvusPortrait.webp").write_bytes(b"w")
-    monkeypatch.setattr(btd6, "GAME_ASSET_DIR", str(gdir))
+    monkeypatch.setattr(btd6.assets, "GAME_ASSET_DIR", str(gdir))
     btd6._game_mem.clear()
     meta = dict(META)
     meta["_towers"] = [
@@ -574,7 +719,7 @@ def test_tower_icon_mapping(monkeypatch, tmp_path):
     gdir.mkdir()
     (gdir / "000-Wizard.webp").write_bytes(b"w")
     (gdir / "SaudaPortrait.webp").write_bytes(b"w")
-    monkeypatch.setattr(btd6, "GAME_ASSET_DIR", str(gdir))
+    monkeypatch.setattr(btd6.assets, "GAME_ASSET_DIR", str(gdir))
     btd6._game_mem.clear()
     assert "data:image/webp" in btd6._tower_icon("WizardMonkey", False)  # 特例映射
     assert "data:image/webp" in btd6._tower_icon("Sauda", True)
@@ -640,7 +785,7 @@ def test_odyssey_card_height():
 
 
 def test_merge_history_merges_by_id(monkeypatch, tmp_path):
-    monkeypatch.setattr(btd6, "HISTORY_FILE", str(tmp_path / "history.json"))
+    monkeypatch.setattr(btd6.push, "HISTORY_FILE", str(tmp_path / "history.json"))
     # 首次合并写入并按 start 降序
     assert btd6._merge_history("boss", [{"id": "a", "start": 2}, {"id": "b", "start": 1}]) is True
     hist = btd6._load_history()
@@ -746,7 +891,7 @@ def test_maps_html_with_thumbnails():
 
 def test_render_card_sync_reuses_cached_png(monkeypatch, tmp_path):
     calls = []
-    monkeypatch.setattr(btd6, "CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(btd6.assets, "CACHE_DIR", str(tmp_path))
 
     def fake_render(html, prefix, cache_dir, max_age, dpi):
         calls.append(html[:10])
@@ -755,7 +900,7 @@ def test_render_card_sync_reuses_cached_png(monkeypatch, tmp_path):
             f.write(b"x")
         return p
 
-    monkeypatch.setattr(btd6, "render_html_to_png", fake_render)
+    monkeypatch.setattr(btd6.cards, "render_html_to_png", fake_render)
     html = "<html>aaa</html>"
     p1 = btd6._render_card_sync("t", html)
     p2 = btd6._render_card_sync("t", html)  # 同内容命中缓存，不再渲染
@@ -766,7 +911,7 @@ def test_render_card_sync_reuses_cached_png(monkeypatch, tmp_path):
 
 def test_render_card_sync_persists_stable_cards(monkeypatch, tmp_path):
     calls = []
-    monkeypatch.setattr(btd6, "CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(btd6.assets, "CACHE_DIR", str(tmp_path))
 
     def fake_render(html, prefix, cache_dir, max_age, dpi):
         calls.append((html, cache_dir))
@@ -776,7 +921,7 @@ def test_render_card_sync_persists_stable_cards(monkeypatch, tmp_path):
             f.write(b"x")
         return p
 
-    monkeypatch.setattr(btd6, "render_html_to_png", fake_render)
+    monkeypatch.setattr(btd6.cards, "render_html_to_png", fake_render)
     p1 = btd6._render_card_sync("btd6rule", "<html>same</html>")
     p2 = btd6._render_card_sync("btd6rule", "<html>same</html>")
     assert p1 == p2 and len(calls) == 1
@@ -789,7 +934,7 @@ def test_render_card_sync_persists_stable_cards(monkeypatch, tmp_path):
 
 
 def test_asset_data_url_caches_to_disk(monkeypatch, tmp_path):
-    monkeypatch.setattr(btd6, "ASSET_DIR", str(tmp_path))
+    monkeypatch.setattr(btd6.assets, "ASSET_DIR", str(tmp_path))
 
     class _Resp:
         content = b"\x89PNG\r\n\x1a\ndata"
@@ -802,7 +947,7 @@ def test_asset_data_url_caches_to_disk(monkeypatch, tmp_path):
         async def get(self, url, **kw):
             return _Resp()
 
-    monkeypatch.setattr(btd6, "get_http_client", lambda t: _Client())
+    monkeypatch.setattr(btd6.nkapi, "get_http_client", lambda t: _Client())
     url = "https://static-api.nkstatic.com/img.png"
     d1 = asyncio.run(btd6._asset_data_url(url))
     assert d1.startswith("data:image/png;base64,")
@@ -813,7 +958,7 @@ def test_asset_data_url_caches_to_disk(monkeypatch, tmp_path):
     def boom(t):
         raise AssertionError("disk cache hit expected")
 
-    monkeypatch.setattr(btd6, "get_http_client", boom)
+    monkeypatch.setattr(btd6.nkapi, "get_http_client", boom)
     assert asyncio.run(btd6._asset_data_url(url)) == d1
 
 
@@ -833,7 +978,7 @@ def test_asset_data_url_rejects_unverified_image_bytes(monkeypatch):
         async def get(self, url, **kw):
             return _Resp()
 
-    monkeypatch.setattr(btd6, "get_http_client", lambda t: _Client())
+    monkeypatch.setattr(btd6.nkapi, "get_http_client", lambda t: _Client())
     assert asyncio.run(btd6._asset_data_url("https://static-api.nkstatic.com/not-image.svg")) == ""
 
 
@@ -848,14 +993,17 @@ def test_prune_cache_files_obeys_count_and_bytes(tmp_path):
 
 
 def test_overview_html_embeds_images():
+    """总览卡片图标全部来自本地 UI 素材/占位符，collect 层不再预取远端配图字段。"""
     data = {
         "races": [RACE_ACTIVE], "bosses": [BOSS_UPCOMING], "cts": [CT_ACTIVE], "now": NOW,
-        "race_map": "data:image/png;base64,AAA", "boss_img": "data:image/png;base64,BBB",
     }
     html = btd6.overview_html(data)
-    # Race + Boss + CT (CT now has default ct-event.png) = 3 images
-    assert html.count("<img") == 3
-    assert "AAA" in html and "BBB" in html
+    # 三段式结构：进行中/即将开始/已结束 段落齐备
+    assert "进行中" in html and "即将开始" in html and "已结束" in html
+    # 三行活动行（race 进行中 / boss 未开始 / ct 进行中），每行含图标+名称+日期+状态
+    assert html.count("<div class='ev-row'>") == 3
+    # 已删除的预取字段不再参与渲染（图标为本地 data URL 或 emoji 占位）
+    assert "race_map_by_id" not in html and "boss_img_by_id" not in html
 
 
 def test_rules_html_embeds_map_image():
@@ -876,7 +1024,6 @@ def test_prewarm_once_renders_active_leaderboards_only(monkeypatch):
 
     data = {
         "races": [RACE_ACTIVE], "bosses": [BOSS_UPCOMING], "cts": [CT_ACTIVE], "now": NOW,
-        "race_map": "", "boss_img": "",
     }
 
     async def fake_collect():
@@ -890,18 +1037,554 @@ def test_prewarm_once_renders_active_leaderboards_only(monkeypatch):
     async def fake_archive(data=None):
         return None
 
-    monkeypatch.setattr(btd6, "_render_card", fake_render)
-    monkeypatch.setattr(btd6, "collect_overview", fake_collect)
-    monkeypatch.setattr(btd6, "collect_leaderboard", fake_lb)
-    monkeypatch.setattr(btd6, "_archive_events", fake_archive)
+    monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
+    monkeypatch.setattr(btd6.collect, "collect_overview", fake_collect)
+    monkeypatch.setattr(btd6.collect, "collect_leaderboard", fake_lb)
+    monkeypatch.setattr(btd6.push, "_archive_events", fake_archive)
 
     asyncio.run(btd6._prewarm_once())
     assert rendered == ["btd6lb", "btd6lb", "btd6lb"]  # 竞赛榜 + Boss 标准榜 + CT 个人榜，无 btd6ov/btd6rule/每日
-    assert btd6._prewarm_running is False
+    assert btd6.push._prewarm_running is False
 
     # 并发保护：预热进行中再次触发直接返回
     rendered.clear()
-    btd6._prewarm_running = True
+    btd6.push._prewarm_running = True
     asyncio.run(btd6._prewarm_once())
     assert rendered == []
-    btd6._prewarm_running = False
+    btd6.push._prewarm_running = False
+
+
+# ---------------- 2026-08-30 审查修复补充 ----------------
+
+def test_fetch_leaderboard_paginated_no_duplicate_request(monkeypatch):
+    """分页拉取：next 随信封缓存，同一 URL 不再"fetch_body 后又 _http_get"重复请求；
+    TTL 内重复查询全部走缓存（含 next），不发起任何请求。"""
+    http_calls = []
+
+    def _mk(entries, nxt=None):
+        class _Resp:
+            content = b"{}"
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"success": True, "body": entries, "next": nxt}
+
+        return _Resp()
+
+    envelopes = {
+        "https://data.ninjakiwi.com/lb": _mk(
+            [{"displayName": f"p1_{i}", "score": i} for i in range(50)],
+            "https://data.ninjakiwi.com/lb?page=2"),
+        "https://data.ninjakiwi.com/lb?page=2": _mk(
+            [{"displayName": f"p2_{i}", "score": i} for i in range(5)]),
+    }
+
+    async def fake_http_get(url, timeout):
+        http_calls.append(url)
+        return envelopes[url]
+
+    monkeypatch.setattr(btd6.nkapi, "_http_get", fake_http_get)
+    entries = asyncio.run(btd6.fetch_leaderboard_paginated("https://data.ninjakiwi.com/lb", 60))
+    assert len(entries) == 55
+    assert [e["displayName"] for e in entries[50:]] == [f"p2_{i}" for i in range(5)]
+    # 每个 URL 恰好一次信封请求（旧逻辑在第 1 页会请求两次）
+    assert http_calls == ["https://data.ninjakiwi.com/lb", "https://data.ninjakiwi.com/lb?page=2"]
+    assert btd6._cache_get("https://data.ninjakiwi.com/lb") is not None
+    # 第二次查询：缓存（body + next）全命中，零请求
+    entries2 = asyncio.run(btd6.fetch_leaderboard_paginated("https://data.ninjakiwi.com/lb", 60))
+    assert len(entries2) == 55
+    assert http_calls == ["https://data.ninjakiwi.com/lb", "https://data.ninjakiwi.com/lb?page=2"]
+
+
+def test_fetch_leaderboard_paginated_next_unknown_falls_back(monkeypatch):
+    """body 命中缓存但 next 未知（旧缓存条目）时，补一次信封请求读 next。"""
+    http_calls = []
+
+    class _Resp:
+        content = b"{}"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"success": True, "body": [], "next": None}
+
+    async def fake_http_get(url, timeout):
+        http_calls.append(url)
+        return _Resp()
+
+    monkeypatch.setattr(btd6.nkapi, "_http_get", fake_http_get)
+    btd6._cache_put("https://data.ninjakiwi.com/lb", [{"displayName": "a", "score": 1}])
+    entries = asyncio.run(btd6.fetch_leaderboard_paginated("https://data.ninjakiwi.com/lb", 50))
+    assert [e["displayName"] for e in entries] == ["a"]
+    assert http_calls == ["https://data.ninjakiwi.com/lb"]
+    assert "https://data.ninjakiwi.com/lb" in btd6._lb_next_cache
+
+
+def test_fetch_rank_entry_direct_target_page(monkeypatch):
+    """排名查询直接拉目标页，不从第 1 页逐页串行拉 20 页。"""
+    calls = []
+    entries_p1 = [{"displayName": f"p1_{i}", "score": 100000 + i} for i in range(50)]
+    entries_p2 = [{"displayName": f"p2_{i}", "score": 200000 + i} for i in range(50)]
+    bodies = {
+        btd6.URL_RACES: [RACE_ACTIVE],
+        RACE_ACTIVE["leaderboard"]: entries_p1,
+        RACE_ACTIVE["leaderboard"] + "?page=2": entries_p2,
+    }
+
+    async def fake_fetch(url):
+        calls.append(url)
+        return bodies.get(url, [])
+
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", fake_fetch)
+    # 第 2 页名次：仅拉活动列表 + 目标页各一次，不从第 1 页逐页串行拉
+    entry = asyncio.run(btd6.fetch_rank_entry("race", "", 60))
+    assert entry["displayName"] == "p2_9"
+    assert calls == [btd6.URL_RACES, RACE_ACTIVE["leaderboard"] + "?page=2"]
+    # 第 1 页常见场景行为不变
+    calls.clear()
+    entry = asyncio.run(btd6.fetch_rank_entry("race", "", 2))
+    assert entry["displayName"] == "p1_1"
+    assert calls == [btd6.URL_RACES, RACE_ACTIVE["leaderboard"]]
+    # 榜单不足该名次 → None（由调用方报"未找到/超出可查范围"），且只请求了目标页
+    calls.clear()
+    assert asyncio.run(btd6.fetch_rank_entry("race", "", 500)) is None
+    assert calls == [btd6.URL_RACES, RACE_ACTIVE["leaderboard"] + "?page=10"]
+
+
+def test_fetch_rank_entry_beyond_max_page_returns_none(monkeypatch):
+    """boss/ct 每页 25 人，排名 501-1000 超出 LB_MAX_PAGE=20 → 直接 None，不发任何请求。"""
+    calls = []
+
+    async def fake_fetch(url):
+        calls.append(url)
+        return []
+
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", fake_fetch)
+    assert asyncio.run(btd6.fetch_rank_entry("boss", "standard", 600)) is None
+    assert calls == []
+
+
+def test_push_jobs_apscheduler_compat():
+    """push.py 的全部 scheduled_job 装饰器参数必须与真实 APScheduler 兼容。
+
+    APScheduler 3.11 的 scheduled_job 装饰器内部恒以 replace_existing=True 注册，
+    显式传 replace_existing 会与内部关键字冲突（add_job() got multiple values），
+    导致插件导入失败；conftest 的 scheduler stub 接受任意参数无法拦截，
+    此处对真实签名做校验。
+    """
+    import re as _re
+    import subprocess
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    # conftest 会 stub 掉 apscheduler，因此用干净的子进程取真实签名
+    code = ("import inspect; from apscheduler.schedulers.asyncio import AsyncIOScheduler; "
+            "print(','.join(inspect.signature(AsyncIOScheduler.scheduled_job).parameters))")
+    proc = subprocess.run([_sys.executable, "-c", code], capture_output=True, text=True)
+    assert proc.returncode == 0, f"无法获取 APScheduler 真实签名: {proc.stderr}"
+    real_params = set(proc.stdout.strip().split(","))
+    real_params |= {"hour", "minute", "second", "day", "week", "day_of_week",
+                    "month", "year", "start_date", "end_date", "timezone", "jitter"}
+    src = _Path(btd6.push.__file__).read_text(encoding="utf-8")
+    src_nc = _re.sub(r"#.*", "", src)  # 去掉注释，避免误拦说明文字
+    assert "replace_existing" not in src_nc, (
+        "scheduled_job 装饰器不接受 replace_existing（3.11 内部恒为 True），"
+        "需要幂等注册请改用 scheduler.add_job(..., replace_existing=True)")
+    calls = _re.findall(r"@scheduler\.scheduled_job\((.*?)\)\n(?:async )?def",
+                        src_nc, flags=_re.DOTALL)
+    assert len(calls) >= 20, "未能从 push.py 解析出全部定时任务装饰器"
+    for call in calls:
+        kwargs = set(_re.findall(r"(\w+)\s*=", call)) - {"cron"}
+        unknown = kwargs - real_params
+        assert not unknown, f"scheduled_job 存在真实 APScheduler 不接受的参数: {unknown}"
+
+
+def test_fetch_body_no_scores_available_is_empty_state(monkeypatch):
+    """NK API 对暂无分数的榜单返回 success=false + "No Scores Available"，
+    属空态而非故障：应返回空列表并写缓存（next=None 终止分页），不抛异常。"""
+    _URL = "https://data.ninjakiwi.com/btd6/ct/testev/leaderboard/player"
+
+    class _Resp:
+        content = b'{"error": "No Scores Available", "success": false}'
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"error": "No Scores Available", "success": False}
+
+    async def fake_get(url, timeout):
+        return _Resp()
+
+    monkeypatch.setattr(btd6.nkapi, "_http_get", fake_get)
+    body = asyncio.run(btd6.fetch_body(_URL))
+    assert body == []
+    assert _URL in btd6.nkapi._cache
+    assert btd6.nkapi._lb_next_cache[_URL] is None
+    # 缓存命中后重复取同样为空态，不再发请求
+    assert asyncio.run(btd6.fetch_body(_URL)) == []
+
+
+def test_push_daily_uses_real_prefix(monkeypatch, tmp_path):
+    """每日推送：高级/标准各用真实期号前缀，不复用外层 Standard 的 label。"""
+    monkeypatch.setattr(btd6.push, "BTD6_PUSH_STATE_FILE", str(tmp_path / "state.json"))
+    sent = []
+
+    class _Bot:
+        async def send_group_msg(self, group_id=None, message=None, **kw):
+            sent.append(str(message))
+
+    async def fake_render(prefix, html_fn):
+        # 必须是绝对路径：Windows 下 Path("/tmp/x.png") 非绝对，as_uri() 会抛 ValueError
+        return str(tmp_path / "x.png")
+
+    async def fake_collect(adv):
+        return {"prefix": "每日高级·第2923期" if adv else "每日标准·第2936期", "meta": {}}
+
+    monkeypatch.setattr(btd6.push, "get_bot", lambda: _Bot())
+    monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
+    monkeypatch.setattr(btd6.collect, "collect_daily", fake_collect)
+
+    asyncio.run(btd6._btd6_push_single(
+        "daily", {"id": "d1", "name": "Standard 2936: X"}, "d1", "Standard 2936: X", {100}))
+    assert any("每日挑战已刷新·每日标准·第2936期" in m for m in sent)
+    assert any("每日挑战已刷新·每日高级·第2923期" in m for m in sent)
+    for msg in sent:
+        if "每日高级" in msg:
+            assert "2936" not in msg  # 高级推送不得携带标准期号
+
+
+def test_cooldown_release_and_ct_key():
+    event = _ev(".btd6领土")
+    # ct 命令使用独立冷却 key，不再与 events 共用
+    assert btd6._cooldown_remaining(event, "ct", "default") == 0
+    assert btd6._cooldown_remaining(event, "events", "default") == 0
+    assert btd6._cooldown_remaining(event, "ct", "default") >= 1
+    # 失败路径回滚后可立即重试
+    btd6._release_cooldown(event, "ct")
+    assert btd6._cooldown_remaining(event, "ct", "default") == 0
+
+
+def test_translation_tables_unified():
+    """两套中文翻译表已合并：驼峰与带空格键归一化命中，译名以总览主路径为准。"""
+    assert btd6.tower_cn("MonkeyVillage") == "猴村" == btd6.tower_cn("Monkey Village")
+    assert btd6.tower_cn("DartMonkey") == "飞镖猴" == btd6.tower_cn("Dart Monkey")
+    assert btd6.tower_cn("Skywarden") == "天空守卫"
+    assert btd6.tower_cn("GlueGunner") == "胶水枪手" == btd6.tower_cn("Glue Gunner")
+    assert btd6.hero_cn("StrikerJones") == "琼斯"
+    assert btd6.hero_cn("DanDMonke") == "丹迪猴"
+    assert btd6.hero_cn("Captain Churchill") == "丘吉尔"
+    assert btd6.boss_cn("Phayze") == "幻影" == btd6.boss_cn("phayze")
+    assert btd6.boss_cn("Blastapopolous") == "爆裂魔炎"  # API 历史拼写变体
+    # 旧 rush 侧重复表已删除
+    for gone in ("_BOSS_CN", "_TOWER_CN", "_HERO_CN"):
+        assert not hasattr(btd6, gone)
+
+
+def test_rush_card_has_data_version_footer():
+    """rush 卡片底部带数据版本小字。"""
+    col = {"ev": {"id": "rush1", "name": "A Boss Rush Event", "start": NOW - DAY, "end": NOW + DAY},
+           "hero": "",
+           "diffs": {"default": {"meta": {"isExtreme": False}, "maps": [
+               {"stage": 1, "name": "Island 1", "map": "Bloonarius", "map_name": "Logs",
+                "map_img": "", "boss": "Bloonarius", "kills": 100,
+                "rewards": [("猴币", "100")], "reward_text": "猴币 100",
+                "towers": ["DartMonkey"], "removed": [], "relics": [], "new_relic": None,
+                "img": "data:image/png;base64,BOSS"},
+           ]}}}
+    html = btd6._rush_diff_html(col)
+    assert "数据版本: Constants v3.0.0 · rushgen" in html
+    assert "膨胀气球神" in html  # 合并后的统一 Boss 译名（总览主路径）
+
+
+# ---------------- 2026-08-30 复查修复回归 ----------------
+
+def test_text_stale_note_appended_without_crash():
+    """A1 回归：带 stale_note 的采集结果在三个文本出口不再抛 TypeError。"""
+    note = "（数据已 24+ 小时未刷新，可能过期）"
+    lb_col = {"head": "🏁 竞赛「T」排行榜", "status": "剩余 1小时",
+              "entries": [(1, "a", "1:00.000")], "stale_note": note}
+    text = btd6.leaderboard_text(lb_col)
+    assert note in text and text.endswith(note)
+    maps_col = {"label": "最新", "entries": [(1, "MapA", "2026-08-25")], "stale_note": note}
+    assert note in btd6.maps_text(maps_col)
+    p = {"displayName": "ISAB", "rank": 1, "bloonsPopped": {}, "gameplay": {}}
+    assert note in btd6.player_text({"p": p, "stale_note": note})
+
+
+def test_all_exports_resolvable():
+    """B4 回归：__all__ 里的每个名字都必须真实存在于模块命名空间（防幽灵导出再犯）。"""
+    assert set(btd6.__all__) <= set(dir(btd6))
+
+
+def test_cache_budget_recovers_after_stale_hit_and_rewrite(monkeypatch):
+    """B2 回归：条目 TTL 过期 + stale 命中 + 后台刷新写入新数据后，字节预算能回落。"""
+    monkeypatch.setattr(btd6.nkapi, "MAX_JSON_MEM_BYTES", 10 ** 9)
+    url = btd6.URL_RACES
+    btd6._cache_put(url, {"old": "a" * 500})
+    # 模拟 TTL 过期后 _cache_get 弹出
+    _expiry, body = btd6._cache[url]
+    btd6._cache[url] = (time.monotonic() - 1, body)
+    assert btd6._cache_get(url) is None
+    # 过期弹出同步清 _cache_sizes（死账不复存在），_stale 及伴随字典保留维持 SWR
+    assert url not in btd6._cache_sizes
+    assert url in btd6._stale and url in btd6._stale_at
+
+    async def fake_refresh(u):
+        btd6._cache_put(u, {"new": "b" * 500})
+
+    monkeypatch.setattr(btd6.nkapi, "_refresh_url", fake_refresh)
+
+    async def main():
+        served = await btd6.fetch_body(url)  # stale 命中
+        await asyncio.sleep(0.01)  # 等后台刷新任务写入新条目
+        return served
+
+    assert asyncio.run(main()) == {"old": "a" * 500}
+    total = sum(btd6._cache_sizes.get(u, 0) for u in btd6._cache)
+    assert total > 0 and total == btd6._cache_sizes[url]  # 预算只含新条目
+
+
+def test_cache_eviction_cleans_side_dictionaries(monkeypatch):
+    """B2 回归：预算淘汰 victim 时旁路字典（stale/next/stale_served/fail_counts）同步清理。"""
+    url = "https://data.ninjakiwi.com/evict-old"
+    url2 = "https://data.ninjakiwi.com/evict-new"
+    size = btd6._body_size({"pad": "a" * 100})
+    monkeypatch.setattr(btd6.nkapi, "MAX_JSON_MEM_BYTES", size + 10)
+    btd6._cache_put(url, {"pad": "a" * 100})
+    btd6._lb_next_cache[url] = url + "?page=2"
+    btd6._stale_served.add(url)
+    btd6._refresh_fail_counts[url] = 2
+    btd6._cache_put(url2, {"pad": "b" * 100})  # 触发预算淘汰：最旧的 url 整体移除
+    assert url not in btd6._cache and url not in btd6._stale
+    assert url not in btd6._cache_sizes and url not in btd6._stale_at
+    assert url not in btd6._lb_next_cache
+    assert url not in btd6._stale_served
+    assert url not in btd6._refresh_fail_counts
+    assert url2 in btd6._cache  # 新条目仍在预算内
+
+
+def test_handler_rules_boss_failure_releases_cooldown(monkeypatch):
+    """C1：Boss 规则双版本全部失败时回滚冷却，允许立即重试。"""
+    event = _ev(".btd6竞速 boss")
+
+    async def broken(url):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", broken)
+    with pytest.raises(FinishedException):
+        asyncio.run(btd6.rules_cmd.handlers[0](event))
+    # 处理器入口先加冷却、失败路径必须回滚：结束消息为失败文案而非限频文案
+    assert "获取 BTD6 规则失败" in str(btd6.rules_cmd.finished[-1])
+    assert not any(k.endswith(":rules") for k in btd6._cooldowns)
+
+
+def test_handler_leaderboard_double_board_failure_releases_cooldown(monkeypatch):
+    """C1：默认双榜全部失败时回滚冷却，允许立即重试。"""
+    event = _ev(".btd6排行 boss")
+
+    async def broken(url):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", broken)
+    with pytest.raises(FinishedException):
+        asyncio.run(btd6.lb_cmd.handlers[0](event))
+    assert "获取 BTD6 排行榜失败" in str(btd6.lb_cmd.finished[-1])
+    assert not any(k.endswith(":leaderboard") for k in btd6._cooldowns)
+
+
+def test_collect_leaderboard_stale_page_triggers_warn(monkeypatch):
+    """C3：分页第 2 页实际被 stale 服务时同样触发过期提示。"""
+    # fetch_body 走真实校验：榜单 URL 必须是允许列表内的主机
+    race = dict(RACE_ACTIVE, leaderboard="https://data.ninjakiwi.com/btd6/races/x/leaderboard")
+    lb_url = race["leaderboard"]
+    page2_url = lb_url + "?page=2"
+    entries_p1 = [{"displayName": f"p1_{i}", "score": 100000 + i} for i in range(50)]
+    entries_p2 = [{"displayName": f"p2_{i}", "score": 200000 + i} for i in range(5)]
+    btd6._cache_put(btd6.URL_RACES, [race])
+    btd6._cache_put(lb_url, entries_p1)
+    btd6._stale[page2_url] = entries_p2
+    btd6._stale_at[page2_url] = time.monotonic() - 25 * 3600
+    btd6._lb_next_cache[lb_url] = page2_url
+    btd6._lb_next_cache[page2_url] = None
+
+    async def no_http(url, timeout):
+        raise AssertionError("stale 命中时不应发起网络请求")
+
+    async def fake_refresh(u):
+        return None
+
+    monkeypatch.setattr(btd6.nkapi, "_http_get", no_http)
+    monkeypatch.setattr(btd6.nkapi, "_refresh_url", fake_refresh)
+
+    async def main():
+        col = await btd6.collect.collect_leaderboard("race", "", 60)
+        await asyncio.sleep(0.01)  # 让后台刷新任务执行
+        return col
+
+    col = asyncio.run(main())
+    assert len(col["entries"]) == 55
+    assert col["stale_note"] == btd6.STALE_WARN_TEXT
+
+
+def test_map_cn_translation_in_rules_text():
+    """C7：MAP_CN 接入规则文本——有译名显示中文，无译名回退原始内部名。"""
+    translated = dict(META, map="Logs")
+    assert "地图：原木｜" in btd6.format_rules(translated, "🏁 竞赛")
+    untranslated = dict(META, map="ThreeMinesAround")
+    assert "地图：ThreeMinesAround｜" in btd6.format_rules(untranslated, "🏁 竞赛")
+    # FLAT 归一化查找：带空格写法同样命中
+    assert btd6.map_cn("TownCentre") == "城镇中心"
+    assert btd6.map_cn("Town Centre") == "城镇中心"
+    assert btd6.map_cn("UnknownMap") == "UnknownMap"
+
+
+def test_rushgen_empty_stage_scores_warns(caplog):
+    """C8：StageScores 必须为非空 list；AvailableBosses/RelicChances 为空同样告警（不抛异常）。"""
+    rg = btd6.rushgen
+    with caplog.at_level(logging.WARNING):
+        rg._validate_constants({"bossRush": {"StageScores": [],
+                                             "RandomSettings": {"TowerSettings": {}}}})
+    assert any("StageScores" in r.message for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        rg._validate_constants({"bossRush": {"StageScores": [1, 2],
+                                             "RandomSettings": {"TowerSettings": {},
+                                                                "AvailableBosses": [],
+                                                                "RelicChances": {}}}})
+    assert any("AvailableBosses" in r.message for r in caplog.records)
+    assert any("RelicChances" in r.message for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        rg._validate_constants({"bossRush": {"StageScores": [1], "StageRewards": [],
+                                             "RandomSettings": {"TowerSettings": {}}},
+                                "mapsInOrder": {}, "towersInOrder": [], "heroesInOrder": []})
+    assert not caplog.records  # 正常结构无告警
+
+
+def test_prewarm_odyssey_uses_html_fn_and_unified_h(monkeypatch):
+    """C9：远征预热与 handle_odyssey 注入相同的 _unified_h，且 HTML 构建延迟到渲染线程。"""
+    captured = {}
+
+    async def fake_render(prefix, html_fn):
+        captured["html_fn"] = html_fn
+        return "x.png"
+
+    diffs = {
+        d: {"meta": {"startingHealth": 150, "_availableTowers": [{"tower": "DartMonkey", "max": 1}]},
+            "maps": []}
+        for d, _ in btd6._ODYSSEY_DIFFS
+    }
+    col = {"ev": dict(BOSS_UPCOMING), "diffs": diffs}
+
+    async def fake_collect_overview():
+        return {"races": [], "bosses": [], "cts": [],
+                "odysseys": [dict(BOSS_UPCOMING, start=NOW - DAY, end=NOW + DAY)],
+                "rush": [], "now": NOW}
+
+    async def fake_collect_odyssey():
+        return col
+
+    async def fake_archive(data=None):
+        return None
+
+    monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
+    monkeypatch.setattr(btd6.collect, "collect_overview", fake_collect_overview)
+    monkeypatch.setattr(btd6.collect, "collect_odyssey", fake_collect_odyssey)
+    monkeypatch.setattr(btd6.push, "_archive_events", fake_archive)
+
+    asyncio.run(btd6._prewarm_once())
+    assert isinstance(col["diffs"]["easy"].get("_unified_h"), int)
+    # html_fn 延迟构建：HTML 在渲染线程内才生成（不在协程内同步构建）
+    assert captured["html_fn"]()
+
+
+def test_prewarm_lb_hourly_only_ongoing(monkeypatch):
+    """D2：每小时榜单对齐任务只渲染进行中活动（race+ct），未开始的 boss 跳过。"""
+    rendered = []
+    btd6.push._prewarm_running = False
+
+    async def fake_render(prefix, html_fn):
+        rendered.append(prefix)
+        return "x.png"
+
+    data = {"races": [RACE_ACTIVE], "bosses": [BOSS_UPCOMING], "cts": [CT_ACTIVE], "now": NOW}
+
+    async def fake_collect():
+        return data
+
+    lb = {"head": "h", "status": "s", "entries": [(1, "a", "1:00.000")]}
+
+    async def fake_lb(kind, variant, rows):
+        return lb
+
+    monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
+    monkeypatch.setattr(btd6.collect, "collect_overview", fake_collect)
+    monkeypatch.setattr(btd6.collect, "collect_leaderboard", fake_lb)
+
+    async def fake_daily(adv):
+        return {"empty": "暂无每日挑战数据"}  # 每日卡预热：empty 时跳过，不渲染
+
+    monkeypatch.setattr(btd6.collect, "collect_daily", fake_daily)
+
+    asyncio.run(btd6.push.btd6_prewarm_lb_hourly_job())
+    assert rendered == ["btd6lb", "btd6lb"]
+
+
+def test_prewarm_daily_cards_renders_both(monkeypatch):
+    """每小时预热含每日卡：标准+高级各渲一张；empty 的跳过；渲染失败不抛。"""
+    rendered = []
+
+    async def fake_collect(adv):
+        if adv:
+            return {"empty": "暂无每日挑战数据"}
+        return {"prefix": "Standard 2936", "meta": {}, "map_img": "",
+                "side_img": "", "stale_note": ""}
+
+    async def fake_render(prefix, html_fn):
+        rendered.append(prefix)
+        return f"/tmp/{prefix}.png"
+
+    monkeypatch.setattr(btd6.collect, "collect_daily", fake_collect)
+    monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
+    done = asyncio.run(btd6.push._prewarm_daily_cards())
+    assert rendered == ["btd6daily"]
+    assert done == 1
+
+    def boom(adv):
+        raise RuntimeError("fetch failed")
+
+    monkeypatch.setattr(btd6.collect, "collect_daily", boom)
+    assert asyncio.run(btd6.push._prewarm_daily_cards()) == 0  # 异常吞掉不抛
+
+
+def test_asset_data_url_dedupes_inflight(monkeypatch, tmp_path):
+    """D1：同 URL 并发冷读共享同一下载任务，只发一次请求。"""
+    monkeypatch.setattr(btd6.assets, "ASSET_DIR", str(tmp_path))
+    calls = []
+
+    class _Resp:
+        content = b"\x89PNG\r\n\x1a\ndata"
+
+        def raise_for_status(self):
+            return None
+
+    class _Client:
+        async def get(self, url, **kw):
+            calls.append(url)
+            await asyncio.sleep(0.01)
+            return _Resp()
+
+    monkeypatch.setattr(btd6.nkapi, "get_http_client", lambda t: _Client())
+    url = "https://static-api.nkstatic.com/dedup.png"
+    btd6._asset_mem.clear()
+
+    async def main():
+        return await asyncio.gather(btd6._asset_data_url(url), btd6._asset_data_url(url))
+
+    d1, d2 = asyncio.run(main())
+    assert d1 == d2 and d1.startswith("data:image/png;base64,")
+    assert calls == [url]

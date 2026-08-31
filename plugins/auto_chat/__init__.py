@@ -259,6 +259,9 @@ async def _sender_name_by_id(bot: Bot, uid: int, gid: int) -> str:
         return str(uid)
 
 
+_AI_KEY_LOCKS: dict[tuple, asyncio.Lock] = {}  # 与 _memory 同键空间，随 TTL 一并清理
+
+
 def _get_memory(key_id) -> deque:
     """取一份对话记忆，自动清理超时与超量条目。"""
     now = time.time()
@@ -267,12 +270,14 @@ def _get_memory(key_id) -> deque:
             stale_key = min(_memory_last_seen, key=_memory_last_seen.get)
             _memory.pop(stale_key, None)
             _memory_last_seen.pop(stale_key, None)
+            _AI_KEY_LOCKS.pop(stale_key, None)
         _memory[key_id]
     _memory_last_seen[key_id] = now
     for old_key, seen_at in list(_memory_last_seen.items()):
         if now - seen_at > _MEMORY_TTL:
             _memory.pop(old_key, None)
             _memory_last_seen.pop(old_key, None)
+            _AI_KEY_LOCKS.pop(old_key, None)
     return _memory[key_id]
 
 
@@ -281,31 +286,45 @@ def _memory_key(gid: str, uid: str) -> tuple[str, str]:
     return ("group", gid) if gid and gid != "0" else ("private", uid)
 
 
+def _ai_key_lock(key_id: tuple[str, str]) -> asyncio.Lock:
+    """按会话粒度串行化 AI 请求：并发请求不加锁会让记忆交错成
+    u1,u2,a1,a2（问答配对错乱），且后发请求的上下文看不到先发的问题。"""
+    lock = _AI_KEY_LOCKS.get(key_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _AI_KEY_LOCKS[key_id] = lock
+    return lock
+
+
 async def _ai_reply(key: str, uid: str, gid: str, msg: str, sender: str = "") -> str:
     """群聊时 sender 非空，消息以「昵称: 内容」进入上下文，让 AI 分清多说话人。"""
-    mem = _get_memory(_memory_key(gid, uid))
-    content = f"{sender}: {msg}" if sender else msg
-    messages = [{"role": "system", "content": SYSTEM}]
-    messages.extend(list(mem))
-    messages.append({"role": "user", "content": content})
-    reply = await chat_completion(messages, max_tokens=300)
-    mem.append({"role": "user", "content": content})
-    if reply:
-        mem.append({"role": "assistant", "content": reply})
-    return reply
+    key_id = _memory_key(gid, uid)
+    async with _ai_key_lock(key_id):
+        mem = _get_memory(key_id)
+        content = f"{sender}: {msg}" if sender else msg
+        messages = [{"role": "system", "content": SYSTEM}]
+        messages.extend(list(mem))
+        messages.append({"role": "user", "content": content})
+        reply = await chat_completion(messages, max_tokens=300)
+        mem.append({"role": "user", "content": content})
+        if reply:
+            mem.append({"role": "assistant", "content": reply})
+        return reply
 
 
 async def _ai_poke_reply(key: str, uid: str, gid: str, sender: str) -> str:
     """戳一戳的 AI 回复：结合群级/私聊级上下文，以人设回应被戳（带戳的人的昵称）。"""
-    mem = _get_memory(_memory_key(gid, uid))
-    messages = [{"role": "system", "content": SYSTEM}]
-    messages.extend(list(mem))
-    messages.append({"role": "user", "content": f"（{sender}轻轻戳了戳你）"})
-    reply = await chat_completion(messages, max_tokens=80)
-    if reply:
-        mem.append({"role": "user", "content": f"（{sender}戳了戳你）"})
-        mem.append({"role": "assistant", "content": reply})
-    return reply
+    key_id = _memory_key(gid, uid)
+    async with _ai_key_lock(key_id):
+        mem = _get_memory(key_id)
+        messages = [{"role": "system", "content": SYSTEM}]
+        messages.extend(list(mem))
+        messages.append({"role": "user", "content": f"（{sender}轻轻戳了戳你）"})
+        reply = await chat_completion(messages, max_tokens=80)
+        if reply:
+            mem.append({"role": "user", "content": f"（{sender}戳了戳你）"})
+            mem.append({"role": "assistant", "content": reply})
+        return reply
 
 
 async def _notify_owner_timeout(bot: Bot) -> None:
@@ -445,4 +464,4 @@ async def poke(bot: Bot, event: PokeNotifyEvent):
         else:
             await bot.send_private_msg(user_id=event.user_id, message=MessageSegment.text(reply))
     except Exception:
-        pass
+        logger.warning("戳一戳回复发送失败", exc_info=True)

@@ -195,6 +195,13 @@ async def handle(bot: Bot, event: GroupDecreaseNoticeEvent):
     uid = event.user_id
     gid = event.group_id
     sub = event.sub_type
+    if uid == event.self_id:
+        # 机器人自己被踢/退群：成员查询必失败、往已退出的群发消息必失败，
+        # 只清理逗留记录即可
+        if sub in ("leave", "kick"):
+            _pop_join(gid, uid)
+            await _save_state_async()
+        return
     if sub not in ("leave", "kick"):
         return  # 未知 sub_type 不弹出记录，避免误丢逗留时长数据
     name = await _get_name(bot, uid)
@@ -224,7 +231,7 @@ async def handle(bot: Bot, event: GroupDecreaseNoticeEvent):
         # MessageSegment.text 包裹：昵称等外部文本不会被解析为 CQ 码（防注入）
         await bot.send_group_msg(group_id=gid, message=MessageSegment.text(msg))
     except Exception:
-        pass
+        _logger.warning("退群通知发送失败", exc_info=True)
 
 
 @welcome_matcher.handle()
@@ -242,4 +249,4 @@ async def handle_welcome(bot: Bot, event: GroupIncreaseNoticeEvent):
     try:
         await bot.send_group_msg(group_id=gid, message=msg)
     except Exception:
-        pass
+        _logger.warning("欢迎消息发送失败", exc_info=True)
