@@ -210,29 +210,39 @@ def _daily_monkey_grid(meta: dict) -> str:
         if raw and raw != "ChosenPrimaryHero":
             restrictions[raw] = t
     constants = rushgen.load_constants()
-    # 猴子 + 英雄全量遍历，保证 Psi/Benjamin 等限 1 英雄能显示
-    order = list(constants.get("towersInOrder") or []) + list(constants.get("heroesInOrder") or [])
+    # 英雄放首位 + 去重：初级/高级的英雄默认 1 不打 ×1 角标，且应排在最前
+    order = list(constants.get("heroesInOrder") or []) + list(constants.get("towersInOrder") or [])
     cells = []
+    hero_cells = []
+    monkey_cells = []
     for name in order:
         entry = dict(restrictions.get(name) or {"tower": name})
         entry.setdefault("tower", name)
-        # isHero 需从原始 _towers 记录或英雄表补齐，否则 _race_monkey_cell 无法选对立绘
         if "isHero" not in entry:
-            # heroesInOrder 里的名字即英雄
             entry["isHero"] = name in (constants.get("heroesInOrder") or [])
+        # 英雄默认 1 不视为限购：不打 ×1
+        is_hero = bool(entry.get("isHero"))
         try:
+            mx_val = entry.get("max")
+            # -1 视为无限制
+            if float(mx_val) == -1:
+                entry = dict(entry)
+                entry["max"] = None
+                mx_val = None
             if float(entry.get("max")) == 0:
-                continue  # 整塔禁用：直接不显示
-        except (TypeError, ValueError):
-            pass
-        # 兼容 -1 为无限制：不视为限购，避免“×-1”角标
-        try:
-            if float(entry.get("max")) == -1:
+                continue
+            # 英雄 max=1 视为默认，不打角标
+            if is_hero and mx_val is not None and float(mx_val) == 1:
                 entry = dict(entry)
                 entry["max"] = None
         except (TypeError, ValueError):
             pass
-        cells.append(_race_monkey_cell(entry))
+        cell = _race_monkey_cell(entry)
+        if is_hero:
+            hero_cells.append(cell)
+        else:
+            monkey_cells.append(cell)
+    cells = hero_cells + monkey_cells
     if not cells:
         return "<div class='mkgrid race-mkgrid'><div class='race-mk-fallback'>无</div></div>"
     return "<div class='mkgrid race-mkgrid' style='height:auto;overflow:visible;'>" + "".join(cells) + "</div>"
