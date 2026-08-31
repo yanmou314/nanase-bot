@@ -21,7 +21,6 @@ from common import (
     is_owner,
     load_json_state,
     save_json_state,
-    save_json_state_async,
 )
 from .db_pg import exec, iter_rows, wait_writes_drained, write as db_write
 
@@ -177,25 +176,32 @@ def _words_groups() -> list[str]:
 
 
 async def _add_words_group(gid: str) -> None:
-    data = load_json_state(WORDS_STATE, _state_lock)
-    if data.get("group_id") and "groups" not in data:  # 旧格式迁移
-        data["groups"] = [str(data["group_id"])]
-        data.pop("group_id", None)
-    groups = {str(g) for g in (data.get("groups") or [])}
-    groups.add(gid)
-    data["groups"] = sorted(groups)
-    # 异步落盘不阻塞事件循环；锁此刻未持有，工作线程可安全申请同一把锁
-    await save_json_state_async(WORDS_STATE, data, _state_lock)
+    # 整个 load→修改→落盘 在工作线程同一把锁内完成：旧写法锁内改、锁外存，
+    # 两个群同时开关时后写覆盖先写、静默丢失配置；fsync 也移出事件循环
+    def _rmw() -> None:
+        with _state_lock:
+            data = load_json_state(WORDS_STATE, _state_lock)
+            if data.get("group_id") and "groups" not in data:  # 旧格式迁移
+                data["groups"] = [str(data["group_id"])]
+                data.pop("group_id", None)
+            groups = {str(g) for g in (data.get("groups") or [])}
+            groups.add(gid)
+            data["groups"] = sorted(groups)
+            save_json_state(WORDS_STATE, data, _state_lock)
+    await asyncio.to_thread(_rmw)
 
 
 async def _remove_words_group(gid: str) -> None:
-    data = load_json_state(WORDS_STATE, _state_lock)
-    if not data:
-        return
-    groups = {str(g) for g in (data.get("groups") or [])}
-    groups.discard(gid)
-    data["groups"] = sorted(groups)
-    await save_json_state_async(WORDS_STATE, data, _state_lock)
+    def _rmw() -> None:
+        with _state_lock:
+            data = load_json_state(WORDS_STATE, _state_lock)
+            if not data:
+                return
+            groups = {str(g) for g in (data.get("groups") or [])}
+            groups.discard(gid)
+            data["groups"] = sorted(groups)
+            save_json_state(WORDS_STATE, data, _state_lock)
+    await asyncio.to_thread(_rmw)
 
 
 @words_on_cmd.handle()

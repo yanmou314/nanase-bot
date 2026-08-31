@@ -97,7 +97,7 @@ def test_save_and_load_keywords(monkeypatch, tmp_path):
     mod = request_manager
     f = tmp_path / "auto_approve.json"
     monkeypatch.setattr(mod, "CONFIG_FILE", str(f))
-    saved = mod._save_keywords(123, ["老玩家", "老玩家", "内部"], merge=True)
+    saved = asyncio.run(mod._save_keywords(123, ["老玩家", "老玩家", "内部"], merge=True))
     assert saved == ["老玩家", "内部"]
     assert mod._load_keywords(123) == ["老玩家", "内部"]
     assert mod._load_keywords(456) == []
@@ -107,8 +107,8 @@ def test_save_keywords_merge_keeps_existing(monkeypatch, tmp_path):
     mod = request_manager
     f = tmp_path / "auto_approve.json"
     monkeypatch.setattr(mod, "CONFIG_FILE", str(f))
-    mod._save_keywords(111, ["a"])
-    merged = mod._save_keywords(111, ["b", "a"], merge=True)
+    asyncio.run(mod._save_keywords(111, ["a"]))
+    merged = asyncio.run(mod._save_keywords(111, ["b", "a"], merge=True))
     assert merged == ["a", "b"]
 
 
@@ -116,8 +116,8 @@ def test_save_keywords_replace(monkeypatch, tmp_path):
     mod = request_manager
     f = tmp_path / "auto_approve.json"
     monkeypatch.setattr(mod, "CONFIG_FILE", str(f))
-    mod._save_keywords(111, ["a", "b"])
-    replaced = mod._save_keywords(111, ["c"], merge=False)
+    asyncio.run(mod._save_keywords(111, ["a", "b"]))
+    replaced = asyncio.run(mod._save_keywords(111, ["c"], merge=False))
     assert replaced == ["c"]
     # 文件内容为合法 JSON 且写法原子（无 .tmp 残留）
     data = json.loads(f.read_text(encoding="utf-8"))
@@ -160,7 +160,7 @@ def test_owner_decision_regex_patterns():
 def test_auto_approve_case_insensitive_hit(monkeypatch, tmp_path):
     mod = request_manager
     monkeypatch.setattr(mod, "CONFIG_FILE", str(tmp_path / "auto_approve.json"))
-    mod._save_keywords(111, ["OldPlayer"])
+    asyncio.run(mod._save_keywords(111, ["OldPlayer"]))
 
     bot = ApproveBot()
     ev = _group_request(flag="f1", gid=111, uid=222, comment="i am an OLDPLAYER here")
@@ -178,7 +178,7 @@ def test_auto_approve_case_insensitive_hit(monkeypatch, tmp_path):
 def test_auto_approve_miss_falls_through_to_manual(monkeypatch, tmp_path):
     mod = request_manager
     monkeypatch.setattr(mod, "CONFIG_FILE", str(tmp_path / "auto_approve.json"))
-    mod._save_keywords(111, ["暗号"])
+    asyncio.run(mod._save_keywords(111, ["暗号"]))
 
     bot = ApproveBot()
     ev = _group_request(flag="f1", gid=111, uid=222, comment="随便看看")
@@ -193,7 +193,7 @@ def test_auto_approve_miss_falls_through_to_manual(monkeypatch, tmp_path):
 def _setup_approve(monkeypatch, tmp_path, gid=111):
     mod = request_manager
     monkeypatch.setattr(mod, "CONFIG_FILE", str(tmp_path / "auto_approve.json"))
-    mod._save_keywords(gid, ["暗号"])
+    asyncio.run(mod._save_keywords(gid, ["暗号"]))
 
 
 def test_auto_approve_blacklisted_user_requires_manual(monkeypatch, tmp_path, guard_file):
@@ -258,10 +258,32 @@ def test_unblacklist_reports_missing(guard_file):
     assert mod._guard_block_reason(222) == "blacklist"  # 未被请求移出的仍在名单
 
 
+def test_concurrent_blacklist_writes_do_not_lose_updates(guard_file):
+    """回归守护：并发拉黑/记录不得互相覆盖丢失名单（load→改→存必须整体原子）。"""
+    mod = request_manager
+
+    async def _run():
+        await asyncio.gather(
+            mod._guard_blacklist(["111"]),
+            mod._guard_blacklist(["222"]),
+        )
+        # 记账与拉黑并发时同样不得丢失
+        await asyncio.gather(
+            mod._guard_mark_approved(333),
+            mod._guard_blacklist(["444"]),
+        )
+
+    asyncio.run(_run())
+    assert mod._guard_block_reason(111) == "blacklist"
+    assert mod._guard_block_reason(222) == "blacklist"
+    assert mod._guard_block_reason(444) == "blacklist"
+    assert mod._guard_block_reason(333) == "reapply"
+
+
 def test_auto_approve_no_keywords_for_group(monkeypatch, tmp_path):
     mod = request_manager
     monkeypatch.setattr(mod, "CONFIG_FILE", str(tmp_path / "auto_approve.json"))
-    mod._save_keywords(222, ["暗号"])  # 只给别的群配置
+    asyncio.run(mod._save_keywords(222, ["暗号"]))  # 只给别的群配置
 
     bot = ApproveBot()
     ev = _group_request(flag="f1", gid=111, uid=222, comment="暗号")

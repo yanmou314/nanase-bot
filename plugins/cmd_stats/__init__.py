@@ -20,7 +20,6 @@ from common import (
     load_json_state,
     render_html_to_png,
     save_json_state,
-    save_json_state_async,
 )
 from plugins.chat_stats.db_pg import exec, wait_writes_drained, write_command as db_write_command
 
@@ -118,23 +117,27 @@ def _valid_groups(data: dict) -> set[int]:
 
 
 async def _add_group(gid: int) -> None:
-    with _config_lock:
-        data = load_json_state(CONFIG_FILE, _config_lock)
-        groups = _valid_groups(data)
-        groups.add(gid)
-        data["groups"] = sorted(groups)
-    # 锁释放后再落盘：save_json_state_async 在工作线程会重新申请 _config_lock，
-    # 协程持锁跨 await 会死锁
-    await save_json_state_async(CONFIG_FILE, data, _config_lock)
+    # 整个 load→修改→落盘 在工作线程同一把锁内完成：旧写法锁内改、锁外存，
+    # 并发开关时后写覆盖先写、静默丢失配置；fsync 也移出事件循环
+    def _rmw() -> None:
+        with _config_lock:
+            data = load_json_state(CONFIG_FILE, _config_lock)
+            groups = _valid_groups(data)
+            groups.add(gid)
+            data["groups"] = sorted(groups)
+            save_json_state(CONFIG_FILE, data, _config_lock)
+    await asyncio.to_thread(_rmw)
 
 
 async def _remove_group(gid: int) -> None:
-    with _config_lock:
-        data = load_json_state(CONFIG_FILE, _config_lock)
-        groups = _valid_groups(data)
-        groups.discard(gid)
-        data["groups"] = sorted(groups)
-    await save_json_state_async(CONFIG_FILE, data, _config_lock)
+    def _rmw() -> None:
+        with _config_lock:
+            data = load_json_state(CONFIG_FILE, _config_lock)
+            groups = _valid_groups(data)
+            groups.discard(gid)
+            data["groups"] = sorted(groups)
+            save_json_state(CONFIG_FILE, data, _config_lock)
+    await asyncio.to_thread(_rmw)
 
 
 def _prev_day() -> str:
