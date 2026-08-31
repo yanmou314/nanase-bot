@@ -201,20 +201,35 @@ def _monkey_grid(towers: list) -> str:
 
 def _daily_monkey_grid(meta: dict) -> str:
     """每日挑战：全塔总览——官方 _towers 里有记录的塔带限制角标，
-    未记录的塔表示无限制（正常可放、可满级），max=0 的塔直接不显示。"""
+    未记录的塔表示无限制（正常可放、可满级），max=0 的塔直接不显示。
+    修复：原先仅遍历 towersInOrder（26 猴子），漏掉 heroesInOrder 导致英雄永不显示；
+    -1 视为无限制（与游戏内 9999 同义），不应按限购处理。"""
     restrictions = {}
     for t in meta.get("_towers") or []:
         raw = str(t.get("tower") or "").strip()
         if raw and raw != "ChosenPrimaryHero":
             restrictions[raw] = t
     constants = rushgen.load_constants()
+    # 猴子 + 英雄全量遍历，保证 Psi/Benjamin 等限 1 英雄能显示
+    order = list(constants.get("towersInOrder") or []) + list(constants.get("heroesInOrder") or [])
     cells = []
-    for name in constants["towersInOrder"]:
+    for name in order:
         entry = dict(restrictions.get(name) or {"tower": name})
         entry.setdefault("tower", name)
+        # isHero 需从原始 _towers 记录或英雄表补齐，否则 _race_monkey_cell 无法选对立绘
+        if "isHero" not in entry:
+            # heroesInOrder 里的名字即英雄
+            entry["isHero"] = name in (constants.get("heroesInOrder") or [])
         try:
             if float(entry.get("max")) == 0:
                 continue  # 整塔禁用：直接不显示
+        except (TypeError, ValueError):
+            pass
+        # 兼容 -1 为无限制：不视为限购，避免“×-1”角标
+        try:
+            if float(entry.get("max")) == -1:
+                entry = dict(entry)
+                entry["max"] = None
         except (TypeError, ValueError):
             pass
         cells.append(_race_monkey_cell(entry))
