@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import re
@@ -22,7 +23,6 @@ from common import (
     load_json_state,
     now_str,
     save_json_state,
-    save_json_state_async,
 )
 
 _logger = logging.getLogger(__name__)
@@ -105,41 +105,51 @@ def _guard_block_reason(uid: int) -> str:
     return ""
 
 
-def _guard_mark_approved(uid: int) -> None:
-    """记录一次自动通过时间戳；只保留近 60 天记录防文件无限增长。"""
-    with _GUARD_LOCK:
-        data = _load_guard()
-        approved = data.get("approved") if isinstance(data.get("approved"), dict) else {}
-        cutoff = time.time() - 60 * 86400
-        approved = {
-            k: v for k, v in approved.items()
-            if isinstance(v, (int, float)) and v >= cutoff
-        }
-        approved[str(uid)] = time.time()
-        data["approved"] = approved
-        _save_guard(data)
+async def _guard_mark_approved(uid: int) -> None:
+    """记录一次自动通过时间戳；只保留近 60 天记录防文件无限增长。
+
+    整个 load→修改→落盘 在工作线程同一把锁内完成：无「锁内改、锁外存」的
+    丢失更新窗口，fsync 也不阻塞事件循环。
+    """
+    def _rmw() -> None:
+        with _GUARD_LOCK:
+            data = _load_guard()
+            approved = data.get("approved") if isinstance(data.get("approved"), dict) else {}
+            cutoff = time.time() - 60 * 86400
+            approved = {
+                k: v for k, v in approved.items()
+                if isinstance(v, (int, float)) and v >= cutoff
+            }
+            approved[str(uid)] = time.time()
+            data["approved"] = approved
+            _save_guard(data)
+    await asyncio.to_thread(_rmw)
 
 
 async def _guard_blacklist(nums: list[str]) -> None:
-    with _GUARD_LOCK:
-        data = _load_guard()
-        blacklist = data.get("blacklist") if isinstance(data.get("blacklist"), dict) else {}
-        for n in nums:
-            blacklist[n] = time.time()
-        data["blacklist"] = blacklist
-    # 锁释放后再落盘：save_json_state_async 在工作线程会重新申请 _GUARD_LOCK，
-    # 协程持锁跨 await 会死锁
-    await save_json_state_async(GUARD_FILE, data, _GUARD_LOCK)
+    # 整个 load→修改→落盘 在工作线程同一把锁内完成：旧写法锁内改、锁外存，
+    # owner 连发两条拉黑命令时后写覆盖先写、静默丢失黑名单；fsync 也移出事件循环
+    def _rmw() -> None:
+        with _GUARD_LOCK:
+            data = _load_guard()
+            blacklist = data.get("blacklist") if isinstance(data.get("blacklist"), dict) else {}
+            for n in nums:
+                blacklist[n] = time.time()
+            data["blacklist"] = blacklist
+            _save_guard(data)
+    await asyncio.to_thread(_rmw)
 
 
 async def _guard_unblacklist(nums: list[str]) -> list[str]:
-    with _GUARD_LOCK:
-        data = _load_guard()
-        blacklist = data.get("blacklist") if isinstance(data.get("blacklist"), dict) else {}
-        removed = [n for n in nums if blacklist.pop(n, None) is not None]
-        data["blacklist"] = blacklist
-    await save_json_state_async(GUARD_FILE, data, _GUARD_LOCK)
-    return removed
+    def _rmw() -> list[str]:
+        with _GUARD_LOCK:
+            data = _load_guard()
+            blacklist = data.get("blacklist") if isinstance(data.get("blacklist"), dict) else {}
+            removed = [n for n in nums if blacklist.pop(n, None) is not None]
+            data["blacklist"] = blacklist
+            _save_guard(data)
+        return removed
+    return await asyncio.to_thread(_rmw)
 
 auto_on_cmd = on_command("自动通过", aliases={"自动同意"}, priority=5, block=True)
 auto_off_cmd = on_command("自动通过关闭", aliases={"自动同意关闭"}, priority=5, block=True)
@@ -188,20 +198,23 @@ def _load_keywords(group_id: int) -> list[str]:
     return [k for k in (_load_config().get(str(group_id)) or []) if k]
 
 
-def _save_keywords(group_id: int, kw: list[str], merge: bool = False) -> list[str]:
-    with _save_lock:
-        data = _load_config()
-        keywords = [k for k in kw if k]
-        if merge:
-            existing = [k for k in (data.get(str(group_id)) or []) if k]
-            keywords = list(dict.fromkeys([*existing, *keywords]))
-        else:
-            keywords = list(dict.fromkeys(keywords))
-        data[str(group_id)] = keywords
-        # common 的 save_json_state：tmp + fsync + os.replace 原子写，
-        # 权限沿用现状、新文件 600——auto_approve.json 存各群进群暗号，不能掉回 644
-        save_json_state(CONFIG_FILE, data, _save_lock)
-        return keywords
+async def _save_keywords(group_id: int, kw: list[str], merge: bool = False) -> list[str]:
+    # 整个 load→修改→落盘 在工作线程同一把锁内完成（并发安全 + fsync 不占事件循环）
+    def _rmw() -> list[str]:
+        with _save_lock:
+            data = _load_config()
+            keywords = [k for k in kw if k]
+            if merge:
+                existing = [k for k in (data.get(str(group_id)) or []) if k]
+                keywords = list(dict.fromkeys([*existing, *keywords]))
+            else:
+                keywords = list(dict.fromkeys(keywords))
+            data[str(group_id)] = keywords
+            # common 的 save_json_state：tmp + fsync + os.replace 原子写，
+            # 权限沿用现状、新文件 600——auto_approve.json 存各群进群暗号，不能掉回 644
+            save_json_state(CONFIG_FILE, data, _save_lock)
+            return keywords
+    return await asyncio.to_thread(_rmw)
 
 
 async def _auto_approve(bot: Bot, event: GroupRequestEvent, comment: str) -> bool:
@@ -222,7 +235,7 @@ async def _auto_approve(bot: Bot, event: GroupRequestEvent, comment: str) -> boo
             except Exception:
                 _logger.warning("自动通过失败通知发送失败", exc_info=True)
             return False
-        _guard_mark_approved(event.user_id)  # 只在实际通过后记账
+        await _guard_mark_approved(event.user_id)  # 只在实际通过后记账
         try:
             await bot.send_private_msg(
                 user_id=int(OWNER),
@@ -273,7 +286,7 @@ async def auto_on(bot: Bot, event: MessageEvent, arg=CommandArg()):
         kws = [k for k in re.split(r"[\s,，、]+", " ".join(parts[1:])) if k]
     if not kws:
         await auto_on_cmd.finish("请提供至少一个关键字")
-    merged = _save_keywords(gid, kws, merge=True)
+    merged = await _save_keywords(gid, kws, merge=True)
     await _finish_owner_config(bot, auto_on_cmd, event, f"✅ 群 {gid} 自动通过已开启\n🔑 关键字：{' / '.join(merged)}\n进群附言包含任一关键字将自动同意（不区分大小写）")
 
 
@@ -288,7 +301,7 @@ async def auto_off(bot: Bot, event: MessageEvent, arg=CommandArg()):
         if not text.isdigit():
             await auto_off_cmd.finish("私聊用法：.自动通过关闭 <群号>\n例如：.自动通过关闭 <群号>")
         gid = int(text)
-    _save_keywords(gid, [])
+    await _save_keywords(gid, [])
     await _finish_owner_config(bot, auto_off_cmd, event, f"✅ 群 {gid} 自动通过已关闭，进群申请将等待手动处理")
 
 
