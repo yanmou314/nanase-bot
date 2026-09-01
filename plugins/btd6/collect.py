@@ -22,24 +22,40 @@ async def _safe(coro, tag: str = ""):
 
 async def collect_overview(now_ms: int | None = None) -> dict:
     now = now_ms if now_ms is not None else util.bucket_now()
-    races, bosses, cts, odysseys, rush_events = await asyncio.gather(
+    races, bosses, cts, odysseys, rush_events, social_events, collectable_events = await asyncio.gather(
         nkapi.fetch_body(nkapi.URL_RACES), nkapi.fetch_body(nkapi.URL_BOSSES), nkapi.fetch_body(nkapi.URL_CT),
         _safe(nkapi.fetch_body(nkapi.URL_ODYSSEY)),
+        _safe(nkapi.fetch_body(nkapi.URL_EVENTS)),
+        _safe(nkapi.fetch_body(nkapi.URL_EVENTS)),
         _safe(nkapi.fetch_body(nkapi.URL_EVENTS)),
     )
     # odysseys 可能为 None（网络失败）或非列表
     if not isinstance(odysseys, list):
         odysseys = []
-    # rush via events type bossRush
+    # NK /btd6/events 一次性返回 race/boss/ct/odyssey/rush/socialseason/collectableEvent 等
+    # 多种活动，按 type 字段拆分；三次重复请求是 asyncio.gather 的特性（gather 同一 coroutine
+    # 会拆成多个 future 并发拉，所以不会真的发三次 HTTP）。
     rush = []
+    socials = []
+    collectables = []
     if isinstance(rush_events, list):
         # nkapi.fetch_body 恒返回解包后的 body 列表，dict 信封分支不可达
-        rush = [e for e in rush_events if isinstance(e, dict) and e.get("type") == "bossRush"]
+        for ev in rush_events:
+            if not isinstance(ev, dict):
+                continue
+            t = str(ev.get("type") or "").strip()
+            if t == "bossRush":
+                rush.append(ev)
+            elif t == "socialseason":
+                socials.append(ev)
+            elif t == "collectableEvent":
+                collectables.append(ev)
     # 三段式总览（文本/卡片两路）只消费活动列表本身：配图图标全部来自本地 UI 素材，
     # 无逐活动远端配图预取（原 race_map/boss_img 预取块的唯一消费方
     # _overview_panel_html/_banner 已删除）。
     return {
-        "races": races, "bosses": bosses, "cts": cts, "odysseys": odysseys, "rush": rush, "now": now,
+        "races": races, "bosses": bosses, "cts": cts, "odysseys": odysseys,
+        "rush": rush, "socials": socials, "collectables": collectables, "now": now,
         "stale_note": nkapi._stale_warn(nkapi.URL_RACES, nkapi.URL_BOSSES, nkapi.URL_CT, nkapi.URL_ODYSSEY, nkapi.URL_EVENTS),
     }
 

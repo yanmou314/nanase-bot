@@ -6,7 +6,7 @@ from . import i18n, util
 
 
 def _single_event_text(ev: dict, kind: str, now_ms: int) -> list[str]:
-    """单场活动的文本行（三段式总览的统一出口，race/boss/ct/odyssey/rush）。"""
+    """单场活动的文本行（三段式总览的统一出口，race/boss/ct/odyssey/rush/social/collectable）。"""
     if kind == "race":
         total = int(ev.get("totalScores") or 0)
         return [
@@ -58,16 +58,43 @@ def _single_event_text(ev: dict, kind: str, now_ms: int) -> list[str]:
         f"   {util.event_status_line(ev, now_ms)}",
         f"   👥 参与：个人 {n_player:,} · 战队 {n_team:,}",
     ]
+    if kind == "social":
+        # 社交赛季（socialseason）通常没有参与人数/描述，以名称+时间为主
+        name = (ev.get("name") or "").strip() or "社交赛季"
+        return [
+            f"🤝 社交赛季「{name}」",
+            f"   {util.event_status_line(ev, now_ms)}",
+        ]
+    if kind == "collectable":
+        # 收集活动（collectableEvent）通常有描述与奖励列表
+        name = (ev.get("name") or "").strip() or "收集活动"
+        desc = (ev.get("description") or "").strip()
+        lines = [
+            f"🎁 收集活动「{name}」",
+            f"   {util.event_status_line(ev, now_ms)}",
+        ]
+        if desc:
+            short = desc[:60] + ("…" if len(desc) > 60 else "")
+            lines.append(f"   📜 {short}")
+        return lines
 
 
-def build_overview(races: list, bosses: list, cts: list, now_ms: int, odysseys: list | None = None, rush: list | None = None) -> str:
+def build_overview(
+    races: list, bosses: list, cts: list, now_ms: int,
+    odysseys: list | None = None, rush: list | None = None,
+    socials: list | None = None, collectables: list | None = None,
+) -> str:
     """三段式总览：进行中 / 即将开始 / 已结束(最近 ENDED_SHOW 场)，从上到下排列。
 
-    odysseys 为可选的远征列表，未传时与旧版一致（仅 race/boss/ct）。
+    odysseys 为可选的远征列表，rush/socials/collectables 同理；未传时与旧版一致。
     """
     odysseys = odysseys or []
     rush = rush or []
-    ongoing, upcoming, ended = util._classify_overview_events(races, bosses, cts, now_ms, odysseys, rush)
+    socials = socials or []
+    collectables = collectables or []
+    ongoing, upcoming, ended = util._classify_overview_events(
+        races, bosses, cts, now_ms, odysseys, rush, socials, collectables
+    )
     ended = ended[:util.ENDED_SHOW]
     parts = ["🎮 BTD6 当前活动", ""]
     # 进行中
@@ -111,6 +138,8 @@ def overview_text(data: dict) -> str:
         data["races"], data["bosses"], data["cts"], data["now"],
         data.get("odysseys") or [],
         data.get("rush") or [],
+        data.get("socials") or [],
+        data.get("collectables") or [],
     )
     note = data.get("stale_note") or ""
     return f"{text}\n{note}" if note else text

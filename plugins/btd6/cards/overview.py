@@ -16,7 +16,9 @@ def overview_html(data: dict) -> str:
     cts = data.get("cts") or []
     odysseys = data.get("odysseys") if isinstance(data.get("odysseys"), list) else []
     rush = data.get("rush") if isinstance(data.get("rush"), list) else []
-    ongoing, upcoming, ended = util._classify_overview_events(races, bosses, cts, now, odysseys, rush)
+    socials = data.get("socials") if isinstance(data.get("socials"), list) else []
+    collectables = data.get("collectables") if isinstance(data.get("collectables"), list) else []
+    ongoing, upcoming, ended = util._classify_overview_events(races, bosses, cts, now, odysseys, rush, socials, collectables)
     parts: list[str] = []
     total_h = 6
 
@@ -25,7 +27,6 @@ def overview_html(data: dict) -> str:
         # 图标：按 kind 取最匹配的圆形方块图（已有 race-tile/boss-tile/odyssey-tile/ct-tile 为横幅，回退旧 boss-* 与 odyssey-event/ct-event 方形）
         icon_data = ""
         if kind == "race":
-            # 中性活动图标优先：Bloonarius 是特定 Boss 的头像，用作所有竞速活动的默认图标语义不符
             icon_data = assets._ui_asset_data_url("boss-event-official.png") or assets._ui_asset_data_url("race-tile.png") or ""
         elif kind == "boss":
             bt = str(ev.get("bossType") or "").strip().lower()
@@ -45,9 +46,15 @@ def overview_html(data: dict) -> str:
             icon_data = assets._ui_asset_data_url("boss-rush.png") or assets._ui_asset_data_url("boss-event.png") or assets._ui_asset_data_url("boss-tile.png") or ""
         elif kind == "ct":
             icon_data = assets._ui_asset_data_url("ct-event.png") or assets._ui_asset_data_url("ct-tile.png") or ""
+        elif kind == "social":
+            # 社交赛季：使用 trophy/event 类图标
+            icon_data = assets._ui_asset_data_url("social-event.png") or assets._ui_asset_data_url("event.png") or assets._ui_asset_data_url("RaceIcon.png") or ""
+        elif kind == "collectable":
+            # 收集活动：使用 trophy/instamonkey 类图标
+            icon_data = assets._ui_asset_data_url("instamonkey-event.png") or assets._ui_asset_data_url("trophy.png") or assets._ui_asset_data_url("RaceIcon.png") or ""
         # 默认占位（彩色圆底白字）
         if not icon_data:
-            ph = {"race": "🏁", "boss": "👹", "odyssey": "🏰", "ct": "⚔️", "rush": "🎈"}.get(kind, "🎈")
+            ph = {"race": "🏁", "boss": "👹", "odyssey": "🏰", "ct": "⚔️", "rush": "🎈", "social": "🤝", "collectable": "🎁"}.get(kind, "🎈")
             icon_html = f"<div class='ev-icon' style='background:#3a5a7a'>{ph}</div>"
         else:
             icon_html = f"<img class='ev-icon' src='{util._esc(icon_data)}'/>"
@@ -71,6 +78,10 @@ def overview_html(data: dict) -> str:
             name = "Boss 竞速冲刺" if generic else f"Boss Rush · {raw_name}"
         elif kind == "ct":
             name = "争夺领土（CT）"
+        elif kind == "social":
+            name = "社交赛季" if generic else f"社交赛季 · {raw_name}"
+        elif kind == "collectable":
+            name = "收集活动" if generic else f"收集活动 · {raw_name}"
         else:
             name = generic or raw_name or "未知活动"
         # 日期
