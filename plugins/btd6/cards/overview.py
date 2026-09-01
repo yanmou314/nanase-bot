@@ -37,6 +37,7 @@ def overview_html(data: dict) -> str:
                 "dreadbloon": "boss-dreadbloon.png",
                 "phayze": "boss-phayze.png",
                 "blastapopoulos": "boss-blastapopoulos.png",
+                "diamondback": "boss-diamondback.png",
             }
             asset = boss_icon_map.get(bt, "")
             icon_data = assets._ui_asset_data_url(asset) or assets._ui_asset_data_url("boss-event-official.png") or assets._ui_asset_data_url("boss-tile.png") or ""
@@ -47,11 +48,11 @@ def overview_html(data: dict) -> str:
         elif kind == "ct":
             icon_data = assets._ui_asset_data_url("ct-event.png") or assets._ui_asset_data_url("ct-tile.png") or ""
         elif kind == "social":
-            # 社交赛季：使用 trophy/event 类图标
+            # 社交赛季：使用新下的 social-event.png（来自 wiki 官方素材）
             icon_data = assets._ui_asset_data_url("social-event.png") or assets._ui_asset_data_url("event.png") or assets._ui_asset_data_url("RaceIcon.png") or ""
         elif kind == "collectable":
-            # 收集活动：使用 trophy/instamonkey 类图标
-            icon_data = assets._ui_asset_data_url("instamonkey-event.png") or assets._ui_asset_data_url("trophy.png") or assets._ui_asset_data_url("RaceIcon.png") or ""
+            # 收集活动：使用新下的 collect-event.png（官方 CollectingEventTotemBtn）
+            icon_data = assets._ui_asset_data_url("collect-event.png") or assets._ui_asset_data_url("trophy.png") or assets._ui_asset_data_url("RaceIcon.png") or ""
         # 默认占位（彩色圆底白字）
         if not icon_data:
             ph = {"race": "🏁", "boss": "👹", "odyssey": "🏰", "ct": "⚔️", "rush": "🎈", "social": "🤝", "collectable": "🎁"}.get(kind, "🎈")
