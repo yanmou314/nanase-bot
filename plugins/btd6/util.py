@@ -71,11 +71,13 @@ def bucket_now() -> int:
 
 
 def _classify_overview_events(
-    races: list, bosses: list, cts: list, now_ms: int, odysseys: list | None = None, rush: list | None = None,
+    races: list, bosses: list, cts: list, now_ms: int,
+    odysseys: list | None = None, rush: list | None = None,
+    socials: list | None = None, collectables: list | None = None,
 ) -> tuple[list[tuple[dict, str]], list[tuple[dict, str]], list[tuple[dict, str]]]:
     """将全部活动按时间状态分为三类：进行中 / 即将开始 / 已结束.
 
-    返回 (ongoing, upcoming, ended)，每项为 (ev, kind) 其中 kind ∈ {race,boss,ct,odyssey,rush}.
+    返回 (ongoing, upcoming, ended)，每项为 (ev, kind) 其中 kind ∈ {race,boss,ct,odyssey,rush,social,collectable}.
     - ongoing:  start <= now < end，按结束时间升序（先结束的在前）
     - upcoming: start > now，按开始时间升序（最近开始的在前）
     - ended:    end <= now，按结束时间降序（最近结束的在前）；不截断，
@@ -98,6 +100,12 @@ def _classify_overview_events(
     for ev in rush or []:
         if isinstance(ev, dict):
             all_events.append((ev, "rush"))
+    for ev in socials or []:
+        if isinstance(ev, dict):
+            all_events.append((ev, "social"))
+    for ev in collectables or []:
+        if isinstance(ev, dict):
+            all_events.append((ev, "collectable"))
     ongoing: list[tuple[dict, str]] = []
     upcoming: list[tuple[dict, str]] = []
     ended: list[tuple[dict, str]] = []
