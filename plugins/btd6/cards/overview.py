@@ -61,7 +61,7 @@ def overview_html(data: dict) -> str:
         else:
             icon_html = f"<img class='ev-icon' src='{util._esc(icon_data)}'/>"
         # 名称：按 kind 翻译为中文，保留 NK API 原文作小字副标题
-        raw_name = (ev.get("name") or "").strip()
+        raw_name = re.sub(r"\s*\d+\s*$", "", (ev.get("name") or "").strip())
         generic = i18n._EVENT_NAME_CN.get(raw_name)
         if kind == "race":
             name = "每周竞速活动" if generic else f"每周竞赛 · {raw_name or 'Race Event'}"
@@ -70,10 +70,13 @@ def overview_html(data: dict) -> str:
             if not bt_raw:
                 bt_raw = re.sub(r"\d+$", "", str(ev.get("id") or "").split("_", 1)[0])
             bt_cn = i18n.boss_cn(bt_raw)
-            if generic:
-                name = f"Boss 战 · {bt_cn}" if bt_cn else generic
+            # 优先用 i18n.boss_cn 中文名（去掉 NK API 名字里 "Diamondback7" 类的迭代编号）
+            if bt_cn:
+                name = bt_cn
+            elif generic:
+                name = generic
             else:
-                name = f"{raw_name}（{bt_cn}）" if bt_cn and bt_cn not in raw_name else (raw_name or "Boss 事件")
+                name = raw_name or "Boss 事件"
         elif kind == "odyssey":
             name = "远征活动" if generic else f"远征 · {raw_name or 'Odyssey Event'}"
         elif kind == "rush":
