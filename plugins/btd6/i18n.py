@@ -40,11 +40,11 @@ LB_USAGE = "用法：.btd6排行 竞赛|boss|领土|冲刺 [P页码|排名]\n例
 # Boss 事件：总览/规则/每日推送与 Boss Rush 卡共用一套译名。
 # 历史上有两套不一致的表（总览"幻影" vs rush 卡"法泽"），已合并：以官方简体译名为准。
 BOSS_CN = {
-    "Bloonarius": "膨胀气球神", "Lych": "巫妖", "Vortex": "漩涡",
-    "Dreadbloon": "恐惧气球岩", "Phayze": "菲茨", "Blastapopoulos": "爆裂魔炎",
-    "Diamondback": "村庄吞噬者",
+    "Bloonarius": "布隆纳留斯", "Lych": "巫妖", "Vortex": "漩涡",
+    "Dreadbloon": "恐怖气球", "Phayze": "菲茨", "Blastapopoulos": "轰炸飞艇",
+    "Diamondback": "菱背",
     # NK API 历史拼写变体
-    "Blastapopolous": "爆裂魔炎",
+    "Blastapopolous": "轰炸飞艇",
 }
 DIFFICULTY_CN = {
     # 地图分级
