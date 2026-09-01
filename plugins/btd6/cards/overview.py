@@ -27,7 +27,8 @@ def overview_html(data: dict) -> str:
         # 图标：按 kind 取最匹配的圆形方块图（已有 race-tile/boss-tile/odyssey-tile/ct-tile 为横幅，回退旧 boss-* 与 odyssey-event/ct-event 方形）
         icon_data = ""
         if kind == "race":
-            icon_data = assets._ui_asset_data_url("boss-event-official.png") or assets._ui_asset_data_url("race-tile.png") or ""
+            # 每周竞速：金色奖杯+方格旗（RaceIcon.png），回退 race-event / race-tile
+            icon_data = assets._ui_asset_data_url("RaceIcon.png") or assets._ui_asset_data_url("race-event.png") or assets._ui_asset_data_url("race-tile.png") or ""
         elif kind == "boss":
             bt = str(ev.get("bossType") or "").strip().lower()
             boss_icon_map = {
