@@ -5,8 +5,12 @@ from . import common
 from .. import assets, i18n, rushgen, textfmt, util
 
 
-def _race_emblem(ev: dict | None, side_img: str, fallback: str = "🏆") -> str:
-    """Boss 使用首领徽章，普通竞速使用游戏内竞速奖杯图标，每日挑战用日历 emoji。"""
+def _race_emblem(ev: dict | None, side_img: str, fallback: str = "🏆", is_daily: bool = False) -> str:
+    """Boss 使用首领徽章，普通竞速使用游戏内竞速奖杯图标，每日挑战用日历圆形头图。"""
+    if is_daily:
+        daily_asset = "daily-challenge.png"
+        if assets._ui_asset_data_url(daily_asset):
+            return common._race_ui_img(daily_asset, "📅", "race-emblem-img")
     asset = assets._boss_event_asset(ev)
     if asset and assets._ui_asset_data_url(asset):
         return common._race_ui_img(asset, "🐒", "race-emblem-img")
@@ -343,7 +347,10 @@ def rules_html(col: dict) -> str:
                 f"</div><div class='race-stat-copy'><div class='race-stat-label'>{util._esc(label)}</div>"
                 f"{value_html}</div></div>")
 
-    event_icon = boss_asset or "RaceIcon.png"
+    if is_daily:
+        event_icon = assets._ui_asset_data_url("daily-challenge.png") or boss_asset or "RaceIcon.png"
+    else:
+        event_icon = boss_asset or "RaceIcon.png"
     stat_left = "".join([
         stat("cash.png", "🪙", "初始资金", f"{int(meta.get('startingCash') or 0):,}"),
         stat("heart.png", "❤", "初始生命", f"{int(meta.get('lives') or 0):,}"),
@@ -356,7 +363,7 @@ def rules_html(col: dict) -> str:
         stat("monkey-cap.png", "🐒", "最大猴子", towers_cap),
         stat("fastest-time.png", "⏱", "最快用时"),
     ])
-    emblem = _race_emblem(ev, side_img, "📅" if is_daily else "🏆")
+    emblem = _race_emblem(ev, side_img, "📅" if is_daily else "🏆", is_daily=is_daily)
     title = _race_title(name, ev, side_img)
     time_line = _race_time_line(ev)
     time_html = f"<div class='race-time'>{util._esc(time_line)}</div>" if time_line else ""
