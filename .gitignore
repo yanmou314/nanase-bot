@@ -42,3 +42,4 @@ venv/
 plugins/**/cache/
 plugins-disabled/**/cache/
 plugins/**/approve_guard.json
+plugins/**/maintenance.json
