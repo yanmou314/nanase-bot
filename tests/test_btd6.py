@@ -128,7 +128,7 @@ def test_build_overview_sections():
     text = btd6.build_overview([RACE_ACTIVE], [BOSS_UPCOMING], [CT_ACTIVE], NOW)
     assert "🎮 BTD6 当前活动" in text
     assert "「Test Race」" in text and "36,745" in text
-    assert "「Phayze30」" in text and "（幻影）" in text
+    assert "「Phayze30」" in text and "（菲茨）" in text
     assert "后开始" in text  # Boss 未开始 → 显示预告倒计时
     assert "标准模式 最快用时 · 精英模式 最少升级" in text
     assert "个人 13,671 · 战队 4,484" in text
@@ -160,6 +160,26 @@ def test_single_event_text_rush_branch():
     text = btd6.build_overview([RACE_ACTIVE], [], [], NOW, [], [rush])
     assert "争夺领土（CT）" not in text
     assert "Boss 竞速冲刺" in text
+
+
+def test_single_event_text_social_collectable_branch():
+    """回归：social/collectable 分支此前写在 CT 兜底 return 之后不可达，
+    总览文本把社交赛季/收集活动误渲染成"争夺领土"。"""
+    soc = {"id": "ss1", "name": "A Social Season Event",
+           "start": NOW - DAY, "end": NOW + DAY}
+    joined = "\n".join(btd6._single_event_text(soc, "social", NOW))
+    assert "社交赛季" in joined
+    assert "争夺领土" not in joined
+    col_ev = {"id": "ce1", "name": "A Collectables Event",
+              "description": "Collect instas", "start": NOW - DAY, "end": NOW + DAY}
+    joined2 = "\n".join(btd6._single_event_text(col_ev, "collectable", NOW))
+    assert "收集活动" in joined2 and "Collect instas" in joined2
+    assert "争夺领土" not in joined2
+    # 总览分类含 social/collectable 时不再显示成 CT
+    text = btd6.build_overview([RACE_ACTIVE], [], [], NOW,
+                               [], [], [soc], [col_ev])
+    assert "争夺领土（CT）" not in text
+    assert "社交赛季" in text and "收集活动" in text
 
 
 def test_classify_overview_ended_not_truncated():
@@ -647,8 +667,8 @@ def test_overview_html_escapes_and_sections():
     ongoing, upcoming, ended = btd6._classify_overview_events(data["races"], data["bosses"], data["cts"], data["now"])
     assert len(ongoing) > 0 or len(upcoming) > 0, f"No events classified: ongoing={len(ongoing)} upcoming={len(upcoming)} ended={len(ended)}"
     assert "&lt;img src=x" in html and "<img src=x" not in html
-    # boss 名称：官方名 + 中文别名字段拼接渲染
-    assert "Phayze30（幻影" in html
+    # boss 名称：经 i18n.boss_cn 统一为官方简体译名（去掉迭代编号后主名展示）
+    assert "菲茨" in html
     # 状态以中文文案渲染：race 进行中 / boss 即将开始 / ct 已结束
     assert "进行中" in html and "即将开始" in html and "已结束" in html
     # 日期渲染为 YYYY-MM-DD
@@ -1037,13 +1057,21 @@ def test_prewarm_once_renders_active_leaderboards_only(monkeypatch):
     async def fake_archive(data=None):
         return None
 
+    async def fake_collect_ct(now=None):
+        return {"ev": CT_ACTIVE, "number": 1, "nk_tiles": [], "ct_tiles": {},
+                "daily_powers": [], "event_relics": [], "now": NOW}
+
     monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
     monkeypatch.setattr(btd6.collect, "collect_overview", fake_collect)
     monkeypatch.setattr(btd6.collect, "collect_leaderboard", fake_lb)
+    monkeypatch.setattr(btd6.collect, "collect_ct", fake_collect_ct)
     monkeypatch.setattr(btd6.push, "_archive_events", fake_archive)
 
     asyncio.run(btd6._prewarm_once())
-    assert rendered == ["btd6lb", "btd6lb", "btd6lb"]  # 竞赛榜 + Boss 标准榜 + CT 个人榜，无 btd6ov/btd6rule/每日
+    # 竞赛榜 + Boss 标准榜 + CT 个人榜 + CT 地图卡（总览 + 5 张显示预设图），无 btd6ov/btd6rule/每日
+    assert rendered == ["btd6lb", "btd6lb", "btd6lb", "btd6ct",
+                        "btd6ctp_default", "btd6ctp_gametypes", "btd6ctp_maps", "btd6ctp_heroes",
+                        "btd6ctp_coords"]
     assert btd6.push._prewarm_running is False
 
     # 并发保护：预热进行中再次触发直接返回
@@ -1257,6 +1285,110 @@ def test_push_daily_uses_real_prefix(monkeypatch, tmp_path):
             assert "2936" not in msg  # 高级推送不得携带标准期号
 
 
+def test_push_single_coop_sends_card(monkeypatch, tmp_path):
+    """Co-op 挑战推送：单卡推送，名称取 metadata.name；成功后独立标记 coop。"""
+    monkeypatch.setattr(btd6.push, "BTD6_PUSH_STATE_FILE", str(tmp_path / "state.json"))
+    sent = []
+
+    class _Bot:
+        async def send_group_msg(self, group_id=None, message=None, **kw):
+            sent.append(str(message))
+
+    async def fake_render(prefix, html_fn):
+        # 必须是绝对路径：Windows 下 Path("/tmp/x.png") 非绝对，as_uri() 会抛 ValueError
+        return str(tmp_path / "coop.png")
+
+    async def fake_coop():
+        return {"prefix": "每日Coop", "meta": {"name": "GreatMonkey765's Challenge"},
+                "map_img": "", "side_img": "", "scoring_cn": "固定种子",
+                "kind_label": "Co-op 挑战", "stale_note": ""}
+
+    monkeypatch.setattr(btd6.push, "get_bot", lambda: _Bot())
+    monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
+    monkeypatch.setattr(btd6.collect, "collect_daily_coop", fake_coop)
+
+    asyncio.run(btd6._btd6_push_single(
+        "coop", {"id": "coopmt2nxyem", "name": "coop - GreatMonkey765's Challenge"},
+        "coopmt2nxyem", "coop - GreatMonkey765's Challenge", {100}))
+    assert any("Co-op 挑战已刷新：GreatMonkey765's Challenge" in m for m in sent)
+    assert btd6.push._last_pushed().get("coop") == "coopmt2nxyem"  # 独立 coop 推送标记
+
+
+def test_push_coop_kind_picks_latest_created(monkeypatch, tmp_path):
+    """coop 采样：跳过未来排期条目（元数据未开放），取 createdAt ≤ 当前 的最新一期；已推送则跳过。"""
+    monkeypatch.setattr(btd6.push, "BTD6_PUSH_STATE_FILE", str(tmp_path / "state.json"))
+    seen = {}
+
+    async def fake_single(kind, ev, ev_id, label, groups):
+        seen["kind"], seen["ev_id"] = kind, ev_id
+
+    monkeypatch.setattr(btd6.push, "_btd6_push_single", fake_single)
+    monkeypatch.setattr(btd6.push, "_push_groups", lambda: {100})
+    monkeypatch.setattr(btd6.push, "get_bot", lambda: object())
+    now_ms = int(time.time() * 1000)
+    items = [
+        {"name": "Standard 9999: X", "id": "std1", "createdAt": now_ms - DAY},
+        {"name": "coop - Old", "id": "coopold", "createdAt": now_ms - 3 * DAY},
+        {"name": "coop - Current", "id": "coopcur", "createdAt": now_ms - DAY},
+        {"name": "coop - Future", "id": "coopfuture", "createdAt": now_ms + DAY},
+    ]
+
+    async def fake_fetch(url):
+        return items
+
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", fake_fetch)
+    asyncio.run(btd6.push._btd6_push_kind("coop"))
+    assert seen == {"kind": "coop", "ev_id": "coopcur"}
+
+    # 已推送过同一期：不再重发
+    monkeypatch.setattr(btd6.push, "_last_pushed", lambda: {"coop": "coopcur"})
+    seen.clear()
+    asyncio.run(btd6.push._btd6_push_kind("coop"))
+    assert seen == {}
+
+
+def test_collect_daily_coop(monkeypatch):
+    """coop 采集：prefix=每日Coop（走每日系渲染）+ kind_label；未来排期不参与选期。"""
+    meta = dict(META, name="GreatMonkey765's Challenge")
+    now_ms = int(time.time() * 1000)
+    bodies = {
+        btd6.URL_DAILY: [
+            {"name": "Standard 2944: X", "id": "rot1", "createdAt": now_ms - DAY,
+             "metadata": "https://meta/std"},
+            {"name": "coop - Old", "id": "coopold", "createdAt": now_ms - 3 * DAY,
+             "metadata": "https://meta/old"},
+            {"name": "coop - Current", "id": "coopcur", "createdAt": now_ms - DAY,
+             "metadata": "https://meta/cur"},
+            {"name": "coop - Future", "id": "coopfuture", "createdAt": now_ms + DAY,
+             "metadata": "https://meta/future"},
+        ],
+        "https://meta/cur": meta,
+    }
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(bodies))
+    # 选期纯函数：只认 name 以 coop 开头且 createdAt ≤ now 的条目，取最新一期
+    items = bodies[btd6.URL_DAILY]
+    assert btd6._coop_pick(items, now_ms)["id"] == "coopcur"
+    assert btd6._coop_pick(items, now_ms - 2 * DAY)["id"] == "coopold"
+    assert btd6._coop_pick([x for x in items if x["id"] == "coopfuture"], now_ms) is None
+    col = asyncio.run(btd6.collect_daily_coop())
+    assert col.get("prefix") == "每日Coop" and col.get("kind_label") == "Co-op 挑战"
+    assert col["meta"]["name"] == "GreatMonkey765's Challenge"
+    assert col.get("stale_note") == ""
+    # 空列表 → 空态文案
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory({btd6.URL_DAILY: []}))
+    assert asyncio.run(btd6.collect_daily_coop()) == {"empty": "暂无 Co-op 挑战数据"}
+
+
+def test_rules_html_coop_card():
+    """Co-op 卡走每日系渲染：kind_label 覆盖统计行标签，日历徽章照常使用。"""
+    col = {"prefix": "每日Coop", "meta": META, "map_img": "", "side_img": "",
+           "scoring_cn": "固定种子", "kind_label": "Co-op 挑战", "stale_note": ""}
+    html = btd6.rules_html(col)
+    assert "每日Coop" in html and "Co-op 挑战" in html
+    assert "每日挑战" not in html  # 标签被 kind_label 覆盖
+    assert "race-emblem-img" in html  # 每日系日历徽章
+
+
 def test_cooldown_release_and_ct_key():
     event = _ev(".btd6领土")
     # ct 命令使用独立冷却 key，不再与 events 共用
@@ -1277,8 +1409,8 @@ def test_translation_tables_unified():
     assert btd6.hero_cn("StrikerJones") == "琼斯"
     assert btd6.hero_cn("DanDMonke") == "丹迪猴"
     assert btd6.hero_cn("Captain Churchill") == "丘吉尔"
-    assert btd6.boss_cn("Phayze") == "幻影" == btd6.boss_cn("phayze")
-    assert btd6.boss_cn("Blastapopolous") == "爆裂魔炎"  # API 历史拼写变体
+    assert btd6.boss_cn("Phayze") == "菲茨" == btd6.boss_cn("phayze")
+    assert btd6.boss_cn("Blastapopolous") == "轰炸飞艇"  # API 历史拼写变体
     # 旧 rush 侧重复表已删除
     for gone in ("_BOSS_CN", "_TOWER_CN", "_HERO_CN"):
         assert not hasattr(btd6, gone)
@@ -1297,7 +1429,7 @@ def test_rush_card_has_data_version_footer():
            ]}}}
     html = btd6._rush_diff_html(col)
     assert "数据版本: Constants v3.0.0 · rushgen" in html
-    assert "膨胀气球神" in html  # 合并后的统一 Boss 译名（总览主路径）
+    assert "布隆纳留斯" in html  # 合并后的统一 Boss 译名（总览主路径）
 
 
 # ---------------- 2026-08-30 复查修复回归 ----------------
@@ -1588,3 +1720,209 @@ def test_asset_data_url_dedupes_inflight(monkeypatch, tmp_path):
     d1, d2 = asyncio.run(main())
     assert d1 == d2 and d1.startswith("data:image/png;base64,")
     assert calls == [url]
+# ---------------- 收集活动（instagen + 卡片/文本/命令） ----------------
+
+_CE_START = 1_788_213_600_000  # 2026-09 收集活动 mtgdqte8（游戏内截图核验用）
+_CE_END = 1_789_423_200_000
+
+
+def test_instagen_schedule_matches_game():
+    """instagen 计划表与游戏内菜单逐行核验一致（BTD6 API Explorer 算法移植）。"""
+    gen = btd6.generate_collection_schedule("mtgdqte8", _CE_START, _CE_END)
+    assert len(gen["rotations"]) == 42  # 14 天 × 每天3轮
+    # 各轮取自游戏内 Featured Insta Schedule 截图（2026/9 期）
+    assert gen["rotations"][2] == ["MonkeyVillage", "SniperMonkey", "MonkeyAce", "BeastHandler"]
+    assert gen["rotations"][3] == ["Mermonkey", "MortarMonkey", "TackShooter", "MonkeyBuccaneer"]
+    assert gen["rotations"][7] == ["Desperado", "DartMonkey", "EngineerMonkey", "SpikeFactory"]
+    assert gen["rotations"][8] == ["SpikeFactory", "BoomerangMonkey", "Skywarden", "MonkeyVillage"]
+    assert gen["rotations"][15] == ["BoomerangMonkey", "Skywarden", "MonkeyVillage", "SniperMonkey"]
+    # 轮换时刻：start + 8 小时 × 轮序
+    assert btd6.rotation_start(_CE_START, 3) == _CE_START + btd6.ROTATION_MS * 3
+
+
+def test_collectevent_collect_and_text(monkeypatch):
+    ev = {"id": "mtgdqte8", "type": "collectableEvent", "name": "A Collectables Event",
+          "start": _CE_START, "end": _CE_END}
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory({btd6.URL_EVENTS: [ev]}))
+    now = _CE_START + btd6.ROTATION_MS * 2 + 3_600_000  # 第 2 轮中段
+    col = asyncio.run(btd6.collect_collectevent(now))
+    assert not col.get("empty")
+    assert col["cur"] == 2
+    text = btd6.collectevent_text(col)
+    assert "Featured Insta" in text and "更换于" in text
+    assert "猴村、狙击猴、飞机猴、驯兽师" in text  # 当前轮（第 2 轮，含 MonkeyAce 译名）
+    assert "2026/9/1 - 2026/9/15" in text
+
+
+def test_collectevent_empty(monkeypatch):
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory({btd6.URL_EVENTS: []}))
+    col = asyncio.run(btd6.collect_collectevent())
+    assert "当前没有收集活动" in col.get("empty", "")
+
+
+def test_collectevent_card_html(monkeypatch):
+    ev = {"id": "mtgdqte8", "type": "collectableEvent", "name": "A Collectables Event",
+          "start": _CE_START, "end": _CE_END}
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory({btd6.URL_EVENTS: [ev]}))
+    col = asyncio.run(btd6.collect_collectevent(_CE_START + btd6.ROTATION_MS * 2))
+    html = btd6.collectevent_html(col)
+    assert "收集活动 · Featured Insta 计划表" in html
+    assert "2026/9/1 - 2026/9/15" in html
+    assert "更换于" in html  # 当前轮倒计时行
+    assert "结束于" in html
+    assert "instagen" in html  # 数据来源脚注
+
+
+def test_handler_collect(monkeypatch):
+    ev = {"id": "mtgdqte8", "type": "collectableEvent", "name": "A Collectables Event",
+          "start": _CE_START, "end": _CE_END}
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory({btd6.URL_EVENTS: [ev]}))
+    with pytest.raises(FinishedException):
+        asyncio.run(btd6.collect_cmd.handlers[0](_ev(".btd6收集")))
+    seg = btd6.collect_cmd.finished[-1]
+    # 测试环境渲染被禁用（_no_render），_send_card 回退文本兜底
+    assert isinstance(seg, MessageSegment) and seg.type == "text"
+    assert "Featured Insta" in str(seg)
+
+
+def test_handler_collect_empty(monkeypatch):
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory({btd6.URL_EVENTS: []}))
+    with pytest.raises(FinishedException):
+        asyncio.run(btd6.collect_cmd.handlers[0](_ev(".btd6收集")))
+    seg = btd6.collect_cmd.finished[-1]  # 空态 finish 原始字符串（与其他 handler 空态一致）
+    assert "当前没有收集活动" in str(seg)
+# ---------------- CT 领土地图（ctmap + 卡片/文本/命令） ----------------
+
+# ---------------- CT 领土地图（ctmap + 卡片/文本/命令） ----------------
+
+# ---------------- CT 领土地图（ctmap + 卡片/文本/命令） ----------------
+
+# ---------------- CT 领土地图（ctmap + 卡片/文本/命令） ----------------
+
+# ---------------- CT 领土地图（ctmap + 卡片/文本/命令） ----------------
+
+# ---------------- CT 领土地图（ctmap + 卡片/文本/命令） ----------------
+
+# ---------------- CT 领土地图（ctmap + 卡片/文本/命令） ----------------
+
+def test_ct_grid_layout():
+    """棋盘布局与 BTD6 API Explorer ct.min.js 一致：163 地图格 + 6 出生点。"""
+    grid = btd6.build_ct_grid()
+    assert len(grid["tiles"]) == 163 and len(grid["spawns"]) == 6
+    assert grid["tiles"]["MRX"] == (0, 0)
+    assert grid["tiles"]["BAG"] == (0, 1)   # 方向B 环1 步0
+    assert "FAG" not in grid["tiles"] and "FAH" in grid["tiles"]  # 出生点歧义更名
+    teams = sorted(sp["team"] for sp in grid["spawns"])
+    assert teams == ["A", "B", "C", "D", "E", "F"]
+    assert all(sp["id"] == sp["team"] + "AA" for sp in grid["spawns"])
+    for q, r in grid["tiles"].values():  # 全部落在 7 环内
+        assert max(abs(q), abs(r), abs(q + r)) <= 7
+
+
+_CT_BASE = btd6.URL_CT_EVENT_DATA.format(1)
+_CT_EV = {"id": "ctseed1", "start": NOW - DAY, "end": NOW + 6 * DAY,
+          "totalScores_player": 123, "totalScores_team": 456,
+          "tiles": "https://data.ninjakiwi.com/btd6/ct/ctseed1/tiles"}
+_CT_BODIES = {
+    btd6.URL_CT: [_CT_EV],
+    _CT_EV["tiles"]: {"id": "ctseed1", "tiles": [
+        {"id": "MRX", "type": "Regular", "gameType": "LeastCash"},
+        {"id": "AAA", "type": "TeamStart", "gameType": "LeastTiers"},
+        {"id": "AAB", "type": "Relic - Techbot", "gameType": "LeastCash"},
+    ]},
+    btd6.URL_CT_EVENT_SEEDS: [None, "ctseed1"],
+    _CT_BASE + "/tiles.json": {
+        "MRX": {"Code": "MRX", "TileType": "Regular", "RelicType": "None",
+                "GameData": {"subGameType": 8, "selectedMap": "Scrapyard",
+                             "selectedMode": "Standard", "selectedDifficulty": "Medium",
+                             "dcModel": {"startRules": {"round": 6, "endRound": 55},
+                                         "towers": {"_items": [
+                                             {"tower": "Quincy", "isHero": True, "max": 1}]}}}},
+        "AAB": {"Code": "AAB", "TileType": "Regular", "RelicType": "Techbot",
+                "GameData": {"subGameType": 4, "selectedMap": "Logs",
+                             "dcModel": {"startRules": {"round": 6, "endRound": -1},
+                                         "towers": {"_items": []}},
+                             "bossData": {"bossBloon": 0, "TierCount": 3}}},
+    },
+    _CT_BASE + "/daily_powers.json": ["MonkeyBoost"],
+    _CT_BASE + "/event_relics.json": ["Fortifried"],
+}
+
+
+def test_collect_ct_and_text(monkeypatch):
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(_CT_BODIES))
+    monkeypatch.setattr(btd6.nkapi, "fetch_json_raw", _fake_fetch_factory(_CT_BODIES))
+    col = asyncio.run(btd6.collect_ct(NOW))
+    assert not col.get("empty")
+    assert col["number"] == 1 and len(col["ct_tiles"]) == 2
+    text = btd6.ct_text(col)
+    assert "争夺领土 #1" in text and "进行中" in text
+    assert "领地 3 块" in text and "TeamStart 6" not in text  # 按主类型归并
+    assert "最少现金 1" in text and "Boss 1" in text
+    assert "猴子强化" in text and "酥脆加固" in text
+
+
+def test_ct_card_html(monkeypatch):
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(_CT_BODIES))
+    monkeypatch.setattr(btd6.nkapi, "fetch_json_raw", _fake_fetch_factory(_CT_BODIES))
+    col = asyncio.run(btd6.collect_ct(NOW))
+    html = btd6.ctmap_html(col)
+    assert "争夺领土 #1" in html and "剩余" in html
+    assert "ct-boardimg" in html and "data:image/png;base64," in html  # PIL 棋盘整图
+    assert "每日力量" in html and "btd6-ct-map" in html  # 统计页脚与来源脚注
+    from plugins.btd6.cards import ctmap as ctmap_card
+    assert ctmap_card._rounds_txt({"dcModel": {"startRules": {"round": 6, "endRound": 55}}}) == "6/55"
+    assert ctmap_card._rounds_txt({"dcModel": {"startRules": {"round": 6, "endRound": -1}},
+                                   "bossData": {"TierCount": 3}}) == "6/80+"  # Boss 格 20+20×层数
+
+
+def test_ct_preset_helpers():
+    """英雄图标选择与模式图标选择（simplifyTowerData 移植）。"""
+    one = {"dcModel": {"towers": {"_items": [
+        {"tower": "Quincy", "isHero": True, "max": 1},
+        {"tower": "DartMonkey", "isHero": False, "max": 0}]}}}
+    assert btd6.hero_icon_name(one) == "HeroIconQuincy"
+    none = {"dcModel": {"towers": {"_items": [{"tower": "DartMonkey", "isHero": False, "max": 1}]}}}
+    assert btd6.hero_icon_name(none) == "NoHeroSelected"
+    chosen = {"dcModel": {"towers": {"_items": [{"tower": "ChosenPrimaryHero", "isHero": True, "max": 1}]}}}
+    assert btd6.hero_icon_name(chosen) == "AllHeroesIcon"
+    banned = {"dcModel": {"towers": {"_items": [
+        {"tower": "Quincy", "isHero": True, "max": 0},
+        {"tower": "ChosenPrimaryHero", "isHero": True, "max": 1}]}}}
+    assert btd6.hero_icon_name(banned) == "AllHeroesIcon"  # max=0 是禁用英雄
+    assert btd6.gametype_icon({"subGameType": 2}) == ("EventRaceBtn", 0)
+    assert btd6.gametype_icon({"subGameType": 8}) == ("LeastCashIcon", 0)
+    assert btd6.gametype_icon({"subGameType": 4, "bossData": {"bossBloon": 0, "TierCount": 2}}) \
+        == ("BloonariusEventIcon", 2)
+    assert btd6.tile_type_color("Relic") == "#D621E7"
+
+
+def test_ct_preset_cards(monkeypatch):
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(_CT_BODIES))
+    monkeypatch.setattr(btd6.nkapi, "fetch_json_raw", _fake_fetch_factory(_CT_BODIES))
+    col = asyncio.run(btd6.collect_ct(NOW))
+    assert [name for name, _label in btd6.CT_PRESET_CARDS] == ["default", "gametypes", "maps", "heroes", "coords"]
+    for name, label in btd6.CT_PRESET_CARDS:
+        html = btd6.ctmap_preset_html(col, name)
+        assert f"{label} 预设" in html and "ct-boardimg" in html
+        assert "data:image/png;base64," in html
+    text = btd6.ct_preset_text(col, "heroes")
+    assert "英雄 预设" in text and "昆西×1" in text
+    text2 = btd6.ct_preset_text(col, "gametypes")
+    assert "最少现金 1" in text2 and "Boss 1" in text2
+
+
+def test_handler_ct(monkeypatch):
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(_CT_BODIES))
+    monkeypatch.setattr(btd6.nkapi, "fetch_json_raw", _fake_fetch_factory(_CT_BODIES))
+    with pytest.raises(FinishedException):
+        asyncio.run(btd6.ct_cmd.handlers[0](_ev(".btd6领土")))
+    seg = btd6.ct_cmd.finished[-1]
+    # 测试环境渲染禁用 → 文本兜底
+    assert "争夺领土 #1" in str(seg)
+
+
+def test_collect_ct_empty(monkeypatch):
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory({btd6.URL_CT: []}))
+    col = asyncio.run(btd6.collect_ct())
+    assert "当前没有争夺领土活动" in col.get("empty", "")

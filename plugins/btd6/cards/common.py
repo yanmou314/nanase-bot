@@ -547,7 +547,8 @@ body {{ width: {RACE_CARD_W}px; height: {h}px; color: #ffffff;
 
 
 def _race_ui_img(fname: str, fallback: str, cls: str) -> str:
-    url = assets._ui_asset_data_url(fname)
+    # 兼容调用方直接传 data: URL（如已解析的素材）；文件名才走本地素材解析
+    url = fname if fname.startswith("data:") else assets._ui_asset_data_url(fname)
     if url:
         return f"<img class='{cls}' src='{util._esc(url)}'/>"
     fallback_class = {

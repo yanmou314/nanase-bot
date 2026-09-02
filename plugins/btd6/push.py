@@ -126,6 +126,25 @@ async def _prewarm_once() -> None:
                     jobs.append(cards._render_card("btd6ody", lambda: cards.odyssey_diff_html(ody_col, "easy", "简单")))
             except Exception:
                 _logger.warning("BTD6 预热远征卡渲染失败", exc_info=True)
+        if util._pick_section(data.get("collectables") or [], now):
+            # 收集活动计划表（8 小时轮换 + 15 分钟桶倒计时）同桶查询可直接复用预热卡
+            try:
+                ce_col = await collect.collect_collectevent(now)
+                if not ce_col.get("empty"):
+                    jobs.append(cards._render_card("btd6col", lambda: cards.collectevent_html(ce_col)))
+            except Exception:
+                _logger.warning("BTD6 预热收集活动卡渲染失败", exc_info=True)
+        if util._pick_section(data.get("cts") or [], now):
+            # CT 地图卡：总览 + 4 张显示预设图；布局数据整周不变，预热后首查秒回
+            try:
+                ct_col = await collect.collect_ct(now)
+                if not ct_col.get("empty"):
+                    jobs.append(cards._render_card("btd6ct", lambda: cards.ctmap_html(ct_col)))
+                    for name, _label in cards.CT_PRESET_CARDS:
+                        jobs.append(cards._render_card(
+                            f"btd6ctp_{name}", lambda n=name: cards.ctmap_preset_html(ct_col, n)))
+            except Exception:
+                _logger.warning("BTD6 预热 CT 地图卡渲染失败", exc_info=True)
         # 逐张渲染并在间隔让出信号量：用户查询优先于预热渲染
         for i, job in enumerate(jobs):
             await collect._safe(job)
@@ -271,7 +290,7 @@ async def _btd6_warm_on_connect(bot=None) -> None:
 # ---------------- 活动刷新推送（群自动播报） ----------------
 BTD6_PUSH_STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
 _BTD6_PUSH_LOCK = threading.RLock()
-_BTD6_PUSH_KINDS = ("race", "boss", "ct", "odyssey", "daily", "rush")
+_BTD6_PUSH_KINDS = ("race", "boss", "ct", "odyssey", "daily", "rush", "coop")
 
 def _load_push_state() -> dict:
     return load_json_state(BTD6_PUSH_STATE_FILE, _BTD6_PUSH_LOCK)
@@ -360,6 +379,11 @@ async def _btd6_push_kind(kind: str) -> None:
         elif kind == "daily":
             items = await collect._safe(nkapi.fetch_body(nkapi.URL_DAILY)) or []
             ev = next((x for x in items if str(x.get("name") or "").startswith("Standard")), None)
+        elif kind == "coop":
+            # Co-op 挑战与每日挑战同一列表（name 以 coop 开头）；未来排期的条目
+            # 元数据未开放，只取 createdAt ≤ 当前的最新一期
+            items = await collect._safe(nkapi.fetch_body(nkapi.URL_DAILY)) or []
+            ev = collect._coop_pick(items if isinstance(items, list) else [], real_now)
         if not isinstance(ev, dict):
             return
         ev_id = str(ev.get("id") or ev.get("name") or "")
@@ -367,8 +391,8 @@ async def _btd6_push_kind(kind: str) -> None:
         if not ev_id or last.get(kind) == ev_id:
             return
         start = int(ev.get("start") or 0)
-        if kind == "daily":
-            # daily 无 start，以 id 变化即视为刷新
+        if kind in ("daily", "coop"):
+            # daily/coop 无 start，以 id 变化即视为刷新
             pass
         elif not start or not (0 <= real_now - start < window_ms):
             # 非窗口期内且非首次配置则跳过；首次配置 30 分钟内补发
@@ -485,6 +509,14 @@ async def _btd6_push_single(kind: str, ev: dict, ev_id: str, label: str, groups:
                 await asyncio.to_thread(_set_last_pushed, kind, ev_id)
                 _logger.info("BTD6 精准推送 %s %s 到 %d 群", kind, ev_id, len(groups))
             return
+        elif kind == "coop":
+            # Co-op 挑战单卡推送；名称取 metadata.name（已无 "coop - " 前缀）
+            col = await collect._safe(collect.collect_daily_coop(), "coop_push")
+            if not col or col.get("empty"):
+                return
+            path = await cards._render_card("btd6coop", lambda c=col: cards.rules_html(c))
+            coop_name = str((col.get("meta") or {}).get("name") or "").strip()
+            text = f"🤝 Co-op 挑战已刷新：{coop_name}" if coop_name else "🤝 Co-op 挑战已刷新"
         else:
             return
         sent_any = False
@@ -556,3 +588,12 @@ async def btd6_push_daily_0(): await _btd6_push_kind("daily")
 async def btd6_push_daily_5(): await _btd6_push_kind("daily")
 @scheduler.scheduled_job("cron", hour=16, minute=10, id="btd6_push_daily_10", timezone="Asia/Shanghai")
 async def btd6_push_daily_10(): await _btd6_push_kind("daily")
+
+# Co-op 挑战与每日挑战同一 16:00 CST 刷新点（每 3~4 天一期），错峰 30 秒采样；
+# 独立推送标记（last_pushed.coop），coop 变期而每日未变时也能准点推送
+@scheduler.scheduled_job("cron", hour=16, minute=0, second=30, id="btd6_push_coop_0", timezone="Asia/Shanghai")
+async def btd6_push_coop_0(): await _btd6_push_kind("coop")
+@scheduler.scheduled_job("cron", hour=16, minute=5, second=30, id="btd6_push_coop_5", timezone="Asia/Shanghai")
+async def btd6_push_coop_5(): await _btd6_push_kind("coop")
+@scheduler.scheduled_job("cron", hour=16, minute=10, second=30, id="btd6_push_coop_10", timezone="Asia/Shanghai")
+async def btd6_push_coop_10(): await _btd6_push_kind("coop")

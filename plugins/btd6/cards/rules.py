@@ -337,6 +337,8 @@ def rules_html(col: dict) -> str:
     boss_label = "首领事件" if side_img else "竞速事件"
     if is_daily:
         boss_label = "每日挑战"
+    # 收集层可用 kind_label 覆盖统计行标签（如 Co-op 挑战卡显示"Co-op 挑战"）
+    boss_label = col.get("kind_label") or boss_label
     boss_asset = assets._boss_event_asset(ev) if side_img else ""
     custom_round_sets = _custom_round_sets(meta)
 
@@ -348,7 +350,9 @@ def rules_html(col: dict) -> str:
                 f"{value_html}</div></div>")
 
     if is_daily:
-        event_icon = assets._ui_asset_data_url("daily-challenge.png") or boss_asset or "RaceIcon.png"
+        # 传文件名而非 data URL：stat() 内部经 _race_ui_img 按文件名解析，
+        # 传 data URL 会被误当文件名拒绝而落入 emoji 兜底（字体无字形 → 空白）
+        event_icon = "daily-challenge.png"
     else:
         event_icon = boss_asset or "RaceIcon.png"
     stat_left = "".join([
@@ -434,7 +438,9 @@ def rules_html(col: dict) -> str:
     monkey_h = 30 + grid_rows * 88
     mod_items = len(common._race_modifier_items(meta.get("_bloonModifiers")))
     mod_body = 18 + max(1, -(-mod_items // 2)) * 34 if mod_items else 40
-    rules_body = 62
+    # 规则面板实际高度 = 上下 padding 9×2 + 行 min-height 54 = 72；低估会把行内图标
+    # 挤到 PDF 第 2 页（pdftoppm -singlefile 只取第 1 页，图标凭空消失）
+    rules_body = 76
     bottom_h = 36 + 8 + max(mod_body, rules_body) + 10
     content_h = 28 + layout_h + 12 + monkey_h + bottom_h
     custom_panel_height = 0

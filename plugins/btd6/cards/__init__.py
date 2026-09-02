@@ -14,7 +14,7 @@ from pathlib import Path
 from common import RENDER_SEM, RENDER_TOTAL_TIMEOUT, render_html_to_png
 from nonebot.adapters.onebot.v11 import MessageSegment
 
-from . import common, leaderboard, odyssey, overview, rules, rush
+from . import common, collectevent, ctmap, leaderboard, odyssey, overview, rules, rush
 
 from .. import assets
 
@@ -34,6 +34,17 @@ from .common import (  # noqa: F401
     _rush_tower_category,
     _shell,
     _tower_cat_grad,
+)
+
+from .collectevent import (  # noqa: F401
+    collectevent_html,
+)
+
+from .ctmap import (  # noqa: F401
+    CT_PRESET_CARDS,
+    ctmap_html,
+    ctmap_preset_html,
+    ct_tile_html,
 )
 
 from .leaderboard import (  # noqa: F401
@@ -253,6 +264,12 @@ __all__ = [
     '_stat',
     '_tower_cat_grad',
     'common',
+    'collectevent',
+    'collectevent_html',
+    'ctmap',
+    'ctmap_html',
+    'ctmap_preset_html',
+    'CT_PRESET_CARDS',
     'help_html',
     'leaderboard',
     'leaderboard_html',
