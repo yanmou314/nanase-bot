@@ -10,7 +10,7 @@ from nonebot.adapters.onebot.v11 import MessageEvent, MessageSegment
 
 from common import is_owner
 
-from . import cards as cards_mod, collect, i18n, nkapi, push, textfmt, util
+from . import cards as cards_mod, collect, ctmap, i18n, nkapi, push, textfmt, util
 
 _logger = logging.getLogger(__name__)
 
@@ -109,6 +109,7 @@ help_alias_cmd = on_command("btd6帮助", priority=5, block=True)
 events_cmd = on_command("btd6活动", priority=5, block=True)
 ct_cmd = on_command("btd6领土", priority=5, block=True)
 rush_cmd = on_command("btd6冲刺", priority=5, block=True)
+collect_cmd = on_command("btd6收集", priority=5, block=True)
 lb_cmd = on_command("btd6排行", priority=5, block=True)
 rules_cmd = on_command("btd6竞速", priority=5, block=True)
 maps_cmd = on_command("btd6地图", priority=5, block=True)
@@ -158,37 +159,58 @@ async def handle_events(event: MessageEvent):
     await cards_mod._send_card(events_cmd, "btd6ov", lambda: cards_mod.overview_html(data), lambda: textfmt.overview_text(data))
 
 
+_CT_PRESET_ALIAS = {
+    "default": "default", "默认": "default",
+    "gametypes": "gametypes", "游戏类型": "gametypes", "类型": "gametypes",
+    "maps": "maps", "地图背景": "maps", "背景": "maps",
+    "heroes": "heroes", "英雄": "heroes",
+    "coords": "coords", "坐标": "coords",
+}
+
+
 @ct_cmd.handle()
 async def handle_ct(event: MessageEvent):
+    """争夺领土：无参 → 总览图；带 preset 名 → 预设图；带 tile id → 单格详情。"""
     await nkapi._enforce_cooldown(ct_cmd, event, "ct")
     try:
-        cts = await nkapi.fetch_body(nkapi.URL_CT)
-        # _pick_section 的 fallback_latest 在列表非空时恒返回 cts[0]，右侧兜底不可达
-        ev = util._pick_section(cts, util.bucket_now())
-        if not ev:
-            await ct_cmd.finish("当前没有争夺领土活动")
-        tiles = []
-        if ev.get("tiles"):
-            try:
-                tiles_data = await nkapi.fetch_body(ev["tiles"])
-                if isinstance(tiles_data, dict) and "tiles" in tiles_data:
-                    tiles = tiles_data["tiles"]
-                elif isinstance(tiles_data, list):
-                    tiles = tiles_data
-            except Exception:
-                tiles = []
-        now = util.bucket_now()
-        text = f"争夺领土 {ev.get('id')} | {util._fmt_range(ev)} | {util._STATE_TXT[util._state_of(ev, now)]} | 个人 {int(ev.get('totalScores_player') or 0):,} / 战队 {int(ev.get('totalScores_team') or 0):,} | 领地 {len(tiles)} 块"
+        col = await collect.collect_ct()
     except Exception as e:
-        # 无活动时上方 finish() 抛出的 FinishedException 不能当错误吞掉
+        # 已 finish 的异常直接抛出（回滚冷却只针对真正的失败路径，与 handle_leaderboard 一致）
         from nonebot.exception import FinishedException
         if isinstance(e, FinishedException):
             raise
         nkapi._release_cooldown(event, "ct")
         _logger.exception("BTD6 CT 获取失败")
         await ct_cmd.finish("⚠️ 获取争夺领土失败，请稍后再试")
-    # _ct_html 含本地素材读盘，移入渲染线程（html_fn 在 _render_card 的 worker 线程内执行）
-    await cards_mod._send_card(ct_cmd, "btd6ct", lambda: cards_mod._ct_html(ev, tiles, now), lambda: text)
+    if col.get("empty"):
+        await ct_cmd.finish(col["empty"])
+    raw = event.get_plaintext().strip()
+    arg = raw.split(maxsplit=1)[1].strip() if len(raw.split(maxsplit=1)) > 1 else ""
+    arg_key = arg.lower()
+    if not arg:
+        await cards_mod._send_card(ct_cmd, "btd6ct",
+                                   lambda: cards_mod.ctmap_html(col),
+                                   lambda: textfmt.ct_text(col))
+        return
+    preset_name = _CT_PRESET_ALIAS.get(arg_key)
+    if preset_name is not None:
+        await cards_mod._send_card(ct_cmd, f"btd6ctp_{preset_name}",
+                                   lambda n=preset_name: cards_mod.ctmap_preset_html(col, n),
+                                   lambda n=preset_name: textfmt.ct_preset_text(col, n))
+        return
+    # 兜底：当作 tile id（支持大写 / 小写 / 出生点 6 个）查单格
+    tile_id = arg.upper()
+    grid = ctmap.build_ct_grid()
+    spawn_ids = {sp["id"] for sp in grid["spawns"]}
+    if tile_id in grid["tiles"] or tile_id in spawn_ids:
+        await cards_mod._send_card(ct_cmd, f"btd6ct_tile_{tile_id}",
+                                   lambda t=tile_id: cards_mod.ct_tile_html(col, t),
+                                   lambda t=tile_id: textfmt.ct_tile_text(col, t))
+        return
+    valid = "、".join(f"{n}({lbl})" for n, lbl in cards_mod.CT_PRESET_CARDS)
+    await ct_cmd.finish(
+        f"⚠️ 未知参数：{arg}\n预设：{valid}\n"
+        f"或格子 id（例：DAA / AAA，共 {len(grid['tiles']) + 6} 个）")
 
 
 @rush_cmd.handle()
@@ -205,6 +227,22 @@ async def handle_rush(event: MessageEvent):
     if col.get("empty"):
         await rush_cmd.finish(col["empty"])
     await cards_mod._send_card(rush_cmd, "btd6rush", lambda: cards_mod._rush_diff_html(col), lambda: textfmt._rush_text(col))
+
+
+@collect_cmd.handle()
+async def handle_collect(event: MessageEvent):
+    """收集活动 Featured Insta 计划表（instagen 由活动种子确定性生成，模仿 handle_rush）。"""
+    await nkapi._enforce_cooldown(collect_cmd, event, "collect")
+    try:
+        col = await collect.collect_collectevent()
+    except Exception:
+        nkapi._release_cooldown(event, "collect")
+        _logger.exception("BTD6 收集活动获取失败")
+        await collect_cmd.finish("⚠️ 获取收集活动失败，请稍后再试")
+        return
+    if col.get("empty"):
+        await collect_cmd.finish(col["empty"])
+    await cards_mod._send_card(collect_cmd, "btd6col", lambda: cards_mod.collectevent_html(col), lambda: textfmt.collectevent_text(col))
 
 
 @lb_cmd.handle()
@@ -408,16 +446,15 @@ async def handle_maps(event: MessageEvent):
 @daily_cmd.handle()
 async def handle_daily(event: MessageEvent):
     await nkapi._enforce_cooldown(daily_cmd, event, "daily")
-    # 统一双版本一起发（普通+高级），忽略参数区分
+    # 统一三版本一起发（标准+高级+Coop），忽略参数区分；三次取数相互独立，并发执行
+    daily_cols = await asyncio.gather(
+        collect._safe(collect.collect_daily(False), "daily"),
+        collect._safe(collect.collect_daily(True), "daily_adv"),
+        collect._safe(collect.collect_daily_coop(), "coop"))
     cards = []
-    for adv in (False, True):
-        try:
-            c = await collect.collect_daily(adv)
-            if not c.get("empty"):
-                cards.append(("btd6dailya" if adv else "btd6daily",
-                              lambda c=c: cards_mod.rules_html(c), lambda c=c: textfmt.rules_text(c)))
-        except Exception:
-            _logger.exception("BTD6 每日挑战获取失败 adv=%s", adv)
+    for key, c in zip(("btd6daily", "btd6dailya", "btd6coop"), daily_cols):
+        if c and not c.get("empty"):
+            cards.append((key, lambda c=c: cards_mod.rules_html(c), lambda c=c: textfmt.rules_text(c)))
     if not cards:
         nkapi._release_cooldown(event, "daily")
         await daily_cmd.finish("⚠️ 获取 BTD6 每日挑战失败，请稍后再试")

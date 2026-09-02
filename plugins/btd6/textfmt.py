@@ -1,5 +1,8 @@
-"""文本渲染层：总览/排行/规则/地图/远征/玩家/Boss Rush 的纯文本输出。"""
-from . import i18n, util
+"""文本渲染层：总览/排行/规则/地图/远征/玩家/Boss Rush/收集活动/CT 的纯文本输出。"""
+from collections import Counter
+from datetime import datetime
+
+from . import ctmap, i18n, instagen, util
 
 
 # ---------------- 活动总览（文本） ----------------
@@ -50,14 +53,14 @@ def _single_event_text(ev: dict, kind: str, now_ms: int) -> list[str]:
             f"⚔️ {title}",
             f"   {util.event_status_line(ev, now_ms)}",
         ]
-    # ct
-    n_player = int(ev.get("totalScores_player") or 0)
-    n_team = int(ev.get("totalScores_team") or 0)
-    return [
-        "🏰 争夺领土（CT）",
-        f"   {util.event_status_line(ev, now_ms)}",
-        f"   👥 参与：个人 {n_player:,} · 战队 {n_team:,}",
-    ]
+    if kind == "ct":
+        n_player = int(ev.get("totalScores_player") or 0)
+        n_team = int(ev.get("totalScores_team") or 0)
+        return [
+            "🏰 争夺领土（CT）",
+            f"   {util.event_status_line(ev, now_ms)}",
+            f"   👥 参与：个人 {n_player:,} · 战队 {n_team:,}",
+        ]
     if kind == "social":
         # 社交赛季（socialseason）通常没有参与人数/描述，以名称+时间为主
         name = (ev.get("name") or "").strip() or "社交赛季"
@@ -77,6 +80,12 @@ def _single_event_text(ev: dict, kind: str, now_ms: int) -> list[str]:
             short = desc[:60] + ("…" if len(desc) > 60 else "")
             lines.append(f"   📜 {short}")
         return lines
+    # 未知类型兜底：只展示名称与时间，避免误用其他活动类型的文案
+    name = (ev.get("name") or "").strip() or "活动"
+    return [
+        f"🎈 {name}",
+        f"   {util.event_status_line(ev, now_ms)}",
+    ]
 
 
 def build_overview(
@@ -419,3 +428,180 @@ def _rush_text(col: dict) -> str:
     if note:
         lines.append(note)
     return "\n".join(lines).rstrip()
+
+
+def collectevent_text(col: dict) -> str:
+    """收集活动 Featured Insta 计划表（文本版，与卡片同一数据）。"""
+    if col.get("empty"):
+        return col["empty"]
+    ev, gen = col["ev"], col["gen"]
+    now = int(col.get("now") or 0)
+    cur = int(col.get("cur") or 0)
+    start, end = int(ev.get("start") or 0), int(ev.get("end") or 0)
+    rotations: dict = gen.get("rotations") or {}
+    total = len(rotations)
+    if now < start:
+        lines = ["🎁 收集活动 · Featured Insta 计划表（未开始）"]
+    elif now >= end:
+        lines = ["🎁 收集活动 · Featured Insta 计划表（已结束）"]
+    else:
+        lines = ["🎁 收集活动 · Featured Insta 计划表",
+                 f"剩余 {util.fmt_remaining(end - now)}（{util.fmt_time(end)} 结束）"]
+    lines.append(util._fmt_range(ev))
+    lines.append("时间均为北京时间（UTC+8），每 8 小时轮换")
+    lines.append("")
+    first = 0 if cur < 0 or cur >= total else cur
+    for idx in range(first, total):
+        towers = rotations.get(idx) or []
+        if not towers:
+            continue
+        slot_start = instagen.rotation_start(start, idx)
+        dt = datetime.fromtimestamp(slot_start / 1000, tz=util._SH)
+        when = f"{dt.year}/{dt.month}/{dt.day} {dt:%H:%M}"
+        if idx == cur and 0 <= cur < total:
+            remain = util.fmt_remaining(slot_start + instagen.ROTATION_MS - now)
+            when += f"（更换于 {remain}后）"
+        names = "、".join(i18n.tower_cn(t) for t in towers)
+        lines.append(f"  {when}  {names}")
+    note = col.get("stale_note") or ""
+    if note:
+        lines.extend(["", note])
+    return "\n".join(lines).rstrip()
+
+
+def ct_text(col: dict) -> str:
+    """争夺领土文本版：活动信息 + 格子/模式统计（地图详情见图片卡片）。"""
+    if col.get("empty"):
+        return col["empty"]
+    ev = col["ev"]
+    number = int(col.get("number") or 0)
+    now = int(col.get("now") or 0)
+    state = util._STATE_TXT[util._state_of(ev, now)]
+    lines = [
+        f"🏴 争夺领土 #{number or '?'}（{state}）",
+        f"{util._fmt_range(ev)} · 个人 {int(ev.get('totalScores_player') or 0):,} · 战队 {int(ev.get('totalScores_team') or 0):,}",
+    ]
+    if state == "on":
+        lines[0] += f" 剩余 {util.fmt_remaining(int(ev.get('end') or 0) - now)}"
+    elif state == "up":
+        lines[0] += f" {util.fmt_remaining(int(ev.get('start') or 0) - now)}后开始"
+    nk_tiles = col.get("nk_tiles") or []
+    ct_tiles = col.get("ct_tiles") or {}
+    if nk_tiles:
+        # NK tiles 的类型带后缀（如 "Relic - Techbot"），按主类型归并统计
+        type_cnt = Counter(str(t.get("type") or "?").split(" - ")[0] for t in nk_tiles if isinstance(t, dict))
+        parts = [f"{k} {v}" for k, v in type_cnt.most_common()]
+        lines.append(f"🗺 领地 {len(nk_tiles)} 块：{' · '.join(parts)}")
+    if ct_tiles:
+        mode_cnt = Counter((d.get("GameData") or {}).get("subGameType") for d in ct_tiles.values())
+        labels = {2: "竞速", 4: "Boss", 8: "最少现金", 9: "最少层数"}
+        mode_parts = [f"{labels.get(k, k)} {v}" for k, v in mode_cnt.most_common() if k is not None]
+        if mode_parts:
+            lines.append(f"⚔ 模式：{' · '.join(mode_parts)}")
+    powers = col.get("daily_powers") or []
+    if powers:
+        lines.append("⚡ 每日力量：" + "、".join(i18n._odyssey_power_name(str(p)) for p in powers[:7])
+                     + ("…" if len(powers) > 7 else ""))
+    relics = col.get("event_relics") or []
+    if relics:
+        lines.append("💎 本期遗物池：" + "、".join(i18n._RELIC_CN.get(str(r), str(r)) for r in relics))
+    if not ct_tiles:
+        lines.append("（地图布局数据暂缺，仅显示 NK 官方摘要）")
+    note = col.get("stale_note") or ""
+    if note:
+        lines.extend(["", note])
+    return "\n".join(lines)
+
+
+_CT_PRESET_CN = {"default": "默认", "gametypes": "游戏类型", "maps": "地图背景", "heroes": "英雄", "coords": "坐标"}
+
+
+def ct_preset_text(col: dict, name: str) -> str:
+    """CT 显示预设卡的文本兜底（图片发送失败时）。"""
+    ct_tiles = col.get("ct_tiles") or {}
+    number = int(col.get("number") or 0)
+    label = _CT_PRESET_CN.get(name, name)
+    lines = [f"🏴 争夺领土 #{number or '?'} · {label} 预设（Display Presets）"]
+    if name == "gametypes":
+        cnt = Counter()
+        for d in ct_tiles.values():
+            sub = (d.get("GameData") or {}).get("subGameType")
+            if sub is not None:
+                cnt[sub] += 1
+        parts = [f"{lab} {cnt.get(sub, 0)}" for sub, lab in
+                 ((8, "最少现金"), (9, "最少层数"), (2, "竞速"), (4, "Boss")) if cnt.get(sub)]
+        if parts:
+            lines.append("模式分布：" + " · ".join(parts))
+    elif name == "heroes":
+        hero_cnt = Counter()
+        for d in ct_tiles.values():
+            hero_cnt[ctmap.hero_icon_name(d.get("GameData") or {})] += 1
+        parts = []
+        for icon, n in hero_cnt.most_common(8):
+            if icon.startswith("HeroIcon"):
+                parts.append(f"{i18n.hero_cn(icon[len('HeroIcon'):])}×{n}")
+            elif icon == "NoHeroSelected":
+                parts.append(f"未限定 {n}")
+            else:
+                parts.append(f"自选/全体 {n}")
+        if parts:
+            lines.append("英雄限定：" + " · ".join(parts))
+    lines.append("（本条为降级文本，完整地图请见图片）")
+    return "\n".join(lines)
+
+
+def ct_tile_text(col: dict, tile_id: str) -> str:
+    """CT 单格详情文本（图片发送失败时使用）。"""
+    if col.get("empty"):
+        return col["empty"]
+    grid = ctmap.build_ct_grid()
+    ct_tiles = col.get("ct_tiles") or {}
+    if tile_id not in grid["tiles"]:
+        return f"未找到格子 {tile_id}（共 {len(grid['tiles']) + 6} 个有效 id）"
+    data = ct_tiles.get(tile_id) or {}
+    gd = data.get("GameData") or {}
+    rules = (gd.get("dcModel") or {}).get("startRules") or {}
+    r0 = int(rules.get("round") or 0)
+    r1 = rules.get("endRound")
+    if r1 is None:
+        rounds_txt = f"{r0}/?"
+    elif int(r1) < 0:
+        tier = int(((gd.get("bossData") or {}).get("TierCount")) or 0)
+        rounds_txt = f"{r0}/{20 + 20 * tier}+"
+    else:
+        rounds_txt = f"{r0}/{int(r1)}"
+    tile_type = str(data.get("TileType") or "Regular")
+    relic = str(data.get("RelicType") or "None")
+
+    sub = gd.get("subGameType")
+    boss = gd.get("bossData") or {}
+    if sub == 4 and boss:
+        idx = int(boss.get("bossBloon") or 0)
+        boss_name = ctmap.BOSSES_IN_ORDER[idx] if 0 <= idx < len(ctmap.BOSSES_IN_ORDER) else "Boss"
+        tier = int(boss.get("TierCount") or 0)
+        mode = f"Boss {boss_name}" + (f" T{tier}" if tier else "")
+    else:
+        mode = ctmap.GAMETYPE_CN.get(sub, "标准")
+    lines = [
+        f"🏴 争夺领土 · 格子 {tile_id}",
+        f"模式：{mode}",
+        f"回合：{rounds_txt}",
+        f"地图：{gd.get('selectedMap') or '未指定'}",
+    ]
+    if tile_type == "Banner":
+        lines.append("格子类型：CT积分（旗帜）")
+    if relic != "None":
+        lines.append(f"遗物：{i18n._RELIC_CN.get(relic, relic)}")
+    heroes = ctmap.tile_heroes(gd)
+    if heroes:
+        if any(h == "ChosenPrimaryHero" for h in heroes):
+            lines.append("英雄：队长自选")
+        else:
+            lines.append("英雄：" + "、".join(i18n.hero_cn(h) for h in dict.fromkeys(heroes)))
+    else:
+        icon_name = ctmap.hero_icon_name(gd)
+        if icon_name == "NoHeroSelected":
+            lines.append("英雄：无限定")
+        elif icon_name == "AllHeroesIcon":
+            lines.append("英雄：自选/全体")
+    return "\n".join(lines)

@@ -28,6 +28,9 @@ URL_ODYSSEY = f"{API_ROOT}/btd6/odyssey"
 URL_EVENTS = f"{API_ROOT}/btd6/events"
 URL_RUSH = f"{API_ROOT}/btd6/bossRush"
 URL_USERS = f"{API_ROOT}/btd6/users/"
+# CT 社区数据集（BTD6 API Explorer 同源只读桶）：期数映射与逐格地图/模式/遗物布局
+URL_CT_EVENT_SEEDS = "https://storage.googleapis.com/btd6-ct-map/event-seeds.json"
+URL_CT_EVENT_DATA = "https://storage.googleapis.com/btd6-ct-map/events/{}"
 
 DEFAULT_ROWS = 10  # 排行榜/地图列表默认条数
 MAX_ROWS = 100     # 条数上限（竞赛每页50、Boss/CT每页25，自动分页拉取至请求数）
@@ -45,7 +48,7 @@ MAX_STALE_ITEMS = 256
 MAX_JSON_MEM_BYTES = 32_000_000   # JSON body 内存字节预算：按 _cache 键求和，超限从 _cache 最旧淘汰（连带 _stale/旁路字典）
 
 
-URL_HOSTS = {"data.ninjakiwi.com", "static-api.nkstatic.com"}
+URL_HOSTS = {"data.ninjakiwi.com", "static-api.nkstatic.com", "storage.googleapis.com"}
 REQUEST_LIMIT = asyncio.Semaphore(8)
 
 
@@ -289,6 +292,65 @@ async def fetch_body(url: str):
         _inflight[url] = task
         task.add_done_callback(lambda t, u=url: _inflight.pop(u, None) if _inflight.get(u) is t else None)
     return await task
+
+
+async def _refresh_raw_url(url: str) -> None:
+    """非 NK 信封端点的后台刷新（SWR 语义与 _refresh_url 一致）。"""
+    if url in _refreshing:
+        return
+    _refreshing.add(url)
+    try:
+        r = await _http_get(url, 20)
+        r.raise_for_status()
+        if len(r.content or b"") > MAX_JSON_BYTES:
+            raise ValueError("BTD6 API 响应过大")
+        _cache_put(url, r.json())
+    except Exception:
+        fails = _refresh_fail_counts.get(url, 0) + 1
+        _refresh_fail_counts[url] = fails
+        _logger.warning("数据端点后台刷新失败（保留旧缓存） url=%s 连续失败 %d 次", url, fails, exc_info=True)
+    else:
+        _refresh_fail_counts.pop(url, None)
+    finally:
+        _refreshing.discard(url)
+
+
+async def fetch_json_raw(url: str):
+    """GET 一个返回裸 JSON 的端点（如 GCS 社区数据集），返回解析后的数据。
+
+    与 fetch_body 共用缓存/SWR/在途去重基建，但不做 NK success 信封检查——
+    响应整体视为 body 写缓存。"""
+    _validate_url(url)
+    hit = _cache_get(url)
+    if hit is not None:
+        return hit
+    with _cache_lock:
+        stale = _stale.get(url)
+        if stale is not None:
+            _stale.move_to_end(url)
+    if stale is not None:
+        with _cache_lock:
+            _stale_served.add(url)
+        task = asyncio.create_task(_refresh_raw_url(url))
+        _refresh_tasks.add(task)
+        task.add_done_callback(_refresh_tasks.discard)
+        return stale
+    task = _inflight.get(url)
+    if task is None:
+        task = asyncio.create_task(_fetch_json_raw_remote(url))
+        _inflight[url] = task
+        task.add_done_callback(lambda t, u=url: _inflight.pop(u, None) if _inflight.get(u) is t else None)
+    return await task
+
+
+async def _fetch_json_raw_remote(url: str):
+    r = await _http_get(url, 20)
+    r.raise_for_status()
+    if len(r.content or b"") > MAX_JSON_BYTES:
+        raise ValueError("BTD6 API 响应过大")
+    data = r.json()
+    _cache_put(url, data)
+    return data
 
 
 async def _fetch_body_remote(url: str):

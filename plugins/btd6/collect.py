@@ -2,8 +2,9 @@
 import asyncio
 import logging
 import re
+import time
 
-from . import assets, i18n, nkapi, rushgen, util
+from . import assets, ctmap, i18n, instagen, nkapi, rushgen, util
 
 _logger = logging.getLogger(__name__)
 
@@ -22,25 +23,21 @@ async def _safe(coro, tag: str = ""):
 
 async def collect_overview(now_ms: int | None = None) -> dict:
     now = now_ms if now_ms is not None else util.bucket_now()
-    races, bosses, cts, odysseys, rush_events, social_events, collectable_events = await asyncio.gather(
+    races, bosses, cts, odysseys, events_body = await asyncio.gather(
         nkapi.fetch_body(nkapi.URL_RACES), nkapi.fetch_body(nkapi.URL_BOSSES), nkapi.fetch_body(nkapi.URL_CT),
         _safe(nkapi.fetch_body(nkapi.URL_ODYSSEY)),
-        _safe(nkapi.fetch_body(nkapi.URL_EVENTS)),
-        _safe(nkapi.fetch_body(nkapi.URL_EVENTS)),
         _safe(nkapi.fetch_body(nkapi.URL_EVENTS)),
     )
     # odysseys 可能为 None（网络失败）或非列表
     if not isinstance(odysseys, list):
         odysseys = []
     # NK /btd6/events 一次性返回 race/boss/ct/odyssey/rush/socialseason/collectableEvent 等
-    # 多种活动，按 type 字段拆分；三次重复请求是 asyncio.gather 的特性（gather 同一 coroutine
-    # 会拆成多个 future 并发拉，所以不会真的发三次 HTTP）。
+    # 多种活动，按 type 字段拆分；rush/socials/collectables 三类同源，单次请求即可。
     rush = []
     socials = []
     collectables = []
-    if isinstance(rush_events, list):
-        # nkapi.fetch_body 恒返回解包后的 body 列表，dict 信封分支不可达
-        for ev in rush_events:
+    if isinstance(events_body, list):
+        for ev in events_body:
             if not isinstance(ev, dict):
                 continue
             t = str(ev.get("type") or "").strip()
@@ -219,6 +216,21 @@ def _daily_prefix(label: str, advanced: bool) -> str:
     return f"{kind}·第{issue}期" if issue.isdigit() else kind
 
 
+async def _challenge_map_img(meta: dict, tag: str) -> str:
+    """挑战类卡片地图图：优先开放 API 的 mapURL（按钮图），缺失/下载失败回退本地素材。"""
+    raw_map_url = str(meta.get("mapURL") or "").strip()
+    map_img = ""
+    if raw_map_url:
+        map_img = await _safe(assets._asset_data_url(raw_map_url), tag) or ""
+    if not map_img:
+        fallback_map = str(meta.get("map") or "").strip()
+        if fallback_map:
+            map_img = await _safe(assets._game_asset_data_url(f"MapSelect{fallback_map}Button.webp"), tag + "_fallback") or ""
+            if not map_img:
+                map_img = await _safe(assets._asset_data_url(f"MapSelect{fallback_map}Button.png"), tag + "_fallback2") or ""
+    return map_img or ""
+
+
 async def collect_daily(advanced: bool) -> dict:
     items = await nkapi.fetch_body(nkapi.URL_DAILY)
     if not isinstance(items, list):  # 非 list 响应按空数据处理，走既有失败文案
@@ -228,20 +240,42 @@ async def collect_daily(advanced: bool) -> dict:
     if not ev:
         return {"empty": "暂无每日挑战数据"}
     meta = await nkapi.fetch_body(ev["metadata"])
-    # 地图：优先用开放 API 的 mapURL（按钮图），缺失/下载失败则回退用 map 名拼本地素材
-    raw_map_url = str(meta.get("mapURL") or "").strip()
-    map_img = ""
-    if raw_map_url:
-        map_img = await _safe(assets._asset_data_url(raw_map_url), "daily_map") or ""
-    if not map_img:
-        fallback_map = str(meta.get("map") or "").strip()
-        if fallback_map:
-            map_img = await _safe(assets._game_asset_data_url(f"MapSelect{fallback_map}Button.webp"), "daily_map_fallback") or ""
-            if not map_img:
-                map_img = await _safe(assets._asset_data_url(f"MapSelect{fallback_map}Button.png"), "daily_map_fallback2") or ""
     return {
         "prefix": _daily_prefix(str(ev.get("name") or ""), advanced),
-        "meta": meta, "map_img": map_img or "", "side_img": "", "scoring_cn": "固定种子",
+        "meta": meta, "map_img": await _challenge_map_img(meta, "daily_map"),
+        "side_img": "", "scoring_cn": "固定种子",
+        "stale_note": nkapi._stale_warn(nkapi.URL_DAILY, ev.get("metadata") or ""),
+    }
+
+
+def _coop_pick(items: list, now_ms: int) -> dict | None:
+    """Coop 挑战选期（与 BTD6 API Explorer 口径一致）：name 以 coop 开头的条目里，
+    只考虑 createdAt ≤ 当前的（未来排期的条目元数据未开放，信封返回 error），取最新一期。"""
+    created = [x for x in items
+               if isinstance(x, dict) and str(x.get("name") or "").startswith("coop")
+               and int(x.get("createdAt") or 0) <= now_ms]
+    if not created:
+        return None
+    return max(created, key=lambda x: int(x.get("createdAt") or 0))
+
+
+async def collect_daily_coop() -> dict:
+    """Co-op 挑战：与每日挑战共用 /btd6/challenges/filter/daily 接口（name 以 "coop - " 开头）。
+
+    NK 不为 coop 提供起止时间与期号，前缀用"每日Coop"（rules_html 按"每日"前缀
+    走每日系渲染：日历徽章 + 全塔总览网格）；展示名取 metadata.name（已无 coop 前缀）。
+    """
+    items = await nkapi.fetch_body(nkapi.URL_DAILY)
+    if not isinstance(items, list):  # 非 list 响应按空数据处理，走既有失败文案
+        items = []
+    ev = _coop_pick(items, int(time.time() * 1000))
+    if not ev:
+        return {"empty": "暂无 Co-op 挑战数据"}
+    meta = await nkapi.fetch_body(ev["metadata"])
+    return {
+        "prefix": "每日Coop", "meta": meta,
+        "map_img": await _challenge_map_img(meta, "coop_map"),
+        "side_img": "", "scoring_cn": "固定种子", "kind_label": "Co-op 挑战",
         "stale_note": nkapi._stale_warn(nkapi.URL_DAILY, ev.get("metadata") or ""),
     }
 
@@ -535,3 +569,71 @@ async def collect_rush() -> dict:
             "hero": "ChosenPrimaryHero" if hero == "ChosenPrimaryHero" else (hero or ""),
             "stale_note": nkapi._stale_warn(nkapi.URL_EVENTS),
             "diffs": {"default": {"meta": {"isExtreme": False}, "maps": islands}}}
+
+
+async def collect_collectevent(now_ms: int | None = None) -> dict:
+    """收集活动 Featured Insta 计划表。
+
+    NK 开放 API 只提供 collectableEvent 的起止时间；每 8 小时一轮的 Featured
+    Insta 名单由 instagen 从活动 ID 种子确定性生成（与游戏内菜单一致）。
+    优先取进行中的场次，其次下一场，最后最近一场。
+    """
+    now = now_ms if now_ms is not None else util.bucket_now()
+    events = await nkapi.fetch_body(nkapi.URL_EVENTS)
+    cands = [e for e in events if isinstance(e, dict) and e.get("type") == "collectableEvent"]
+    ev = util.pick_active(cands, now) or util.pick_next(cands, now) or util.fallback_latest(cands)
+    if not ev:
+        return {"empty": "当前没有收集活动（约两个月一轮，开始前约一周上线计划表）"}
+    start = int(ev.get("start") or 0)
+    end = int(ev.get("end") or 0)
+    gen = instagen.generate_collection_schedule(str(ev.get("id") or ""), start, end)
+    # 当前轮序（活动未开始时为 -1，渲染层从第 0 轮列起）
+    cur = (now - start) // instagen.ROTATION_MS if now >= start else -1
+    return {"ev": ev, "gen": gen, "now": now, "cur": cur,
+            "stale_note": nkapi._stale_warn(nkapi.URL_EVENTS)}
+
+
+async def collect_ct(now_ms: int | None = None) -> dict:
+    """争夺领土：NK 活动摘要 + tiles 布局 + 社区数据集（期数/逐格地图/模式/遗物）。
+
+    NK 开放 API 的 /btd6/ct 与 /tiles 只有格子 id/类型/模式，无地图与期数；
+    地图布局取自 btd6-ct-map 社区数据集（BTD6 API Explorer CT 页同源，
+    event-seeds.json 的下标即期数）。数据集缺失时降级为纯 NK 数据（无地图页）。
+    """
+    now = now_ms if now_ms is not None else util.bucket_now()
+    cts = await nkapi.fetch_body(nkapi.URL_CT)
+    ev = util.pick_active(cts, now) or util.pick_next(cts, now) or util.fallback_latest(cts)
+    if not ev:
+        return {"empty": "当前没有争夺领土活动"}
+    ev_id = str(ev.get("id") or "")
+    seeds = await _safe(nkapi.fetch_json_raw(nkapi.URL_CT_EVENT_SEEDS), "ct_seeds")
+    number = 0
+    if isinstance(seeds, list):
+        for idx, seed in enumerate(seeds):
+            if seed == ev_id:
+                number = idx
+                break
+    nk_tiles: list = []
+    if ev.get("tiles"):
+        body = await _safe(nkapi.fetch_body(ev["tiles"]), "ct_tiles")
+        if isinstance(body, dict):
+            nk_tiles = body.get("tiles") or []
+        elif isinstance(body, list):
+            nk_tiles = body
+    ct_tiles: dict = {}
+    daily_powers: list = []
+    event_relics: list = []
+    if number:
+        base = nkapi.URL_CT_EVENT_DATA.format(number)
+        layout = await _safe(nkapi.fetch_json_raw(f"{base}/tiles.json"), "ct_layout")
+        if isinstance(layout, dict):
+            ct_tiles = layout
+        powers = await _safe(nkapi.fetch_json_raw(f"{base}/daily_powers.json"), "ct_powers")
+        if isinstance(powers, list):
+            daily_powers = powers
+        relics = await _safe(nkapi.fetch_json_raw(f"{base}/event_relics.json"), "ct_relics")
+        if isinstance(relics, list):
+            event_relics = relics
+    return {"ev": ev, "number": number, "nk_tiles": nk_tiles, "ct_tiles": ct_tiles,
+            "daily_powers": daily_powers, "event_relics": event_relics,
+            "now": now, "stale_note": nkapi._stale_warn(nkapi.URL_CT)}

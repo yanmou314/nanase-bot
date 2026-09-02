@@ -4,11 +4,12 @@
 HELP_GROUPS = [
     ("活动", [
         (".btd6活动", "当前竞赛/Boss/争夺领土/远征总览（三段式）"),
-        (".btd6每日", "今日每日挑战（标准+高级一起返回）"),
+        (".btd6每日", "今日每日挑战（标准+高级+Coop 一起返回）"),
         (".btd6竞速 [竞赛|boss]", "竞赛/Boss 活动规则详情（Boss 标准+精英一起返回）"),
         (".btd6远征", "当前远征 Odyssey"),
-        (".btd6领土", "争夺领土详情"),
+        (".btd6领土", "争夺领土详情（六边形领土地图）"),
         (".btd6冲刺", "Boss Rush 冲刺"),
+        (".btd6收集", "收集活动 Featured Insta 计划表（每8小时轮换4种）"),
     ]),
     ("排行与档案", [
         (".btd6排行 竞赛|boss|领土 [P页码|排名]", "排行榜：默认前50；P2=第2页；数字=该名次玩家档案（Boss双榜/领土双榜自动返回）"),
@@ -21,11 +22,12 @@ HELP_GROUPS = [
 
 HELP_TEXT = """🐒 BTD6 情报站（气球塔防6）
 .btd6活动 — 当前竞赛/Boss/争夺领土/远征总览（三段式：进行中/即将开始/已结束）
-.btd6每日 — 今日每日挑战（标准+高级一起返回）
+.btd6每日 — 今日每日挑战（标准+高级+Coop 一起返回）
 .btd6竞速 [竞赛|boss] — 竞赛/Boss 活动规则详情（Boss 标准+精英一起返回；领土暂无通用规则）
 .btd6远征 — 当前远征活动
-.btd6领土 — 争夺领土详情
+.btd6领土 — 争夺领土详情（六边形领土地图：逐格地图/模式/遗物/出生点）
 .btd6冲刺 — Boss Rush 冲刺
+.btd6收集 — 收集活动 Featured Insta 计划表（每8小时轮换4种精选即时猴）
 .btd6排行 竞赛|boss|领土 [P页码|排名] — 排行榜：默认前50；P2=第2页；数字=该名次玩家档案（Boss标准+精英、领土个人+战队一起返回）
 .btd6玩家 <ID> — 玩家档案（排行榜链接末尾的长串十六进制）
 .btd6地图 最新|热门|点赞 [数量] — 自制地图榜单
@@ -72,6 +74,7 @@ TOWER_CN = {
     "DartMonkey": "飞镖猴", "BoomerangMonkey": "回旋镖猴", "BombShooter": "炸弹射手",
     "TackShooter": "钉子射手", "IceMonkey": "冰猴", "GlueGunner": "胶水枪手",
     "SniperMonkey": "狙击猴", "MonkeySub": "潜艇猴", "MonkeyBuccaneer": "海盗猴",
+    "MonkeyAce": "飞机猴",
     "HeliPilot": "直升机猴", "MortarMonkey": "迫击炮猴", "DartlingGunner": "连发枪手",
     "WizardMonkey": "巫师猴", "SuperMonkey": "超级猴", "NinjaMonkey": "忍者猴",
     "Alchemist": "炼金术士", "Druid": "德鲁伊", "BananaFarm": "香蕉农场",
@@ -193,6 +196,7 @@ _EVENT_NAME_CN = {
     "A Boss Event": "Boss 战活动",
     "A Race Event": "竞速活动",
     "An Odyssey Event": "远征活动",
+    "A Collectables Event": "收集活动",
 }
 
 
