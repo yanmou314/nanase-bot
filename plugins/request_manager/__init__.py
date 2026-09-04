@@ -498,6 +498,23 @@ async def _send_decision_notice(bot: Bot, message: str) -> None:
 async def _process_decision(bot: Bot, event: MessageEvent, action: bool) -> None:
     _purge_pending()
     if not _pending:
+        if action:
+            try:
+                from plugins import bnet_verify as _bv
+                _lst = getattr(_bv, "list_verify_pending", None)
+                _pend = _lst() if callable(_lst) else {}
+            except Exception:
+                _pend = {}
+            if len(_pend) == 1:
+                _fn = getattr(_bv, "approve_verify_by_qq", None)
+                if callable(_fn):
+                    _ok, _notice = await _fn(bot, next(iter(_pend)))
+                    await _send_decision_notice(bot, _notice)
+                    return
+            if len(_pend) > 1:
+                await _send_decision_notice(
+                    bot, "⚠️ 战网验证有多个待审批（QQ：{}），请用 .同意 QQ号 指定处理".format("、".join(sorted(_pend))))
+                return
         await _send_decision_notice(bot, "📭 当前没有待处理的申请")
         return
 
@@ -536,9 +553,16 @@ async def _process_decision(bot: Bot, event: MessageEvent, action: bool) -> None
             if len(_pending) == 1:
                 target_key = next(iter(_pending))
             else:
+                try:
+                    from plugins import bnet_verify as _bv2
+                    _lst2 = getattr(_bv2, "list_verify_pending", None)
+                    _n2 = len(_lst2() or {}) if callable(_lst2) else 0
+                except Exception:
+                    _n2 = 0
+                _extra = f"\n另有 {_n2} 个战网验证待审批，用 .同意 QQ号 处理" if _n2 else ""
                 await _send_decision_notice(
                     bot,
-                    "⚠️ 有多个待处理申请，请回复时引用机器人发来的申请通知消息来指定处理哪一个",
+                    "⚠️ 有多个待处理申请，请回复时引用机器人发来的申请通知消息来指定处理哪一个" + _extra,
                 )
                 return
 

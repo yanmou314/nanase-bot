@@ -1,9 +1,9 @@
 """入群验证（战网 ID）：主人按群开启后自动核验加群申请。
 
 流程：群设置验证问题（如"请填写你的战网ID"），申请人填写的答案会随申请的
-comment 到达；本插件把附言整体作为战网ID，调用 overstats
-（/api/v2/dashen-profile）查询守望先锋档案——查到即自动通过，查不到则拒绝
-并告知战网ID不正确；查询服务异常时申请保持待处理并私聊通知主人转人工。
+comment 到达；本插件把附言整体作为战网ID，经 owstats 中继向查询机器人
+发送“/大神数据 ID”——收到图片即自动通过；收不到图片（超时/报错）则不拒绝，
+保持待处理并私聊通知主人转人工，主人回复 .同意 QQ号 即可通过并自动改名片+绑定。
 
 通过后自动：把新成员的群名片改为战网ID（成员进群后异步重试），并把
 QQ 与战网ID写入 owstats 的绑定表（进群即可直接使用 .战报/.总结 等命令）。
@@ -15,27 +15,25 @@ QQ 与战网ID写入 owstats 的绑定表（进群即可直接使用 .战报/.�
 """
 
 import asyncio
+import json
 import os
+import re
 import threading
+import time
 
-from nonebot import logger, on_command, on_request
+from nonebot import get_bot, get_driver, logger, on_command, on_request
 from nonebot.adapters.onebot.v11 import Bot, GroupRequestEvent, Message, MessageSegment
 from nonebot.params import CommandArg
 
 from common import (
     OWNER,
-    get_http_client,
     is_owner,
     load_json_state,
     save_json_state_async,
 )
 
-API = os.getenv("OW_API_BASE", "http://127.0.0.1:18080")
 STATE_FILE = os.path.join(os.path.dirname(__file__), "groups.json")
 _STATE_LOCK = threading.RLock()
-
-# 单次核验超时：申请人不在线等待，稍长无妨；上游有 2 并发/4 排队的队列
-VERIFY_TIMEOUT = 60.0
 
 # 通过后设置群名片的重试间隔（秒）：审批通过到成员实际进群有几秒延迟
 CARD_RETRY_DELAYS = (3, 5, 5, 5, 5)
@@ -55,34 +53,131 @@ def is_managed_group(group_id: int) -> bool:
     return str(group_id) in (_load_state().get("groups") or [])
 
 
+_TAG_ANSWER_RE = re.compile(r"答案\s*[:：]\s*([^\s@#＃]+#\d+)")
+_TAG_ANY_RE = re.compile(r"([^\s@#＃]+#\d+)")
+
+
 def clean_join_answer(comment: str) -> str:
-    """申请附言即为战网ID本体，不做任何提取：仅裁剪首尾空白并把全角#归一。"""
-    return (comment or "").replace("＃", "#").strip()
+    """从申请附言中只提取战网ID（附言常连带验证问题，如“问题：…\n答案：名字#123”）。
+    优先取“答案：”后的 ID，否则取首个“名字#数字”；没有则返回空串。"""
+    text = (comment or "").replace("＃", "#").strip()
+    m = _TAG_ANSWER_RE.search(text)
+    if m:
+        return m.group(1)
+    m = _TAG_ANY_RE.search(text)
+    if not m:
+        return ""
+    tag = m.group(1)
+    # 兜底：“问题：答案”连在一起且没有“答案：”标记时，取最后一个冒号之后
+    #（战网ID 本身不可能含中英文冒号）
+    if "：" in tag:
+        tag = tag.rsplit("：", 1)[1]
+    if ":" in tag:
+        tag = tag.rsplit(":", 1)[1]
+    return tag
 
 
-async def query_overwatch_profile(tag: str) -> dict:
-    """查询守望先锋档案。返回 {"status": "found"|"not_found"|"error", ...}。"""
-    client = get_http_client(VERIFY_TIMEOUT)
+_VERIFY_FILE = os.path.join(os.path.dirname(__file__), "verify_state.json")
+_verify_pending: dict = {}  #申请人QQ(str) -> {flag, sub_type, group_id, tag, comment, ts}
+_verify_active: dict = {}  #申请人QQ(str) -> 同上（已提交中继、待图片期间）
+
+
+def _load_verify_state() -> dict:
     try:
-        r = await client.post(
-            f"{API}/api/v2/dashen-profile",
-            json={"bnet_id": tag},
-            timeout=VERIFY_TIMEOUT,
-        )
-    except Exception as exc:
-        return {"status": "error", "error": repr(exc)}
+        with open(_VERIFY_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except (FileNotFoundError, OSError, ValueError):
+        pass
+    return {}
+
+
+async def _save_verify_state() -> None:
     try:
-        data = r.json()
+        await save_json_state_async(
+            _VERIFY_FILE, {"pending": _verify_pending, "active": _verify_active})
     except Exception:
-        return {"status": "error", "error": f"上游响应非JSON（HTTP {r.status_code}）"}
-    if not isinstance(data, dict):
-        return {"status": "error", "error": "上游返回格式异常"}
-    if data.get("ok"):
-        return {"status": "found"}
-    code = str(data.get("error") or "")
-    if code in ("bnet_not_found", "missing_target"):
-        return {"status": "not_found"}
-    return {"status": "error", "error": code or f"HTTP {r.status_code}"}
+        logger.warning("[bnet_verify] 验证状态落盘失败", exc_info=True)
+
+
+def _restore_verify_state() -> None:
+    try:
+        data = _load_verify_state()
+        for k, v in (data.get("pending") or {}).items():
+            if isinstance(v, dict):
+                _verify_pending.setdefault(str(k), v)
+        for k, v in (data.get("active") or {}).items():
+            if isinstance(v, dict):
+                _verify_active.setdefault(str(k), v)
+    except Exception:
+        logger.warning("[bnet_verify] 验证状态恢复失败", exc_info=True)
+
+
+_restore_verify_state()
+
+
+@get_driver().on_startup
+async def _report_interrupted_verifies() -> None:
+    """重启导致中断的在途验证：延迟通知主人去客户端查看（记录仍保留，可 .同意）。"""
+    if not _verify_active:
+        return
+    await asyncio.sleep(60)
+    if not _verify_active:
+        return
+    lines = []
+    for qq, rec in list(_verify_active.items()):
+        if isinstance(rec, dict):
+            lines.append(f"群{rec.get('group_id')} QQ{qq}（{rec.get('tag')}）")
+    if not lines:
+        return
+    try:
+        bot = get_bot()
+        await bot.send_private_msg(
+            user_id=int(OWNER),
+            message=MessageSegment.text(
+                "⚠️ 以下入群验证因机器人重启而中断（申请仍在QQ侧挂起）：\n"
+                + "\n".join(lines)
+                + "\n如对方已进群请忽略；否则请在QQ客户端手动处理，或等对方重申请后用 .同意 QQ号 处理"))
+    except Exception:
+        logger.warning("[bnet_verify] 中断通知发送失败", exc_info=True)
+
+
+def _remember_verify_pending(uid: str, rec: dict) -> None:
+    now = time.time()
+    for k in [k for k, v in _verify_pending.items()
+              if now - float(v.get("ts") or 0) > 24 * 3600]:
+        _verify_pending.pop(k, None)
+    _verify_pending[uid] = rec
+
+
+async def _relay_verify_profile(tag: str, timeout: int = 180, active_key: str = ""):
+    """经 owstats 中继向对方机器人查大神数据。返回 (has_image, segs)，绝不抛异常。"""
+    try:
+        from plugins.owstats import submit_relay_task
+    except Exception:
+        logger.warning("[bnet_verify] owstats 中继不可用", exc_info=True)
+        return (False, [])
+    try:
+        fut = await submit_relay_task("verify", tag, text=f" /大神数据 {tag}", timeout=timeout)
+    except Exception:
+        logger.warning("[bnet_verify] 提交中继任务失败", exc_info=True)
+        return (False, [])
+    if active_key:
+        _verify_active[active_key] = {"tag": tag, "ts": time.time()}
+        await _save_verify_state()
+    try:
+        segs, has_image = await asyncio.wait_for(fut, timeout + 10)
+        return (bool(has_image), list(segs or []))
+    except asyncio.TimeoutError:
+        return (False, [])
+    except Exception:
+        logger.warning("[bnet_verify] 等待中继结果失败", exc_info=True)
+        return (False, [])
+    finally:
+        if active_key and active_key in _verify_active:
+            _verify_active.pop(active_key, None)
+            await _save_verify_state()
 
 
 async def _notify_owner(bot: Bot, text: str) -> None:
@@ -155,11 +250,11 @@ async def _handle_group_join(bot: Bot, event: GroupRequestEvent) -> None:
     if not tag:
         await _reject(
             bot, event,
-            "战网ID不能为空：请填写你的战网ID（形如 昵称#12345）后重新申请",
+            "未能识别战网ID：请填写你的战网ID（形如 昵称#12345）后重新申请",
         )
         return
-    result = await query_overwatch_profile(tag)
-    if result["status"] == "found":
+    has_image, relay_segs = await _relay_verify_profile(tag)
+    if has_image:
         try:
             await bot.set_group_add_request(
                 flag=event.flag, sub_type=event.sub_type, approve=True
@@ -182,24 +277,26 @@ async def _handle_group_join(bot: Bot, event: GroupRequestEvent) -> None:
             + MessageSegment.text(f"\n🔗 {bind_note}\n🏷 群名片将自动改为战网ID"),
         )
         return
-    if result["status"] == "not_found":
-        await _reject(
-            bot, event,
-            f"战网ID不正确：未查询到 {tag} 的守望先锋成绩，"
-            "请核对名字大小写和 # 后面的数字后重新申请",
-        )
-        return
-    # 查询服务异常：不盲目通过/拒绝，保持待处理并转人工
+    _remember_verify_pending(str(event.user_id), {
+        "flag": event.flag, "sub_type": event.sub_type,
+        "group_id": gid, "tag": tag, "comment": comment, "ts": time.time(),
+    })
+    await _save_verify_state()
     logger.warning(
-        f"[bnet_verify] 群 {gid} 验证查询失败（{result.get('error')}），"
-        f"申请转人工 user={event.user_id}"
+        f"[bnet_verify] 群 {gid} 验证未收到图片结果，转人工 user={event.user_id} tag={tag}"
     )
+    show = [seg for seg in (relay_segs or []) if seg.type in ("image", "text")]
     await _notify_owner(
         bot,
-        MessageSegment.text(f"⚠️ 入群验证服务异常，申请待人工处理\n🏘 群号：{gid}\n👤 QQ：{event.user_id}\n💬 附言：")
-        + MessageSegment.text(comment[:200])  # 申请人可控内容，防 CQ 码注入
-        + MessageSegment.text(f"\n❓ 原因：{result.get('error')}"),
+        MessageSegment.text(f"⚠️ 入群验证待人工审批（对方查询无图片结果，未自动拒绝）\n🏘 群号：{gid}\n👤 申请人QQ：{event.user_id}\n🎮 战网ID：")
+        + MessageSegment.text(tag)
+        + MessageSegment.text(f"\n💬 附言：{comment[:200]}\n✅ 通过请回复：.同意 {event.user_id}"),
     )
+    if show:
+        try:
+            await _notify_owner(bot, Message(show))
+        except Exception:
+            pass
 
 
 verify_matcher = on_request(priority=1, block=False)
@@ -210,6 +307,57 @@ async def handle_join_request(bot: Bot, event):
     if not isinstance(event, GroupRequestEvent) or event.sub_type not in ("add", "apply"):
         return
     await _handle_group_join(bot, event)
+
+
+def list_verify_pending() -> dict:
+    """待审批快照 {QQ: rec}（供 request_manager 裸回同意桥接）。"""
+    return {str(k): v for k, v in _verify_pending.items() if isinstance(v, dict)}
+
+
+async def approve_verify_by_qq(bot, target_qq: str):
+    """通过指定 QQ 的战网验证待审批（含改名片+绑定）。返回 (handled, notice文本)。"""
+    target = "".join(ch for ch in str(target_qq or "") if ch.isdigit())
+    rec = _verify_pending.get(target)
+    if not rec or not isinstance(rec, dict):
+        return (False,
+                f"没有 QQ {target} 的待审批入群申请（可能已处理，或机器人重启后记录丢失，可在QQ客户端手动处理）")
+    gid, uid, tag = rec.get("group_id"), rec.get("user_id"), rec.get("tag", "")
+    try:
+        uid_int = int(uid)
+    except (TypeError, ValueError):
+        uid_int = 0
+    try:
+        await bot.set_group_add_request(
+            flag=rec.get("flag"), sub_type=rec.get("sub_type", "add"), approve=True)
+    except Exception:
+        _verify_pending.pop(target, None)
+        await _save_verify_state()
+        return (True,
+                f"自动通过失败（申请可能已过期），请在QQ客户端手动处理 群{gid} QQ{target}")
+    _verify_pending.pop(target, None)
+    await _save_verify_state()
+    logger.info(f"[bnet_verify] 群 {gid} 主人手动通过 {uid}（战网ID {tag}）")
+    bound = _auto_bind(uid_int, tag) if uid_int else False
+    try:
+        if uid_int:
+            _schedule_card(bot, gid, uid_int, tag)
+    except Exception:
+        pass
+    bind_note = "已自动绑定ID" if bound else "自动绑定失败（owstats 不可用）"
+    return (True,
+            f"✅ 已通过 群{gid} QQ{target}（{tag}），群名片与绑定已自动处理：{bind_note}")
+
+
+agree_cmd = on_command("同意", priority=5, block=True)
+
+
+@agree_cmd.handle()
+async def agree_join(bot: Bot, event, arg: Message = CommandArg()):
+    if not is_owner(event):
+        await agree_cmd.finish("仅主人可用")
+        return
+    _ok, notice = await approve_verify_by_qq(bot, arg.extract_plain_text())
+    await agree_cmd.finish(MessageSegment.text(notice))
 
 
 # ---------------- 主人开关 ----------------

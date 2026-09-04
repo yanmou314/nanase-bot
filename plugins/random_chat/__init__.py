@@ -139,6 +139,8 @@ async def _generate_reply(gid: int) -> str:
 @watcher.handle()
 async def watch(bot: Bot, event: GroupMessageEvent):
     gid = event.group_id
+    if gid == 864213945:  # OW 任务中继群：保持静默，不插话
+        return
     text = event.get_plaintext().strip()
     if not text or (_COMMAND_START and text.startswith(_COMMAND_START)):
         return

@@ -1,31 +1,41 @@
 import asyncio
 import json
 import os
+import re
 import threading
 import time
-from pathlib import Path
 
-import httpx
-from nonebot import get_driver, logger, on_command
-from nonebot.adapters.onebot.v11 import Message, MessageEvent, MessageSegment
+from nonebot import get_bot, logger, on_command, on_message
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageEvent, MessageSegment
 from nonebot.params import CommandArg
 
-from common import at_prefix, close_http_clients, get_http_client, parse_tag, save_image_async, save_json_state
+from common import at_prefix, parse_tag, save_json_state
 
 try:
     from nonebot_plugin_apscheduler import scheduler
-except ImportError:  # 测试 stub 环境缺依赖时跳过定时预热
+except ImportError:  # 测试 stub 环境缺依赖时跳过定时任务
     scheduler = None
 
-# 上游数据服务（overstats）地址，可用环境变量覆盖
-API = os.getenv("OW_API_BASE", "http://127.0.0.1:18080")
-CACHE = os.path.join(os.path.dirname(__file__), "cache")
 BIND_FILE = os.path.join(os.path.dirname(__file__), "bindings.json")
 MAINTENANCE_FILE = os.path.join(os.path.dirname(__file__), "maintenance.json")
 _LOCK = threading.RLock()
-OW_LOCK = asyncio.Lock()
 
-# Maintenance mode: when enabled, all OW queries return maintenance message and warmup is skipped
+# ---- 任务中继模式：本机不再直调 overstats API ----
+RELAY_GROUP_ID = 864213945
+RELAY_BOT_QQ = 3889045090
+TASK_TIMEOUT = 180
+TASK_MAX_PENDING = 20
+TASK_CMD_TEXT = {
+    "matchrep": "/大神对局",
+    "rankhist": "/历史段位",
+    "strength": "/快速强度指数",
+    "summary": "/今日总结",
+}
+
+# 对方机器人的纯文本进度提示（不含图片）：只忽略，不消费任务
+_PROGRESS_RE = re.compile("正在生成|正在查询|正在分析|正在处理|排队|请稍候|请稍等|等待片刻|查询中|生成中")
+
+# Maintenance mode: when enabled, all OW queries return maintenance message
 MAINTENANCE_MSG = "OW\u63a5\u53e3\u6b63\u5728\u7ef4\u62a4\u4e2d\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\uff5e"
 
 def _is_maintenance() -> bool:
@@ -39,10 +49,6 @@ def _is_maintenance() -> bool:
 def _set_maintenance(enabled: bool) -> None:
     save_json_state(MAINTENANCE_FILE, {"enabled": bool(enabled), "updated": int(time.time())}, _LOCK)
 
-# 总结各档位的超时预算：上游有 5 请求/秒的硬限速，一次总结要几十上百次请求，
-# 冷缓存时仅限速排队就要 20-30 秒，预算必须盖住冷查询（预热只是缓解、不能保证全热）
-SUMMARY_TIMEOUTS = {"today": 75, "yesterday": 90, "week": 180}
-
 matchrep_cmd = on_command("战报", aliases={"战绩图", "report"}, priority=5, block=True)
 rankhist_cmd = on_command("段位", aliases={"段位历史", "rank"}, priority=5, block=True)
 strength_cmd = on_command("强度", aliases={"强度分析", "strength"}, priority=5, block=True)
@@ -54,15 +60,6 @@ maintenance_cmd = on_command("ow\u7ef4\u62a4", aliases={"OW\u7ef4\u62a4", "ow\u5
 
 
 _bind_cache: dict | None = None
-
-
-@get_driver().on_shutdown
-async def _close_http() -> None:
-    await close_http_clients()
-
-
-def _http():
-    return get_http_client(timeout=120)
 
 
 def _load_bindings() -> dict:
@@ -112,102 +109,190 @@ def _get_bound(uid: str) -> str:
         return _load_bindings().get(uid, "")
 
 
-# ---------------- 后台预热 ----------------
-WARMUP_ENABLED = os.getenv("OW_WARMUP", "1").strip().lower() not in {"0", "false", "no", "off"}
-WARMUP_DETAIL_MATCHES = 20  # 预取最近 N 局详情（详情缓存 TTL 30 分钟，查询直接命中）
-WARMUP_GAP_SECONDS = 20  # 玩家间隔，避免挤占上游 5 请求/秒共享配额
+# ---------------- 任务中继（串行：同时只跑 1 个任务） ----------------
+_task_seq = 0
+_task_queue: list = []  # 等待派发的任务 FIFO
+_task_current = None  # 正在对方机器人处执行的任务
 
 
-async def _warmup_player(tag: str) -> bool:
-    """调用 overstats 预热接口：暖玩家解析/对局列表/详情/天气缓存，不做图片渲染。"""
+def _task_kind_label(kind: str) -> str:
+    return {"matchrep": "战报", "rankhist": "段位", "strength": "强度", "summary": "总结"}.get(kind, kind)
+
+
+async def _dispatch_next() -> None:
+    """无在途任务且队列非空时，派发下一个任务到中继群。"""
+    global _task_current
+    if _task_current is not None or not _task_queue:
+        return
+    task = _task_queue.pop(0)
+    task["t0"] = time.monotonic()
     try:
-        data = await _post_json(
-            "/api/v2/dashen-summary/warmup",
-            {"bnet_id": tag, "detail_matches": WARMUP_DETAIL_MATCHES},
-            timeout=180,
+        bot = get_bot()
+    except Exception:
+        _task_queue.insert(0, task)
+        logger.warning("owstats 任务派发失败：拿不到 Bot 实例")
+        return
+    text = task.get("text") or (" {} {}".format(TASK_CMD_TEXT.get(task["kind"], ""), task["tag"]))
+    try:
+        ret = await bot.send_group_msg(
+            group_id=RELAY_GROUP_ID,
+            message=MessageSegment.at(RELAY_BOT_QQ) + MessageSegment.text(text),
         )
-    except Exception as e:
-        logger.warning(f"owstats 预热 {tag} 请求失败（{e!r}）")
-        return False
-    if not data.get("ok"):
-        logger.info(f"owstats 预热 {tag} 未执行：{data.get('error') or data.get('message')}")
-        return False
-    logger.info(
-        f"owstats 预热 {tag} 完成：列表 {data.get('match_count')} 局 / "
-        f"详情 {data.get('detail_count')} 局 / 天气 {data.get('weather_count')} 局"
-    )
-    return True
+        task["task_msg_id"] = (ret or {}).get("message_id") if isinstance(ret, dict) else None
+    except Exception:
+        _task_queue.insert(0, task)
+        logger.warning("owstats 任务派发失败", exc_info=True)
+        if str(task.get("group_id")) == "864213945":
+            return
+        try:
+            if task.get("group_id"):
+                await bot.send_group_msg(
+                    group_id=int(task["group_id"]),
+                    message=MessageSegment.at(int(task["user_id"])) + MessageSegment.text("任务派发失败，请稍后再试～"))
+            else:
+                await bot.send_private_msg(user_id=int(task["user_id"]), message=MessageSegment.text("任务派发失败，请稍后再试～"))
+        except Exception:
+            pass
+        return
+    _task_current = task
+    logger.info(f"owstats 已派发任务 #{task['seq']}（{task['kind']} {task['tag']}）")
+
+
+async def _enqueue_task(kind: str, tag: str, group_id, user_id: str, matcher, event) -> None:
+    """入队并尝试派发；先回复排队位置。"""
+    global _task_seq
+    if len(_task_queue) >= TASK_MAX_PENDING:
+        await matcher.finish(at_prefix(event) + Message("排队任务太多，请稍后再试～"))
+    _task_seq += 1
+    _task_queue.append({"seq": _task_seq, "kind": kind, "tag": tag,
+                        "group_id": group_id, "user_id": user_id, "t0": 0.0})
+    waiting = len(_task_queue) - 1 + (1 if _task_current is not None else 0)
+    label = _task_kind_label(kind)
+    if str(getattr(event, "group_id", None)) != "864213945":
+        if waiting <= 0:
+            await matcher.send(at_prefix(event) + MessageSegment.text(f"已提交{label}查询（{tag}），正在派发给查询机器人..."))
+        else:
+            await matcher.send(at_prefix(event) + MessageSegment.text(f"已提交{label}查询（{tag}），前面还有 {waiting} 个任务，完成後转发给你～"))
+    await _dispatch_next()
+
+
+# priority=4：必须排在 auto_chat(to_me, priority=5, block=True) 之前，
+# 否则对方机器人每条带@的消息都会先被 auto_chat 吃掉拦截，本监听器永远看不到
+async def submit_relay_task(kind: str, tag: str, text=None, timeout=None):
+    """供其他插件提交中继任务（串行，共用对方机器人）。
+
+    text 缺省时按 kind 查 TASK_CMD_TEXT；timeout 缺省 TASK_TIMEOUT。
+    返回 asyncio.Future，值为 (segs|None, has_image)；超时 segs 为 None。
+    """
+    global _task_seq
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    _task_seq += 1
+    _task_queue.append({"seq": _task_seq, "kind": kind, "tag": tag,
+                        "text": text, "future": fut,
+                        "timeout": timeout or TASK_TIMEOUT,
+                        "group_id": None, "user_id": "", "t0": 0.0})
+    await _dispatch_next()
+    return fut
+
+
+relay_listener = on_message(priority=4, block=False)
+
+
+@relay_listener.handle()
+async def _relay_result(bot: Bot, event: MessageEvent):
+    """监听中继群里查询机器人的回复，去掉@自身后转发给原群/原用户（串行，无需任务ID关联）。"""
+    global _task_current
+    if not isinstance(event, GroupMessageEvent):
+        return
+    if event.group_id != RELAY_GROUP_ID or str(event.user_id) != str(RELAY_BOT_QQ):
+        return
+    if _task_current is None:
+        logger.info("owstats 中继群收到非任务结果，已忽略")
+        return
+    has_image = False
+    for _seg in event.message:
+        if _seg.type == "image":
+            has_image = True
+            break
+    if not has_image and _PROGRESS_RE.search(event.message.extract_plain_text()):
+        logger.info("owstats 中继群收到进度提示，已忽略")
+        return
+    task = _task_current
+    _task_current = None
+    if str(task.get("group_id")) == "864213945":
+        logger.info("owstats 结果已在中继群内可见，跳过转回")
+        await _dispatch_next()
+        return
+    try:
+        self_id = str(bot.self_id)
+    except Exception:
+        self_id = ""
+    segs = []
+    for seg in event.message:
+        if seg.type == "at" and (str(seg.data.get("qq", "")) == self_id or seg.data.get("qq") == "all"):
+            continue
+        segs.append(seg)
+    elapsed = time.monotonic() - task["t0"] if task.get("t0") else 0.0
+    fut = task.get("future")
+    if fut is not None:
+        if not fut.done():
+            fut.set_result((segs, has_image))
+        await _dispatch_next()
+        return
+    if not segs:
+        body = MessageSegment.text("对方机器人返回了空结果，请重试～")
+    else:
+        body = Message(segs) + MessageSegment.text(f"\n用时 {elapsed:.1f}s")
+    try:
+        if str(task["user_id"]).isdigit():
+            target_at = MessageSegment.at(int(task["user_id"]))
+        else:
+            target_at = MessageSegment.text("")
+        if task.get("group_id"):
+            await bot.send_group_msg(group_id=int(task["group_id"]), message=target_at + body)
+        else:
+            await bot.send_private_msg(user_id=int(task["user_id"]), message=body)
+    except Exception:
+        logger.warning("owstats 结果转发失败", exc_info=True)
+    await _dispatch_next()
 
 
 if scheduler is not None:
-    @scheduler.scheduled_job("cron", minute="7", hour="9-23/2", id="owstats_warmup", timezone="Asia/Shanghai")
-    async def _warmup_bound_players():
-        """白天每两小时预热所有绑定玩家，让 .总结 查询尽量命中缓存。
-
-        预热期间用户查询会收到"正忙+预计时长"提示（见 _warmup_busy_notice），
-        不与预热共享并发槽和上游 5 请求/秒配额。
-        """
-        if not WARMUP_ENABLED:
+    @scheduler.scheduled_job("cron", minute="*", id="owstats_task_sweep", timezone="Asia/Shanghai", max_instances=1)
+    async def _task_sweep():
+        """每分钟清理超时的在途任务并派发下一个。"""
+        global _task_current
+        if _task_current is None:
+            await _dispatch_next()
             return
-        if _is_maintenance():
-            logger.info("owstats \u7ef4\u62a4\u6a21\u5f0f\u5df2\u5f00\u542f\uff0c\u8df3\u8fc7\u9884\u70ed")
+        if time.monotonic() - (_task_current.get("t0") or 0.0) < (_task_current.get("timeout") or TASK_TIMEOUT):
             return
-        tags = sorted(set(_load_bindings().values()))
-        if not tags:
+        task = _task_current
+        _task_current = None
+        logger.warning(f"owstats 任务 #{task['seq']} 超时")
+        fut = task.get("future")
+        if fut is not None:
+            if not fut.done():
+                fut.set_result((None, False))
+            await _dispatch_next()
             return
-        logger.info(f"owstats 开始预热 {len(tags)} 个绑定玩家")
-        _warmup_state["busy"] = True  # 先亮正忙标志再逐个玩家抢锁，压缩用户查询与预热抢跑的窗口
+        if str(task.get("group_id")) == "864213945":
+            await _dispatch_next()
+            return
         try:
-            for idx, tag in enumerate(tags):
-                _warmup_state["deadline"] = time.time() + (len(tags) - idx) * WARMUP_PER_PLAYER_BUDGET
-                if OW_LOCK.locked():  # 有用户查询正在跑，本轮让位（与原语义一致）
-                    logger.info("owstats 预热检测到用户查询进行中，本轮中止")
-                    return
-                # 抢到锁并全程持有到该玩家预热结束：上游请求绝不与用户查询并发挤占 5 请求/秒配额。
-                # 即使上面检查后恰有用户查询抢先拿到锁，这里也只会排队等它完成，而不是并发执行。
-                async with OW_LOCK:
-                    await _warmup_player(tag)
-                await asyncio.sleep(WARMUP_GAP_SECONDS)
-        finally:
-            _warmup_state["busy"] = False
-
-
-async def _post_json(path: str, payload: dict, timeout: float = 90.0):
-    r = await _http().post(f"{API}{path}", json=payload, timeout=timeout)
-    if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
-        return {"_image": True, "bytes": r.content, "content_type": r.headers["content-type"]}
-    try:
-        data = r.json()
-    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
-        return {"ok": False, "message": f"上游服务异常（HTTP {r.status_code}）"}
-    return data if isinstance(data, dict) else {"ok": False, "message": "上游返回格式异常"}
-
-
-async def _post_json_with_notice(matcher, at: Message, notice: str, path: str, payload: dict,
-                                 timeout: float = 90.0, remind_after: float = 30.0):
-    done = asyncio.Event()
-
-    async def reminder():
-        try:
-            await asyncio.wait_for(done.wait(), timeout=remind_after)
-        except asyncio.TimeoutError:
-            try:
-                # notice 含用户输入的 tag（防 CQ 码注入）：外部文本一律 MessageSegment.text 包裹后发送
-                await matcher.send(at + MessageSegment.text(f"⏳ {notice}（已等待 {int(remind_after)} 秒，数据量较大请再耐心等待...）"))
-            except Exception:
-                pass
-
-    rem = asyncio.create_task(reminder())
-    try:
-        return await _post_json(path, payload, timeout)
-    finally:
-        done.set()
-        if not rem.done():
-            rem.cancel()
-        try:
-            await rem
-        except asyncio.CancelledError:
+            bot = get_bot()
+            if str(task["user_id"]).isdigit():
+                msg = MessageSegment.at(int(task["user_id"])) + MessageSegment.text("查询超时（超过3分钟），请稍后再试～")
+            else:
+                msg = MessageSegment.text("查询超时（超过3分钟），请稍后再试～")
+            if task.get("group_id"):
+                await bot.send_group_msg(group_id=int(task["group_id"]), message=msg)
+            else:
+                await bot.send_private_msg(user_id=int(task["user_id"]), message=msg)
+        except Exception:
             pass
+        await _dispatch_next()
 
 
 def _resolve_tag(arg: Message, event: MessageEvent) -> tuple[str, bool]:
@@ -240,83 +325,6 @@ def _check_cooldown(uid: str) -> float:
     return 0.0
 
 
-# 预热状态：预热进行中时用户查询直接提示稍后再试，而不是与预热共享并发槽/上游限速。
-# deadline 到点自动视为空闲，即使预热任务异常退出也不会永久"正忙"。
-_warmup_state = {"busy": False, "deadline": 0.0}
-WARMUP_PER_PLAYER_BUDGET = 45  # 单玩家预热+间隔的耗时估算（秒），用于向用户报 ETA
-
-
-def _warmup_remaining() -> float:
-    if not _warmup_state["busy"]:
-        return 0.0
-    return max(0.0, _warmup_state["deadline"] - time.time())
-
-
-def _warmup_busy_notice() -> str:
-    """预热进行中返回带预计等待时长的提示，空闲返回空串。"""
-    remain = _warmup_remaining()
-    if remain <= 0:
-        return ""
-    if remain >= 60:
-        return f"机器人正在后台预热数据，约 {int(remain // 60) + 1} 分钟后完成，请稍后再试～"
-    return f"机器人正在后台预热数据，约 {int(remain) + 1} 秒后完成，请稍后再试～"
-
-
-# 排队上限：全局查询锁同一时刻只处理 1 个查询，最多再排 _QUEUE_MAX_WAITERS 个；
-# 满员直接提示稍后再试，防止查询无限堆积把渲染队列堵死
-_QUEUE_MAX_WAITERS = 3
-_queue_waiters = 0
-
-
-async def _wait_queue(matcher, event: MessageEvent) -> None:
-    """排队等待全局查询锁；排队满员时提示稍后再试并结束本次查询（不排队）。
-
-    等待名额在进入队列前同步扣减（事件循环内原子），不再依赖 locked() 检查与
-    acquire 之间「恰好没有 await」的窗口；用户提示统一由抢到锁之后各 handler
-    发送的「正在生成/查询」消息承担，提示与实际开始处理严格对应，无漏发竞态。
-    满员被拒时退还 handler 已记的查询冷却：用户没有实际查询，不应白吃 10 秒冷却。
-    """
-    global _queue_waiters
-    if _queue_waiters >= _QUEUE_MAX_WAITERS:
-        _last_query.pop(str(event.user_id), None)
-        await matcher.finish(at_prefix(event) + Message("⏳ 查询排队已满，请稍后再试～"))
-    _queue_waiters += 1
-    try:
-        await OW_LOCK.acquire()
-    finally:
-        _queue_waiters -= 1
-
-
-def _done(matcher_msg: Message, at: Message, elapsed: float) -> Message:
-    return at + matcher_msg + Message(f"\n⏱ 用时 {elapsed:.1f}s")
-
-
-def _friendly_error(data: dict, scope: str = "") -> str:
-    code = data.get("error") or ""
-    msg = data.get("message") or ""
-    if code == "summary_empty":
-        empty_texts = {
-            "today": "该玩家在过去 24 小时内没有对局记录，暂时无法生成总结～",
-            "yesterday": "该玩家昨日没有对局记录，暂时无法生成总结～",
-            "week": "该玩家在过去 7 天内没有对局记录，暂时无法生成总结～",
-        }
-        return empty_texts.get(scope) or "该玩家近期没有对局记录，暂时无法生成总结～"
-    if code == "bnet_not_found":
-        details = data.get("details") if isinstance(data.get("details"), dict) else {}
-        query = str(details.get("query") or "").strip()
-        target = f"「{query}」" if query else "该 ID"
-        return f"没找到 {target}，请检查名字大小写和 # 后面的数字是否正确～"
-    if code == "missing_target":
-        return "缺少查询 ID：请带上 名字#数字，或先用 .绑定 绑定自己的 ID"
-    if code == "too_many_requests":
-        return "现在查询的人有点多，请稍等几秒再试～"
-    if code == "summary_busy":
-        return "总结正在生成中，请稍后再试～"
-    if code and not msg:
-        return f"查询失败：{code}"
-    return msg or "未知错误"
-
-
 # ---------------- 绑定 ----------------
 @bind_cmd.handle()
 async def bind(event: MessageEvent, arg: Message = CommandArg()):
@@ -346,7 +354,6 @@ async def myid(event: MessageEvent):
 # ---------------- 战报 ----------------
 @matchrep_cmd.handle()
 async def match_report(event: MessageEvent, arg: Message = CommandArg()):
-    t0 = time.monotonic()
     at = at_prefix(event)
     tag, bad_id = _resolve_tag(arg, event)
     if bad_id:
@@ -355,37 +362,12 @@ async def match_report(event: MessageEvent, arg: Message = CommandArg()):
         await matchrep_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.战报 名字#数字")
     if _is_maintenance():
         await matchrep_cmd.finish(at + MessageSegment.text(MAINTENANCE_MSG))
-    busy = _warmup_busy_notice()
-    if busy:
-        await matchrep_cmd.finish(at + busy)
-    remain = _check_cooldown(str(event.user_id))
-    if remain > 0:
-        await matchrep_cmd.finish(at + f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～")
-    await _wait_queue(matchrep_cmd, event)
-    try:
-        await matchrep_cmd.send(at + MessageSegment.text(f"⏳ 正在生成 {tag} 的战绩图..."))
-        try:
-            data = await _post_json_with_notice(matchrep_cmd, at, f"正在生成 {tag} 的战绩图",
-                                                "/api/v2/dashen-match/replies", {"bnet_id": tag, "limit": 5}, timeout=90)
-        except httpx.HTTPError:
-            await matchrep_cmd.finish(at + "查询失败：请求超时，请稍后再试")
-        if not data.get("ok"):
-            await matchrep_cmd.finish(at + MessageSegment.text(_friendly_error(data)))
-        segments = []
-        for rep in data.get("replies") or []:
-            if rep.get("type") == "image" and rep.get("base64"):
-                segments.append(MessageSegment.image("base64://" + rep["base64"]))
-        if not segments:
-            await matchrep_cmd.finish(at + "没有生成战绩图，请稍后再试")
-        await matchrep_cmd.finish(_done(Message(segments), at, time.monotonic() - t0))
-    finally:
-        OW_LOCK.release()
+    await _enqueue_task("matchrep", tag, getattr(event, "group_id", None), str(event.user_id), matchrep_cmd, event)
 
 
 # ---------------- 段位历史 ----------------
 @rankhist_cmd.handle()
 async def rank_history(event: MessageEvent, arg: Message = CommandArg()):
-    t0 = time.monotonic()
     at = at_prefix(event)
     tag, bad_id = _resolve_tag(arg, event)
     if bad_id:
@@ -394,32 +376,12 @@ async def rank_history(event: MessageEvent, arg: Message = CommandArg()):
         await rankhist_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.段位 名字#数字")
     if _is_maintenance():
         await rankhist_cmd.finish(at + MessageSegment.text(MAINTENANCE_MSG))
-    busy = _warmup_busy_notice()
-    if busy:
-        await rankhist_cmd.finish(at + busy)
-    remain = _check_cooldown(str(event.user_id))
-    if remain > 0:
-        await rankhist_cmd.finish(at + f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～")
-    await _wait_queue(rankhist_cmd, event)
-    try:
-        await rankhist_cmd.send(at + MessageSegment.text(f"⏳ 正在查询 {tag} 的段位历史..."))
-        try:
-            data = await _post_json_with_notice(rankhist_cmd, at, f"正在查询 {tag} 的段位历史",
-                                                "/api/v2/dashen-rank-history/image", {"bnet_id": tag}, timeout=120)
-        except httpx.HTTPError:
-            await rankhist_cmd.finish(at + "查询失败：请求超时，请稍后再试")
-        if data.get("_image") and isinstance(data.get("bytes"), bytes):
-            path = await save_image_async(data["bytes"], data["content_type"], "rank", CACHE)
-            await rankhist_cmd.finish(_done(Message(MessageSegment.image(Path(path).as_uri())), at, time.monotonic() - t0))
-        await rankhist_cmd.finish(at + MessageSegment.text(_friendly_error(data)))
-    finally:
-        OW_LOCK.release()
+    await _enqueue_task("rankhist", tag, getattr(event, "group_id", None), str(event.user_id), rankhist_cmd, event)
 
 
 # ---------------- 强度分析 ----------------
 @strength_cmd.handle()
 async def strength(event: MessageEvent, arg: Message = CommandArg()):
-    t0 = time.monotonic()
     at = at_prefix(event)
     tag, bad_id = _resolve_tag(arg, event)
     if bad_id:
@@ -428,32 +390,12 @@ async def strength(event: MessageEvent, arg: Message = CommandArg()):
         await strength_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.强度 名字#数字")
     if _is_maintenance():
         await strength_cmd.finish(at + MessageSegment.text(MAINTENANCE_MSG))
-    busy = _warmup_busy_notice()
-    if busy:
-        await strength_cmd.finish(at + busy)
-    remain = _check_cooldown(str(event.user_id))
-    if remain > 0:
-        await strength_cmd.finish(at + f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～")
-    await _wait_queue(strength_cmd, event)
-    try:
-        await strength_cmd.send(at + MessageSegment.text(f"⏳ 正在分析 {tag} 的强度..."))
-        try:
-            data = await _post_json_with_notice(strength_cmd, at, f"正在分析 {tag} 的强度",
-                                                "/api/v2/dashen-quick-strength/image", {"bnet_id": tag, "limit": 12}, timeout=120)
-        except httpx.HTTPError:
-            await strength_cmd.finish(at + "查询失败：请求超时，请稍后再试")
-        if data.get("_image") and isinstance(data.get("bytes"), bytes):
-            path = await save_image_async(data["bytes"], data["content_type"], "strength", CACHE)
-            await strength_cmd.finish(_done(Message(MessageSegment.image(Path(path).as_uri())), at, time.monotonic() - t0))
-        await strength_cmd.finish(at + MessageSegment.text(_friendly_error(data)))
-    finally:
-        OW_LOCK.release()
+    await _enqueue_task("strength", tag, getattr(event, "group_id", None), str(event.user_id), strength_cmd, event)
 
 
 # ---------------- 每日总结 ----------------
 @summary_cmd.handle()
 async def summary(event: MessageEvent, arg: Message = CommandArg()):
-    t0 = time.monotonic()
     at = at_prefix(event)
     parts = arg.extract_plain_text().split()
     scope = "today"
@@ -474,28 +416,10 @@ async def summary(event: MessageEvent, arg: Message = CommandArg()):
         await summary_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.总结 名字#数字")
     if _is_maintenance():
         await summary_cmd.finish(at + MessageSegment.text(MAINTENANCE_MSG))
-    busy = _warmup_busy_notice()
-    if busy:
-        await summary_cmd.finish(at + busy)
-    remain = _check_cooldown(str(event.user_id))
-    if remain > 0:
-        await summary_cmd.finish(at + f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～")
-    await _wait_queue(summary_cmd, event)
-    try:
-        timeout = SUMMARY_TIMEOUTS.get(scope, SUMMARY_TIMEOUTS["today"])
-        labels = {"today": "今日", "yesterday": "昨日", "week": "本周"}
-        await summary_cmd.send(at + MessageSegment.text(f"⏳ 正在生成 {tag} 的{labels[scope]}总结，数据量大请稍候..."))
-        try:
-            data = await _post_json_with_notice(summary_cmd, at, f"正在生成 {tag} 的{labels[scope]}总结",
-                                                f"/api/v2/dashen-summary/{scope}/image", {"bnet_id": tag}, timeout=timeout)
-        except httpx.HTTPError:
-            await summary_cmd.finish(at + "生成失败：超时，请稍后再试")
-        if data.get("_image") and isinstance(data.get("bytes"), bytes):
-            path = await save_image_async(data["bytes"], data["content_type"], "summary", CACHE)
-            await summary_cmd.finish(_done(Message(MessageSegment.image(Path(path).as_uri())), at, time.monotonic() - t0))
-        await summary_cmd.finish(at + MessageSegment.text(_friendly_error(data, scope)))
-    finally:
-        OW_LOCK.release()
+    if scope != "today":
+        await summary_cmd.finish(at + MessageSegment.text("对方查询机器人暂只支持今日总结～"))
+    await _enqueue_task("summary", tag, getattr(event, "group_id", None), str(event.user_id), summary_cmd, event)
+
 
 # ---------------- Maintenance toggle ----------------
 @maintenance_cmd.handle()
@@ -506,7 +430,7 @@ async def maintenance_toggle(event: MessageEvent, arg: Message = CommandArg()):
         await maintenance_cmd.finish(at_prefix(event) + "\u4ec5Bot\u4e3b\u4eba\u53ef\u64cd\u4f5c\u7ef4\u62a4\u5f00\u5173")
     if raw in {"\u5f00\u542f", "\u5f00", "on", "enable", "1", "\u7ef4\u62a4"}:
         _set_maintenance(True)
-        await maintenance_cmd.finish(at_prefix(event) + "\u2705 \u5df2\u5f00\u542f\u7ef4\u62a4\u6a21\u5f0f\uff0cOW\u67e5\u8be2\u5c06\u63d0\u793a\u7ef4\u62a4\u4e2d\uff0c\u9884\u70ed\u5df2\u6682\u505c")
+        await maintenance_cmd.finish(at_prefix(event) + "\u2705 \u5df2\u5f00\u542f\u7ef4\u62a4\u6a21\u5f0f\uff0cOW\u67e5\u8be2\u5c06\u63d0\u793a\u7ef4\u62a4\u4e2d")
     elif raw in {"\u5173\u95ed", "\u5173", "off", "disable", "0", "\u6062\u590d"}:
         _set_maintenance(False)
         await maintenance_cmd.finish(at_prefix(event) + "\u2705 \u5df2\u5173\u95ed\u7ef4\u62a4\u6a21\u5f0f\uff0cOW\u67e5\u8be2\u5df2\u6062\u590d")

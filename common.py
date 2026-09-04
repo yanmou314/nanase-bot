@@ -20,6 +20,9 @@ _logger = logging.getLogger("qqbot.common")
 
 OWNER = os.getenv("QQBOT_OWNER", "REPLACE_WITH_OWNER_QQ")
 
+# 测试群：与主人同权，群内任意成员视为 owner（仅用于帮助菜单等管理命令的测试）
+TEST_PRIVILEGED_GROUPS = {864213945}
+
 FONTS = {
     "bold": "/usr/share/fonts/custom/ZCOOLKuaiLe-Regular.ttf",
     "noto_bold": "/usr/share/fonts/custom/noto/NotoSansCJK-Bold.ttc",
@@ -38,7 +41,13 @@ _last_cleanup: dict[str, float] = {}
 
 
 def is_owner(event: MessageEvent) -> bool:
-    return str(event.user_id) == OWNER
+    if str(event.user_id) == OWNER:
+        return True
+    gid = getattr(event, "group_id", None)
+    try:
+        return int(gid) in TEST_PRIVILEGED_GROUPS if gid is not None else False
+    except (TypeError, ValueError):
+        return False
 
 
 def at_prefix(event: MessageEvent) -> Message:
