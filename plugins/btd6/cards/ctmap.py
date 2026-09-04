@@ -15,8 +15,12 @@ from collections import Counter
 
 from PIL import Image, ImageDraw, ImageFont
 
+import logging
+
 from . import common, rules
 from .. import assets, ctmap, i18n, util
+
+_logger = logging.getLogger(__name__)
 
 
 _PAD = 16  # 卡片内容左右内边距
@@ -34,7 +38,13 @@ def _font(px: float) -> ImageFont.FreeTypeFont:
     key = max(8, int(px))
     f = _FONT_CACHE.get(key)
     if f is None:
-        f = ImageFont.truetype(_FONT_PATH, key)
+        try:
+            f = ImageFont.truetype(_FONT_PATH, key)
+        except OSError:
+            # 环境缺 wqy-microhei（如 CI 干净环境）：退回默认字体保证渲染不崩，
+            # CJK 字形缺失只影响无该字体的环境（生产机已安装）
+            _logger.warning("BTD6 CT 棋盘字体缺失，回退默认字体: %s", _FONT_PATH)
+            f = ImageFont.load_default(size=key)
         _FONT_CACHE[key] = f
     return f
 
