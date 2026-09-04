@@ -2,7 +2,7 @@
 import re
 
 from . import common
-from .. import assets, i18n, rushgen, textfmt, util
+from .. import assets, i18n, roundsets, rushgen, textfmt, util
 
 
 def _race_emblem(ev: dict | None, side_img: str, fallback: str = "🏆", is_daily: bool = False) -> str:
@@ -16,7 +16,7 @@ def _race_emblem(ev: dict | None, side_img: str, fallback: str = "🏆", is_dail
         return common._race_ui_img(asset, "🐒", "race-emblem-img")
     if side_img:
         return f"<img class='race-emblem-img' src='{util._esc(side_img)}' alt='首领'/>"
-    race_asset = "RaceIcon.png"
+    race_asset = "race-event.png"
     if assets._ui_asset_data_url(race_asset):
         return common._race_ui_img(race_asset, "🏆", "race-emblem-img")
     return f"<div class='race-emblem-fallback'>{util._esc(fallback)}</div>"
@@ -25,9 +25,8 @@ def _race_emblem(ev: dict | None, side_img: str, fallback: str = "🏆", is_dail
 def _race_title(name: str, ev: dict | None, side_img: str) -> str:
     raw = str(name or "").strip()
     if side_img and ev:
-        boss = i18n.boss_cn(ev.get("bossType"))
-        tier = re.search(r"(\d+)\s*$", raw)
-        return f"{boss} {tier.group(1)}" if tier else boss
+        # 标题只保留 Boss 汉化名，不带活动期数（原“菱背 7”→“菱背”）
+        return i18n.boss_cn(ev.get("bossType"))
     return i18n._RACE_TITLE_CN.get(raw.casefold(), raw) or "气球塔防6挑战"
 
 
@@ -58,9 +57,18 @@ def _custom_round_sets(meta: dict) -> list[str]:
 
 
 def _custom_round_details(meta: dict) -> list[tuple[str, str]]:
-    """把已知回合组展开为“第几回合：出现什么气球”，未知组保留可读降级。"""
+    """把自定义回合组展开为“第几回合：出现什么气球”。
+
+    优先用本地回合组快照（roundsets.describe，与默认回合组逐回合对比生成）；
+    快照缺失时退回 i18n._ROUND_SET_DETAILS 的静态摘要；两者皆无才显示
+    “API 未提供逐回合明细”兜底文案。
+    """
     details = []
     for key in _custom_round_set_keys(meta):
+        rows = roundsets.describe(key)
+        if rows:
+            details.extend(rows)
+            continue
         known = i18n._ROUND_SET_DETAILS.get(key.casefold())
         if known:
             details.extend(known)
@@ -105,46 +113,6 @@ def _round_detail_desc_html(description: str) -> str:
         pos = match.end()
     chunks.append(util._esc(text[pos:]))
     return "".join(chunks)
-
-
-def _ct_html(ev: dict, tiles: list, now: int) -> str:
-    """争夺领土专属卡片：Explorer 详情页版式，展示当前 CT 事件的领地与时间。"""
-    name = (ev.get("id") or "CT").strip()
-    state = util._state_of(ev, now)
-    # 统计 tiles
-    total = len(tiles) if isinstance(tiles, list) else 0
-    # 取前 6 个 tile 展示
-    tile_preview = ""
-    if tiles:
-        # 简化：显示 tile 类型统计
-        from collections import Counter
-        cnt = Counter(x.get("type") for x in tiles if isinstance(x, dict))
-        preview = " / ".join(f"{k}:{v}" for k, v in list(cnt.items())[:4])
-        tile_preview = f"领地 {total} 块 · {preview}" if preview else f"领地 {total} 块"
-    else:
-        tile_preview = "领地数据加载中"
-    ct_img = assets._ui_asset_data_url("ct-event.png") or assets._ui_asset_data_url("ct-tile.png") or ""
-    if ct_img:
-        emblem = f"<img src='{util._esc(ct_img)}'/>"
-    else:
-        emblem = "<div class='race-emblem-fallback'>🏴</div>"
-    title = "争夺领土"
-    subtitle = f"CT {name}"
-    time_line = util._fmt_range(ev)
-    player = int(ev.get("totalScores_player") or 0)
-    team = int(ev.get("totalScores_team") or 0)
-    body = (f"<div class='race-topbar'><div class='race-head'><div class='race-emblem-cell'><div class='race-emblem'>{emblem}</div></div>"
-            f"<div class='race-title-cell'><div class='race-title'>{util._esc(title)}</div><div class='race-subtitle'>{util._esc(subtitle)}</div><div class='race-time'>{util._esc(time_line)} · {util._STATE_TXT[state]}</div></div></div></div>"
-            f"<div class='race-content'><div class='race-layout'><div class='race-map'><div class='race-map-empty'>🗺️</div></div>"
-            f"<div class='race-stats-cell'><div class='race-stats'><div class='race-stat-col'>"
-            f"<div class='race-stat'><div class='race-stat-icon-cell'>{common._race_ui_img('ct-event.png', '🏴', 'race-stat-icon')}</div><div class='race-stat-copy'><div class='race-stat-label'>个人参与</div><div class='race-stat-value'>{player:,}</div></div></div>"
-            f"<div class='race-stat'><div class='race-stat-icon-cell'>{common._race_ui_img('ct-tile.png', '🧩', 'race-stat-icon')}</div><div class='race-stat-copy'><div class='race-stat-label'>战队参与</div><div class='race-stat-value'>{team:,}</div></div></div>"
-            f"</div><div class='race-stat-col'>"
-            f"<div class='race-stat'><div class='race-stat-icon-cell'>{common._race_ui_img('ct-event.png', '⏱', 'race-stat-icon')}</div><div class='race-stat-copy'><div class='race-stat-label'>活动状态</div><div class='race-stat-value'>{util._STATE_TXT[state]}</div></div></div>"
-            f"<div class='race-stat'><div class='race-stat-icon-cell'>{common._race_ui_img('ct-tile.png', '🗺️', 'race-stat-icon')}</div><div class='race-stat-copy'><div class='race-stat-label'>领地</div><div class='race-stat-value'>{total} 块</div></div></div>"
-            f"</div></div></div></div></div>"
-            f"<div class='race-monkey-section'><div class='race-options'><div class='race-available'>{util._esc(tile_preview)}</div></div></div></div>")
-    return common._race_shell(body, 560)
 
 
 def _path_max_txt(blocked: dict) -> str:
@@ -216,10 +184,13 @@ def _daily_monkey_grid(meta: dict) -> str:
     constants = rushgen.load_constants()
     # 英雄放首位 + 去重：初级/高级的英雄默认 1 不打 ×1 角标，且应排在最前
     order = list(constants.get("heroesInOrder") or []) + list(constants.get("towersInOrder") or [])
+    all_heroes_ok = _heroes_all_available(meta.get("_towers"))
     cells = []
     hero_cells = []
     monkey_cells = []
     for name in order:
+        if all_heroes_ok and name in (constants.get("heroesInOrder") or []):
+            continue  # 英雄全部可用：跳过逐个英雄，稍后放一张“全部英雄”块
         entry = dict(restrictions.get(name) or {"tower": name})
         entry.setdefault("tower", name)
         if "isHero" not in entry:
@@ -246,6 +217,8 @@ def _daily_monkey_grid(meta: dict) -> str:
             hero_cells.append(cell)
         else:
             monkey_cells.append(cell)
+    if all_heroes_ok:
+        hero_cells = [_all_heroes_tile()]
     cells = hero_cells + monkey_cells
     if not cells:
         return "<div class='mkgrid race-mkgrid'><div class='race-mk-fallback'>无</div></div>"
@@ -303,8 +276,64 @@ def _race_monkey_cell(tower: dict) -> str:
         cell += f"<div class='race-path'>{util._esc(_path_max_txt(blocked))}</div>"
     cell += "</div>"
     return f"<div class='race-mkwrap'>{cell}</div>"
+def _hero_entries(towers: list) -> list[dict]:
+    """_towers 里的英雄条目（排除 ChosenPrimaryHero 占位）。"""
+    return [t for t in towers or [] if isinstance(t, dict) and bool(t.get("isHero"))
+            and str(t.get("tower") or "").strip() not in ("", "ChosenPrimaryHero")]
+
+
+def _heroes_all_available(towers: list) -> bool:
+    """英雄是否全部可选。首选英雄（ChosenPrimaryHero）可用即默认英雄规则，
+    视为全部英雄可选（如 Boss 活动允许首选英雄）；否则任一具体英雄被禁
+    （max=0）、限购（max>1）或封路径即为 False，未列出的英雄视为默认可用。"""
+    if _chosen_hero_allowed(towers):
+        return True
+    for t in _hero_entries(towers):
+        try:
+            mx = float(t.get("max"))
+        except (TypeError, ValueError):
+            mx = None
+        if mx is not None and (mx == 0 or mx > 1):
+            return False
+        if any(int(t.get(f"path{p}NumBlockedTiers") or 0) != 0 for p in (1, 2, 3)):
+            return False
+    return True
+
+
+def _all_heroes_tile() -> str:
+    """“全部英雄可用”单块：官方 AllHeroesIcon，替代整排逐个英雄格。"""
+    url = assets._game_asset_data_url("AllHeroesIcon.webp")
+    if url:
+        cell = ("<div class='race-mk hero' title='全部英雄可用'>"
+                f"<img src='{util._esc(url)}' alt='全部英雄'/></div>")
+    else:
+        cell = ("<div class='race-mk hero' title='全部英雄可用'>"
+                "<div class='race-mk-fallback'>全部英雄</div></div>")
+    return f"<div class='race-mkwrap'>{cell}</div>"
+
+
+def _chosen_hero_allowed(towers: list) -> bool:
+    """ChosenPrimaryHero（首选英雄）占位条目 max>0 或 -1 时可用。
+    游戏默认本就只能带一个英雄（开局自选），首选英雄可用即默认英雄规则。"""
+    for t in towers or []:
+        if isinstance(t, dict) and str(t.get("tower") or "").strip() == "ChosenPrimaryHero":
+            try:
+                mx = float(t.get("max"))
+            except (TypeError, ValueError):
+                return False
+            return mx > 0 or mx == -1
+    return False
+
+
 def _race_monkey_grid(towers: list) -> str:
-    cells = [_race_monkey_cell(tower) for tower in _race_visible_towers(towers)]
+    cells = []
+    if _heroes_all_available(towers):
+        # 英雄全部可用：不逐个铺英雄格，改用一张“全部英雄”图标放最前
+        cells.append(_all_heroes_tile())
+        towers = [t for t in towers or []
+                  if not (isinstance(t, dict) and bool(t.get("isHero"))
+                          and str(t.get("tower") or "").strip() != "ChosenPrimaryHero")]
+    cells.extend(_race_monkey_cell(tower) for tower in _race_visible_towers(towers))
     if not cells:
         return "<div class='mkgrid race-mkgrid'><div class='race-mk-fallback'>无</div></div>"
     return "<div class='mkgrid race-mkgrid'>" + "".join(cells) + "</div>"
@@ -313,6 +342,12 @@ def _race_monkey_grid(towers: list) -> str:
 def _stat(label: str, value: str) -> str:
     return f"<div class='st'>{util._esc(label)} <b>{util._esc(value)}</b></div>"
 
+
+
+def mod_body_est(modifier_html: str) -> int:
+    """气球强化面板体的内容高度估算：与 rules_html 画布估算里 mod_body 同口径。"""
+    n = modifier_html.count("race-mod-item")
+    return 18 + max(1, -(-n // 2)) * 34 if n else 40
 
 def rules_html(col: dict) -> str:
     if col.get("empty"):
@@ -355,18 +390,22 @@ def rules_html(col: dict) -> str:
         event_icon = "daily-challenge.png"
     else:
         event_icon = boss_asset or "RaceIcon.png"
-    stat_left = "".join([
+    left_stats = [
         stat("cash.png", "🪙", "初始资金", f"{int(meta.get('startingCash') or 0):,}"),
         stat("heart.png", "❤", "初始生命", f"{int(meta.get('lives') or 0):,}"),
         stat("heart.png", "❤", "最大生命", f"{int(meta.get('maxLives') or 0):,}"),
-        stat(event_icon, "📅" if is_daily else "⚑", boss_label),
-    ])
-    stat_right = "".join([
+    ]
+    right_stats = [
         stat("start-round.png", "▶", "开始回合", str(int(meta.get('startRound') or 0))),
         stat("end-round.png", "⏭", "结束回合", str(int(meta.get('endRound') or 0))),
         stat("monkey-cap.png", "🐒", "最大猴子", towers_cap),
-        stat("fastest-time.png", "⏱", "最快用时"),
-    ])
+    ]
+    if not is_daily:
+        # 竞速/首领卡保留事件行与最快用时；每日系卡片去掉（事件行与标题重复、最快用时无值）
+        left_stats.append(stat(event_icon, "⚑", boss_label))
+        right_stats.append(stat("fastest-time.png", "⏱", "最快用时"))
+    stat_left = "".join(left_stats)
+    stat_right = "".join(right_stats)
     emblem = _race_emblem(ev, side_img, "📅" if is_daily else "🏆", is_daily=is_daily)
     title = _race_title(name, ev, side_img)
     time_line = _race_time_line(ev)
@@ -402,11 +441,16 @@ def rules_html(col: dict) -> str:
                             f"<div class='race-rule-icon'>{common._race_ui_img('custom-rounds.png', '❓', 'race-rule-icon-img')}</div>"
                             "<div class='race-rule-copy'>自定义回合</div></div>")
         paragon_rule_class = "race-rule-item"
+    # 左右两个面板体用同一 min-height，保证"气球强化"与"规则"方框等高
+    #（一侧内容变多抬高 max 值时，另一侧同步撑到相同高度）
+    panel_body_h = max(mod_body_est(modifier_html), 76)
     bottom = ("<div class='race-bottom'><div class='race-bottom-left'>"
-              "<div class='race-panel-head'>气球强化</div><div class='race-panel-body'>"
+              "<div class='race-panel-head'>气球强化</div>"
+              f"<div class='race-panel-body' style='min-height:{panel_body_h}px'>"
               f"{modifier_html}</div></div>"
               "<div class='race-bottom-right'><div class='race-panel-head'>规则</div>"
-              f"<div class='race-panel-body'><div class='race-rule-row'>"
+              f"<div class='race-panel-body' style='min-height:{panel_body_h}px'>"
+              f"<div class='race-rule-row'>"
               f"{custom_rule_item}<div class='{paragon_rule_class}'>"
               f"<div class='race-rule-icon'>{common._race_ui_img('paragon.png', '◉', 'race-rule-icon-img')}</div>"
               f"<div class='race-rule-copy'>神级猴上限<br><span class='race-limit-value'>{paragon_limit}</span></div>"

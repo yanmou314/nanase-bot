@@ -1,10 +1,12 @@
 """采集层：组合 nkapi 取数 + assets 素材，产出各卡片/文本共用的数据 dict。"""
 import asyncio
+import json
 import logging
+import os
 import re
 import time
 
-from . import assets, ctmap, i18n, instagen, nkapi, rushgen, util
+from . import assets, i18n, instagen, nkapi, rushgen, util
 
 _logger = logging.getLogger(__name__)
 
@@ -141,12 +143,17 @@ async def collect_rules(kind: str, variant: str) -> dict:
         ev = util.pick_active(races, now) or util.fallback_latest(races)
         if not ev:
             return {"empty": "当前没有竞赛活动"}
-        meta = await nkapi.fetch_body(ev["metadata"])
+        meta_url = ev.get("metadata")
+        if not meta_url:
+            return {"empty": "该活动暂无规则数据"}
+        meta = await nkapi.fetch_body(meta_url)
+        if not isinstance(meta, dict):
+            return {"empty": "该活动暂无规则数据"}
         prefix = "竞赛"
         scoring_raw = "GameTime"
         scoring_cn = "最快用时"
         side_img = ""
-        stale_urls = (nkapi.URL_RACES, ev["metadata"])
+        stale_urls = (nkapi.URL_RACES, meta_url)
     elif kind == "boss":
         bosses = await nkapi.fetch_body(nkapi.URL_BOSSES)
         ev = util.pick_active(bosses, now) or util.fallback_latest(bosses)
@@ -157,6 +164,8 @@ async def collect_rules(kind: str, variant: str) -> dict:
         if not meta_url:
             return {"empty": "该活动暂无此模式的规则数据"}
         meta = await nkapi.fetch_body(meta_url)
+        if not isinstance(meta, dict):
+            return {"empty": "该活动暂无此模式的规则数据"}
         label = "精英" if elite else "标准"
         prefix = f"Boss·{label}"
         scoring_raw = str(ev.get("eliteScoringType" if elite else "normalScoringType") or "")
@@ -350,10 +359,16 @@ async def collect_odyssey() -> dict:
 
 
 _PLAYER_ID_RE = re.compile(r"[0-9a-f]{40,}")
+_OAK_RE = re.compile(r"oak_[0-9a-fA-F]{8,}")
 
 
 def _extract_player_id(arg: str) -> str:
     m = _PLAYER_ID_RE.search(arg or "")
+    return m.group(0) if m else ""
+
+
+def _extract_oak(arg: str) -> str:
+    m = _OAK_RE.search(arg or "")
     return m.group(0) if m else ""
 
 
@@ -365,6 +380,424 @@ async def collect_player(pid: str) -> dict:
     avatar = await _safe(assets._asset_data_url(body.get("avatarURL")), "player_avatar") if body.get("avatarURL") else ""
     return {"p": body, "banner": banner or "", "avatar": avatar or "",
             "stale_note": nkapi._stale_warn(nkapi.URL_USERS + pid)}
+
+
+async def collect_player_oak(oak: str) -> dict:
+    """OAK 查询：公开档案 + 完整存档（网站 profile&stats 视角）。
+    注意：OAK 只出现在发往 NK 的 URL 里，绝不进卡片/文本/日志。"""
+    try:
+        public = await nkapi.fetch_body(nkapi.URL_USERS + oak)
+    except Exception:
+        return {"empty": "OAK 无效或已过期，请在游戏内重新生成后再试"}
+    if not isinstance(public, dict) or not public.get("displayName"):
+        return {"empty": "OAK 无效或已过期，请在游戏内重新生成后再试"}
+    try:
+        save_body = await nkapi.fetch_body(nkapi.URL_SAVE + oak)
+    except Exception:
+        save_body = {}
+    if not isinstance(save_body, dict):
+        save_body = {}
+    banner = await _safe(assets._asset_data_url(public.get("bannerURL")), "player_banner") if public.get("bannerURL") else ""
+    avatar = await _safe(assets._asset_data_url(public.get("avatarURL")), "player_avatar") if public.get("avatarURL") else ""
+    return {"p": public, "save": save_body, "banner": banner or "", "avatar": avatar or "",
+            "stale_note": nkapi._stale_warn(nkapi.URL_USERS + oak)}
+
+
+_SITE_DATA = None
+
+
+def site_data() -> dict:
+    """站点裁剪常量（随游戏版本更新，用 build_sitedata.py 重建）。"""
+    global _SITE_DATA
+    if _SITE_DATA is None:
+        try:
+            with open(os.path.join(os.path.dirname(__file__), "site_data.json"), encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        try:
+            data["rankTable"] = {int(k): int(v) for k, v in (data.get("rankTable") or {}).items()}
+        except (AttributeError, TypeError, ValueError):
+            data["rankTable"] = {}
+        _SITE_DATA = data
+    return _SITE_DATA
+
+
+_UPGRADE_EXCLUDES = frozenset({
+    "Camo Bananas", "Adaptive Workers", "Regrow Bananas",
+    "Banana Intelligence Bureau", "Monkey Banker", "Banana Financier",
+    "Mini Stormcaller", "High Impact", "Rapid Recharge", "Beacon of Legends",
+    "Bewildering Storm", "Piercing Wind",
+})
+_BOSS_MEDAL_ORDER = ["Diamondback", "Blastapopoulos", "Phayze", "Dreadbloon",
+                     "Vortex", "Lych", "Bloonarius"]
+_MEDAL_TIERS9 = ["Bronze", "Silver", "DoubleSilver", "GoldSilver", "DoubleGold",
+                 "GoldDiamond", "BlueDiamond", "RedDiamond", "BlackDiamond"]
+_CT_LOCAL_TIERS = ["Bronze", "Silver", "DoubleGold", "GoldDiamond",
+                   "BlueDiamond", "RedDiamond", "BlackDiamond"]
+_CT_GLOBAL_TIERS = ["Bronze", "Silver", "DoubleSilver", "GoldSilver",
+                    "DoubleGold", "GoldDiamond", "BlueDiamond"]
+_SEASON_MEDALS = ["Champion", "Tier4", "Tier3", "Tier2", "Tier1",
+                  "Ultimate1", "Ultimate2", "Ultimate3"]
+
+
+def _hero_skins_total(save: dict, SD: dict) -> int:
+    """复刻网站 generateHeroesSkinsUnlocked 的 totalSkins 口径。"""
+    heroes = SD.get("heroes") or {}
+    t = []
+    for _hero, skins in heroes.items():
+        t += [x for x in (skins or []) if x not in heroes]
+    us = (save or {}).get("unlockedSkins") or {}
+    for e in (SD.get("iapHeroSkins") or []) + (SD.get("hiddenHeroes") or []):
+        if e in t and not us.get(e):
+            t.remove(e)
+    return len(t)
+
+
+def _chimps_count(save: dict) -> int:
+    """复刻网站 CHIMPS 口径：各图 Hard.single.Clicks 完成数 + coop Clicks 完成数。"""
+    n = 0
+    for m in ((save or {}).get("mapProgress") or {}).values():
+        if not isinstance(m, dict):
+            continue
+        try:
+            diffs = m.get("difficulty") or {}
+            hard = diffs.get("Hard") or {}
+            single = hard.get("single") or {}
+            c = single.get("Clicks")
+            if isinstance(c, dict) and c.get("completed"):
+                n += 1
+            for content in diffs.values():
+                if not isinstance(content, dict):
+                    continue
+                coop = content.get("coop") or {}
+                if not isinstance(coop, dict):
+                    continue
+                cc = coop.get("Clicks")
+                if isinstance(cc, dict) and cc.get("completed"):
+                    n += 1
+                    break
+        except AttributeError:
+            continue
+    return n
+
+
+def _trophy_count(save: dict, SD: dict) -> int:
+    """复刻网站 TrophyStore 口径（含 keyFixes 兼容）。"""
+    owned = (save or {}).get("trophyStoreItems") or {}
+    fixes = SD.get("trophyKeyFixes") or {}
+    n = 0
+    for e in SD.get("trophyCatalog") or []:
+        if owned.get(e) == 1:
+            n += 1
+            continue
+        f = fixes.get(e)
+        if f and owned.get(f):
+            n += 1
+    return n
+
+
+def _extras_unlocked(save: dict) -> dict:
+    """复刻网站 generateExtrasUnlocked。"""
+    save = save or {}
+    claimed = save.get("achievementsClaimed") or []
+    ex = {}
+    if save.get("unlockedBigBloons") or "Big Bloons" in claimed:
+        ex["Big Bloons"] = save.get("bigBloonsActive")
+    if save.get("unlockedSmallBloons") or "Small Bloons" in claimed:
+        ex["Small Bloons"] = save.get("smallBloonsActive")
+    if save.get("seenBigTowers") or "Chunky Monkeys" in claimed:
+        ex["Big Monkey Towers"] = save.get("bigTowersActive")
+    if save.get("unlockedSmallTowers") or "GoldenTicket" in claimed:
+        ex["Small Monkey Towers"] = save.get("smallTowersActive")
+    if save.get("unlockedSmallBosses") or "25 to Life" in claimed:
+        ex["Small Bosses"] = save.get("smallBossesActive")
+    return ex
+
+
+def _int0(v) -> int:
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def profile_quick_stats(save: dict, public: dict) -> list:
+    """网站 profile overview 左列 [(图标相对路径, 文案)]，含 0 跳过（复刻网站规则）。"""
+    SD = site_data()
+    save = save or {}
+    public = public or {}
+    stats = public.get("stats") or {}
+    gameplay = public.get("gameplay") or {}
+    rows = []
+
+    def add(icon, text, head):
+        if head == 0:
+            return
+        rows.append((icon, text))
+
+    tw = save.get("unlockedTowers") or {}
+    towers = sum(1 for v in tw.values() if v)
+    towers_total = len(SD.get("towers") or []) or 26
+    add("UI/MaxMonkeysIcon.webp", f"{towers}/{towers_total} 塔已解锁", towers)
+
+    au = save.get("acquiredUpgrades") or {}
+    ups = sum(1 for k, v in au.items() if v and k not in _UPGRADE_EXCLUDES
+              and ("Paragon" not in k or k == "Sentry Paragon"))
+    add("UI/UpgradeIcon.webp", f"{ups}/{15 * towers_total} 升级已解锁", ups)
+
+    pg = sum(1 for k, v in au.items() if v and "Paragon" in k and k != "Sentry Paragon")
+    pg_total = len(SD.get("paragons") or []) or 13
+    add("UI/ParagonPip.webp", f"{pg}/{pg_total} 帕拉贡已解锁", pg)
+
+    uh = save.get("unlockedHeroes") or {}
+    heroes = sum(1 for k, v in uh.items() if v and k != "Sheriff")
+    heroes_total = len(SD.get("heroes") or {}) or 18
+    add("UI/AllHeroesIcon.webp", f"{heroes}/{heroes_total} 英雄已解锁", heroes)
+
+    us = save.get("unlockedSkins") or {}
+    hero_names = set((SD.get("heroes") or {}).keys())
+    skins = sum(1 for k, v in us.items() if v and k not in hero_names and k != "Sheriff")
+    add("UI/TopHatSprite.webp",
+        f"{skins}/{_hero_skins_total(save, SD)} 英雄皮肤已解锁", skins)
+
+    abil = stats.get("abilitiesActivatedByName") or {}
+    abils = SD.get("abilities") or []
+    n_abil = sum(1 for k in abil if k in abils)
+    add("UI/RapidShotIcon.webp", f"{n_abil} 独特技能已使用", n_abil)
+
+    ak = save.get("acquiredKnowledge") or {}
+    know = sum(1 for v in ak.values() if v)
+    know_total = int(SD.get("knowledgeTotal") or 134)
+    add("UI/KnowledgeIcon.webp", f"{know}/{know_total} 知识点已解锁", know)
+
+    mp = save.get("mapProgress") or {}
+    n_maps = sum(1 for v in mp.values() if v)
+    add("UI/StartRoundIconSmall.webp", f"{n_maps} 地图已游玩", n_maps)
+
+    n_chimps = _chimps_count(save)
+    add("MedalIcon/MedalImpoppableRuby.webp", f"{n_chimps} CHIMPS 奖章", n_chimps)
+
+    pw = save.get("powers") or {}
+    n_powers = sum(int(v.get("quantity") or 0) if isinstance(v, dict) else 0
+                   for v in pw.values())
+    add("UI/PowerContainer.webp", f"{n_powers} 能量已收集", n_powers)
+
+    pwp = save.get("powersPro") or {}
+    n_pro = sum(1 for v in pwp.values()
+                if isinstance(v, dict) and int(v.get("unlockedTier") or 0) > 0)
+    add("UI/PowersProContainer.webp", f"{n_pro} 专业能量已解锁", n_pro)
+
+    it_ = save.get("instaTowers") or {}
+    avail = 0
+    for entries in it_.values():
+        if isinstance(entries, dict):
+            for x in entries.values():
+                try:
+                    avail += int(x)
+                except (TypeError, ValueError):
+                    pass
+    n_insta = avail + _int0(gameplay.get("instaMonkeysUsed"))
+    add("UI/InstaIcon.webp", f"{n_insta} 速生猴已收集", n_insta)
+
+    ach_total = int(SD.get("achievementsTotal") or 162)
+    n_ach = len(save.get("achievementsClaimed") or [])
+    add("AchievementIcon/AchievementsIcon.webp", f"{n_ach}/{ach_total} 成就已达成", n_ach)
+
+    n_ts = _trophy_count(save, SD)
+    add("UI/LimitedRunIcon.webp", f"{n_ts} 奖杯商店物品已收集", n_ts)
+
+    n_q = sum(1 for q in (save.get("quests") or [])
+              if isinstance(q, dict) and q.get("complete"))
+    add("UI/QuestIcon.webp", f"{n_q} 任务完成", n_q)
+
+    n_ex = len(_extras_unlocked(save))
+    add("UI/SmallBloonsModeIcon.webp", f"{n_ex} 额外内容已解锁", n_ex)
+    return rows
+
+
+def profile_medals(public: dict) -> list:
+    """网站 currency&medals 奖章格 [(图标相对路径, 数量)]，去零，保持网站顺序。"""
+    public = public or {}
+    gameplay = public.get("gameplay") or {}
+    mm = (site_data().get("medalMap") or {})
+    out = []
+
+    def add(icon, v):
+        try:
+            n = int(v or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n:
+            out.append((icon, n))
+
+    single = public.get("_medalsSinglePlayer") or {}
+    multi = public.get("_medalsMultiplayer") or {}
+    for mode, medal in mm.items():
+        add(f"MedalIcon/Medal{medal}.webp", single.get(mode))
+    for mode, medal in mm.items():
+        add(f"MedalIcon/MedalCoop{medal}.webp", multi.get(mode))
+    bn, be = public.get("bossBadgesNormal") or {}, public.get("bossBadgesElite") or {}
+    for b in _BOSS_MEDAL_ORDER:
+        add(f"MedalIcon/{b}EliteBadge.webp", be.get(b))
+        add(f"MedalIcon/{b}Badge.webp", bn.get(b))
+    race = public.get("_medalsRace") or {}
+    for t in _MEDAL_TIERS9:
+        add(f"MedalIcon/MedalEvent{t}Medal.webp", race.get(t))
+    add("MedalIcon/OdysseyStarIcon.webp", gameplay.get("totalOdysseyStars"))
+    bev, ebev = public.get("_medalsBoss") or {}, public.get("_medalsBossElite") or {}
+    for t in _MEDAL_TIERS9:
+        add(f"MedalIcon/BossMedalEvent{t}Medal.webp", bev.get(t))
+    for t in _MEDAL_TIERS9:
+        add(f"MedalIcon/EliteBossMedalEvent{t}Medal.webp", ebev.get(t))
+    ctl, ctg = public.get("_medalsCTLocal") or {}, public.get("_medalsCTGlobal") or {}
+    for t in _CT_LOCAL_TIERS:
+        add(f"MedalIcon/CtLocalPlayer{t}Medal.webp", ctl.get(t))
+    for t in _CT_GLOBAL_TIERS:
+        add(f"MedalIcon/CtGlobalPlayer{t}Medal.webp", ctg.get(t))
+    seasons = public.get("seasonBadges") or {}
+    for s in _SEASON_MEDALS:
+        entry = seasons.get("Season" + s) or {}
+        add(f"MedalIcon/SocialSeasons{s}Medal.webp",
+            entry.get("count") if isinstance(entry, dict) else entry)
+    return out
+
+
+def profile_tops(public: dict) -> dict:
+    """网站 overview Top 区：英雄/塔/帕拉贡/技能 Top 排行（已排序，未截断）。"""
+    SD = site_data()
+    public = public or {}
+    stats = public.get("stats") or {}
+    heroes_order = set((SD.get("heroes") or {}).keys())
+    towers_order = set(SD.get("towers") or [])
+    paragons_order = set(SD.get("paragons") or [])
+    heroes = sorted(
+        ((k, int(v)) for k, v in (public.get("heroesPlaced") or {}).items()
+         if k in heroes_order and int(v or 0) > 0),
+        key=lambda kv: kv[1], reverse=True)
+    towers = sorted(
+        ((k, int(v)) for k, v in (public.get("towersPlaced") or {}).items()
+         if k in towers_order and int(v or 0) > 0),
+        key=lambda kv: kv[1], reverse=True)
+    paragons = sorted(
+        ((k, int(v)) for k, v in (stats.get("paragonsPurchasedByName") or {}).items()
+         if k in paragons_order and int(v or 0) > 0),
+        key=lambda kv: kv[1], reverse=True)
+    abil_full = SD.get("abilitiesFull") or {}
+    merged = {}
+    for k, v in (stats.get("abilitiesActivatedByName") or {}).items():
+        try:
+            n = int(v or 0)
+        except (TypeError, ValueError):
+            continue
+        if n <= 0:
+            continue
+        info = abil_full.get(k)
+        if not info or not info.get("icon"):
+            continue
+        old = info.get("oldId")
+        if old:
+            try:
+                n += int((stats.get("abilitiesActivatedByName") or {}).get(old) or 0)
+            except (TypeError, ValueError):
+                pass
+        merged[k] = (info.get("displayName") or k, info.get("icon"), n)
+    abilities = sorted(merged.values(), key=lambda t: t[2], reverse=True)
+    return {"heroes": heroes, "towers": towers, "paragons": paragons,
+            "abilities": abilities}
+
+
+def profile_rogue(save: dict) -> list:
+    """网站 Rogue Legends Stats（无游荡数据返回空列表）。"""
+    save = save or {}
+    if "rogueLegends" not in save:
+        return []
+    rg = save.get("rogueLegends") or {}
+    rgs = save.get("rogueLegendsStats") or {}
+    wins = ((rgs.get("winsByTileType") or {}) if isinstance(rgs.get("winsByTileType"), dict) else {})
+
+    def _g(d, k):
+        try:
+            return int((d or {}).get(k) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    arts = save.get("rogueUnlockedStarterArtifacts") or {}
+    return [
+        ("地盘占领", _g(rg, "tilesCaptured")),
+        ("战役胜利", _g(rg, "bossesDefeated")),
+        ("普通神器", _g(rg, "commonArtifactsCollected")),
+        ("稀有神器", _g(rg, "rareArtifactsCollected")),
+        ("传说神器", _g(rg, "legendaryArtifactsCollected")),
+        ("已提取神器", len(arts) if isinstance(arts, dict) else 0),
+        ("气球遭遇胜利", _g(wins, "pathStandardGame")),
+        ("小游戏胜利", _g(wins, "miniGame")),
+        ("小首领胜利", _g(wins, "miniBoss")),
+        ("普通增益", _g(rg, "commonBoostsCollected")),
+        ("稀有增益", _g(rg, "rareBoostsCollected")),
+        ("传说增益", _g(rg, "legendaryBoostsCollected")),
+    ]
+
+
+def profile_frontier(save: dict) -> list:
+    """网站 Frontier Legends Stats（无边境数据返回空列表）。"""
+    save = save or {}
+    if "frontierLegends" not in save:
+        return []
+    fl = save.get("frontierLegends") or {}
+    fls = save.get("frontierLegendsStats") or {}
+    basic = (fls.get("basicStats") or {}) if isinstance(fls.get("basicStats"), dict) else {}
+    spec = (basic.get("frontierSpecialBloons") or {}) if isinstance(basic.get("frontierSpecialBloons"), dict) else {}
+
+    def _g(d, k):
+        try:
+            return int((d or {}).get(k) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    try:
+        stamina = int(float(fls.get("spendStaminaAcrossAll") or 0))
+    except (TypeError, ValueError):
+        stamina = 0
+    return [
+        ("快枪获胜", _g(fl, "winQuickdrawAcrossAll")),
+        ("快枪连胜", _g(fl, "captureBountyBloonsInARow")),
+        ("总移动距离", _g(fl, "walkTotalAcrossAll")),
+        ("雇佣猴子总数", _g(fl, "hireTotalAcrossAll")),
+        ("雇佣传奇猴子", _g(fl, "hireLegendsAcrossAll")),
+        ("商店花费", _g(fl, "spendGoldInGeneralStore")),
+        ("体力消耗", stamina),
+        ("炸药气球击破", _g(spec, "DynamiteBloon")),
+        ("光环气球击破", _g(spec, "AuraBloon")),
+        ("头目气球击破", _g(spec, "RingleaderBloon")),
+        ("玻璃气球击破", _g(spec, "GlassBloon")),
+        ("复仇气球击破", _g(spec, "RetributionBloon")),
+        ("钻石气球击破", _g(spec, "DiamondBloon")),
+    ]
+
+
+def profile_rank_info(save: dict):
+    """复刻网站 generateRankInfo：(等级, 本级经验, 本级目标)，满级后两项为 None。"""
+    xp = _int0((save or {}).get("xp"))
+    if xp >= 180000000:
+        return (155, None, None)
+    table = (site_data().get("rankTable") or {})
+    prev = 0
+    for a in sorted(table):
+        if xp < table[a]:
+            return (a - 1, xp - prev, table[a] - prev)
+        prev = table[a]
+    return (155, None, None)
+
+
+def profile_veteran_info(save: dict):
+    """复刻网站 generateVeteranRankInfo：每级固定 2000 万。(等级, 本级经验, 本级目标)"""
+    a = _int0((save or {}).get("veteranXp"))
+    rank = 1
+    while a >= 20000000:
+        a -= 20000000
+        rank += 1
+    return (rank, a, 20000000)
 
 
 async def fetch_leaderboard_page(start_url: str, page: int) -> list:
@@ -607,6 +1040,8 @@ async def collect_ct(now_ms: int | None = None) -> dict:
         return {"empty": "当前没有争夺领土活动"}
     ev_id = str(ev.get("id") or "")
     seeds = await _safe(nkapi.fetch_json_raw(nkapi.URL_CT_EVENT_SEEDS), "ct_seeds")
+    # 期号 = 事件在 seeds 列表中的下标；列表第 0 位固定为 null 占位（真实事件从
+    # 下标 1 开始），因此 number=0 与"未找到"不会冲突——若数据集去掉该占位需同步调整
     number = 0
     if isinstance(seeds, list):
         for idx, seed in enumerate(seeds):

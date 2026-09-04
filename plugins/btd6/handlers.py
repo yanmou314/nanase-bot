@@ -107,11 +107,12 @@ def parse_lb_rank(tokens: list[str]) -> int | None:
 help_cmd = on_command("btd6", priority=5, block=True)
 help_alias_cmd = on_command("btd6帮助", priority=5, block=True)
 events_cmd = on_command("btd6活动", priority=5, block=True)
-ct_cmd = on_command("btd6领土", priority=5, block=True)
-rush_cmd = on_command("btd6冲刺", priority=5, block=True)
+ct_cmd = on_command("btd6ct", priority=5, block=True)
+rush_cmd = on_command("btd6rush", priority=5, block=True)
 collect_cmd = on_command("btd6收集", priority=5, block=True)
 lb_cmd = on_command("btd6排行", priority=5, block=True)
 rules_cmd = on_command("btd6竞速", priority=5, block=True)
+boss_cmd = on_command("btd6boss", priority=5, block=True)
 maps_cmd = on_command("btd6地图", priority=5, block=True)
 daily_cmd = on_command("btd6每日", priority=5, block=True)
 odyssey_cmd = on_command("btd6远征", priority=5, block=True)
@@ -126,9 +127,10 @@ prewarm_cmd = on_command("btd6预热", priority=5, block=True)
 @help_cmd.handle()
 async def handle_help(event: MessageEvent):
     await nkapi._enforce_cooldown(help_cmd, event, "help")
-    # 兼容 ".btd6 CT"（含空格）直接查看争夺领土/活动总览
+    # 兼容 ".btd6 CT" / "btd6 ct"（含空格）直接查看争夺领土/活动总览
     _plain = event.get_plaintext().strip().lower()
-    _arg = _plain.replace(".btd6", "", 1).strip() if _plain.startswith(".btd6") else _plain
+    _m = re.match(r"^\.?\s*btd6\s+(.*)$", _plain, re.DOTALL)
+    _arg = _m.group(1).strip() if _m else ""
     if _arg in {"ct", "领土", "争夺", "争夺领土"}:
         try:
             data = await collect.collect_overview()
@@ -391,32 +393,44 @@ async def handle_leaderboard(event: MessageEvent):
     await cards_mod._send_card(lb_cmd, "btd6lb", lambda: cards_mod.leaderboard_html(col), lambda: textfmt.leaderboard_text(col))
 
 
+async def _boss_rule_cards(cmd, event) -> None:
+    """Boss 规则：标准+精英双卡一起发（供 .btd6boss 使用）。"""
+    cards = []
+    for variant in ("standard", "elite"):
+        try:
+            c = await collect.collect_rules("boss", variant)
+            if not c.get("empty"):
+                cards.append((
+                    f"btd6rule_{variant}",
+                    lambda c=c: cards_mod.rules_html(c),
+                    lambda c=c: textfmt.rules_text(c),
+                ))
+        except Exception:
+            _logger.exception("BTD6 规则获取失败 kind=boss variant=%s", variant)
+    if not cards:
+        # 双版本全部失败：回滚冷却，允许用户立即重试
+        nkapi._release_cooldown(event, "rules")
+        await cmd.finish("⚠️ 获取 BTD6 规则失败，请稍后再试")
+    await cards_mod._finish_multi_cards(cmd, cards)
+
+
+@boss_cmd.handle()
+async def handle_boss(event: MessageEvent):
+    """Boss 规则：标准+精英双卡。"""
+    await nkapi._enforce_cooldown(boss_cmd, event, "rules")
+    await _boss_rule_cards(boss_cmd, event)
+
+
 @rules_cmd.handle()
 async def handle_rules(event: MessageEvent):
     await nkapi._enforce_cooldown(rules_cmd, event, "rules")
     tokens = event.get_plaintext().split()[1:]
-    kind = parse_kind(tokens) or "race"
-    # 多版本一起发：boss→标准+精英，其余单版本
-    if kind == "boss":
-        cards = []
-        for variant in ("standard", "elite"):
-            try:
-                c = await collect.collect_rules(kind, variant)
-                if not c.get("empty"):
-                    cards.append((f"btd6rule_{variant}",
-                                  lambda c=c: cards_mod.rules_html(c), lambda c=c: textfmt.rules_text(c)))
-            except Exception:
-                _logger.exception("BTD6 规则获取失败 kind=%s variant=%s", kind, variant)
-        if not cards:
-            # 双版本全部失败：回滚冷却，允许用户立即重试
-            nkapi._release_cooldown(event, "rules")
-            await rules_cmd.finish("⚠️ 获取 BTD6 规则失败，请稍后再试")
-        await cards_mod._finish_multi_cards(rules_cmd, cards)
-        return
-    variant = "" if kind == "race" else \
-        ("elite" if any(t.lower() in ELITE_WORDS for t in tokens) else "standard")
+    kind = parse_kind(tokens)
+    if kind is not None and kind != "race":
+        nkapi._release_cooldown(event, "rules")
+        await rules_cmd.finish("🏁 竞赛与 Boss 规则已拆分：Boss 请使用 .btd6boss 查看")
     try:
-        col = await collect.collect_rules(kind, variant)
+        col = await collect.collect_rules("race", "")
     except Exception:
         nkapi._release_cooldown(event, "rules")
         _logger.exception("BTD6 规则获取失败")
@@ -452,7 +466,7 @@ async def handle_daily(event: MessageEvent):
         collect._safe(collect.collect_daily(True), "daily_adv"),
         collect._safe(collect.collect_daily_coop(), "coop"))
     cards = []
-    for key, c in zip(("btd6daily", "btd6dailya", "btd6coop"), daily_cols):
+    for key, c in zip(("btd6daily", "btd6dailya", "btd6coop"), daily_cols, strict=True):
         if c and not c.get("empty"):
             cards.append((key, lambda c=c: cards_mod.rules_html(c), lambda c=c: textfmt.rules_text(c)))
     if not cards:
@@ -490,7 +504,9 @@ async def handle_odyssey(event: MessageEvent):
             _logger.info("BTD6 远征 %s 渲染 %.2fs -> %s", lab, time.monotonic() - t0, path)
         except Exception:
             _logger.warning("BTD6 远征卡片渲染失败，回退文本消息", exc_info=True)
-            await odyssey_cmd.finish(MessageSegment.text(textfmt.odyssey_text(col)))
+            # 只回退当前及之后难度的文本：已发出的图片不重复发一遍全文
+            remaining = [k for k, _ in i18n._ODYSSEY_DIFFS[idx:]]
+            await odyssey_cmd.finish(MessageSegment.text(textfmt.odyssey_text(col, only=remaining)))
         if idx < len(i18n._ODYSSEY_DIFFS) - 1:
             await odyssey_cmd.send(MessageSegment.image(Path(path).as_uri()))
         else:
@@ -501,9 +517,20 @@ async def handle_odyssey(event: MessageEvent):
 async def handle_player(event: MessageEvent):
     await nkapi._enforce_cooldown(player_cmd, event, "player", "heavy")
     tokens = event.get_plaintext().split()[1:]
-    pid = collect._extract_player_id(" ".join(tokens))
+    arg = " ".join(tokens)
+    oak = collect._extract_oak(arg)
+    if oak:
+        try:
+            col = await collect.collect_player_oak(oak)
+        except Exception:
+            nkapi._release_cooldown(event, "player")
+            _logger.exception("BTD6 玩家档案获取失败")
+            await player_cmd.finish("⚠️ 获取 BTD6 玩家档案失败，请稍后再试")
+        await cards_mod._send_card(player_cmd, "btd6pl", lambda: cards_mod.player_oak_html(col), lambda: textfmt.player_text(col))
+        return
+    pid = collect._extract_player_id(arg)
     if not pid:
-        await player_cmd.finish("用法：.btd6玩家 <玩家ID>\nID 是排行榜玩家链接末尾的长串十六进制（40+ 位）")
+        await player_cmd.finish("用法：.btd6玩家 <OAK>\nOAK 在游戏设置→账号中生成（以 oak_ 开头），可查完整档案与存档数据；也可用排行榜玩家链接末尾的 ID（仅公开档案）\n⚠️ OAK 等同账号凭证，请私聊使用，不要发到群里")
     try:
         col = await collect.collect_player(pid)
     except Exception:

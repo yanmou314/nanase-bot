@@ -1,19 +1,40 @@
 """中文语料层：全插件唯一规范翻译表与文案常量（含归一化查找函数）。"""
+import logging
+
+_logger = logging.getLogger(__name__)
+
+# 译名表是手工转录的（随游戏版本更新需同步）：查表未命中回退原文时
+# 按"类别:名称"去重告警一次，提醒维护者补表，避免静默退化无人察觉。
+_warned_unknown: set[str] = set()
+_WARNED_UNKNOWN_MAX = 256
+
+
+def _warn_unknown(kind: str, raw: str) -> None:
+    if not raw:
+        return
+    key = f"{kind}:{raw}"
+    if key in _warned_unknown:
+        return
+    if len(_warned_unknown) >= _WARNED_UNKNOWN_MAX:
+        _warned_unknown.clear()  # 防御性上限：异常数据源刷屏时不无限增长
+    _warned_unknown.add(key)
+    _logger.warning("BTD6 语料表未收录%s「%s」（游戏更新后需同步 i18n.py）", kind, raw)
 
 
 HELP_GROUPS = [
     ("活动", [
         (".btd6活动", "当前竞赛/Boss/争夺领土/远征总览（三段式）"),
         (".btd6每日", "今日每日挑战（标准+高级+Coop 一起返回）"),
-        (".btd6竞速 [竞赛|boss]", "竞赛/Boss 活动规则详情（Boss 标准+精英一起返回）"),
+        (".btd6竞速", "竞赛活动规则详情"),
+        (".btd6boss", "Boss 活动规则详情（标准+精英一起返回）"),
         (".btd6远征", "当前远征 Odyssey"),
-        (".btd6领土", "争夺领土详情（六边形领土地图）"),
-        (".btd6冲刺", "Boss Rush 冲刺"),
+        (".btd6ct", "争夺领土详情（六边形领土地图）"),
+        (".btd6rush", "Boss Rush 冲刺"),
         (".btd6收集", "收集活动 Featured Insta 计划表（每8小时轮换4种）"),
     ]),
     ("排行与档案", [
         (".btd6排行 竞赛|boss|领土 [P页码|排名]", "排行榜：默认前50；P2=第2页；数字=该名次玩家档案（Boss双榜/领土双榜自动返回）"),
-        (".btd6玩家 <ID>", "玩家档案"),
+        (".btd6玩家 <OAK>", "玩家档案（含存档数据，OAK 在游戏账号设置里生成）"),
         (".btd6地图 最新|热门|点赞 [数量]", "自制地图榜单"),
         (".btd6历史 [竞速|boss|领土|远征|每日] [数量]", "本地归档的历史活动（API 只保留近几期）"),
         (".btd6预热", "手动预热全部活动（仅主人）"),
@@ -23,13 +44,14 @@ HELP_GROUPS = [
 HELP_TEXT = """🐒 BTD6 情报站（气球塔防6）
 .btd6活动 — 当前竞赛/Boss/争夺领土/远征总览（三段式：进行中/即将开始/已结束）
 .btd6每日 — 今日每日挑战（标准+高级+Coop 一起返回）
-.btd6竞速 [竞赛|boss] — 竞赛/Boss 活动规则详情（Boss 标准+精英一起返回；领土暂无通用规则）
+.btd6竞速 — 竞赛活动规则详情
+.btd6boss — Boss 活动规则详情（标准+精英一起返回）
 .btd6远征 — 当前远征活动
-.btd6领土 — 争夺领土详情（六边形领土地图：逐格地图/模式/遗物/出生点）
-.btd6冲刺 — Boss Rush 冲刺
+.btd6ct — 争夺领土详情（六边形领土地图：逐格地图/模式/遗物/出生点）
+.btd6rush — Boss Rush 冲刺
 .btd6收集 — 收集活动 Featured Insta 计划表（每8小时轮换4种精选即时猴）
 .btd6排行 竞赛|boss|领土 [P页码|排名] — 排行榜：默认前50；P2=第2页；数字=该名次玩家档案（Boss标准+精英、领土个人+战队一起返回）
-.btd6玩家 <ID> — 玩家档案（排行榜链接末尾的长串十六进制）
+.btd6玩家 <OAK> — 玩家档案（OAK 查询，含存档数据；OAK 在游戏设置→账号中生成，请私聊使用）
 .btd6地图 最新|热门|点赞 [数量] — 自制地图榜单
 .btd6历史 [竞速|boss|领土|远征|每日] [数量] — 本地归档的历史活动（API 只保留近几期）
 .btd6预热 — 手动预热全部活动（仅主人）
@@ -107,23 +129,40 @@ def cn(value, mapping: dict) -> str:
 
 def boss_cn(boss_type: str) -> str:
     raw = str(boss_type or "").strip()
-    return _BOSS_CN_FLAT.get(raw.replace(" ", "").lower()) or BOSS_CN.get(raw) or raw
+    hit = _BOSS_CN_FLAT.get(raw.replace(" ", "").lower()) or BOSS_CN.get(raw)
+    if not hit:
+        _warn_unknown("Boss", raw)
+        return raw
+    return hit
 
 
 def tower_cn(name: str) -> str:
     flat = str(name or "").replace(" ", "").lower()
-    return _TOWER_CN_FLAT.get(flat) or _HERO_CN_FLAT.get(flat) or name
+    hit = _TOWER_CN_FLAT.get(flat) or _HERO_CN_FLAT.get(flat)
+    if not hit:
+        _warn_unknown("塔/英雄", str(name or "").strip())
+        return str(name or "")
+    return hit
 
 
 def map_cn(name: str) -> str:
     """地图内部名 → 中文译名（MAP_CN 表，FLAT 归一化查找）；查不到回退原名。"""
     raw = str(name or "").strip()
-    return _MAP_CN_FLAT.get(raw.replace(" ", "").lower()) or raw
+    hit = _MAP_CN_FLAT.get(raw.replace(" ", "").lower())
+    if not hit:
+        # MAP_CN 只覆盖部分地图（activity 常用图），快照外新图不告警：
+        # rushgen.mapsInOrder 全量表在 rushdata.json，此处回退原名即可
+        return raw
+    return hit
 
 
 def hero_cn(name: str) -> str:
     flat = str(name or "").replace(" ", "").lower()
-    return _HERO_CN_FLAT.get(flat) or name
+    hit = _HERO_CN_FLAT.get(flat)
+    if not hit:
+        _warn_unknown("英雄", str(name or "").strip())
+        return str(name or "")
+    return hit
 
 
 _ODYSSEY_DIFFS = (("easy", "简单"), ("medium", "中等"), ("hard", "困难"))
@@ -138,13 +177,28 @@ _ODYSSEY_POWER_CN = {
     "RoadSpikes": "道路钉刺", "SheRa": "She Ra", "Skeletor": "Skeletor",
     "SuperMonkeyBeacon": "超级猴信标", "SuperMonkeyStorm": "超级猴风暴",
     "SwordOfPower": "力量之剑", "TechBot": "科技机器人", "TechBotPrime": "专业科技机器人",
+    "Techbot": "科技机器人",  # CT 社区数据集 daily_powers 的拼写变体
     "Thrive": "繁荣", "BattleCat": "战斗猫",
 }
 
 
 def _odyssey_power_name(raw: str) -> str:
     raw = str(raw or "").strip()
-    return _ODYSSEY_POWER_CN.get(raw, raw)
+    hit = _ODYSSEY_POWER_CN.get(raw)
+    if not hit:
+        _warn_unknown("力量", raw)
+        return raw
+    return hit
+
+
+def relic_cn(name: str) -> str:
+    """遗物内部名 → 中文译名；未收录时告警一次并回退原名。"""
+    raw = str(name or "").strip()
+    hit = _RELIC_CN.get(raw)
+    if not hit:
+        _warn_unknown("遗物", raw)
+        return raw
+    return hit
 
 
 _RACE_TITLE_CN = {
@@ -160,6 +214,7 @@ _ROUND_SET_CN = {
     "lych": "巫妖回合",
     "bloonarius": "膨胀气球神回合",
     "blastapopoulos": "爆裂魔炎回合",
+    "diamondback": "菱背回合",
 }
 
 

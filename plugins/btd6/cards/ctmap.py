@@ -13,7 +13,7 @@ import io
 import math
 from collections import Counter
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont
+from PIL import Image, ImageDraw, ImageFont
 
 from . import common, rules
 from .. import assets, ctmap, i18n, util
@@ -183,7 +183,6 @@ def _render_board(col: dict, view: str | None = None, badge: bool = False) -> tu
                   anchor="mm", stroke_width=max(1, round(1.1 * s)), stroke_fill=_TXT_STROKE)
 
     view = view or "maps"
-    show_rounds = view in ("maps", "heroes")
     for tid, (q, r) in grid["tiles"].items():
         cx, cy = tile_xy(q, r)
         data = ct_tiles.get(tid) or {}
@@ -388,7 +387,7 @@ def _board_html(col: dict, view: str | None = None, badge: bool = False,
             legend_cells.append(f"<div class='ct-lg'><img src='{relic_url}'/>遗物 {n_relic}</div>")
 
         powers = "、".join(i18n._odyssey_power_name(str(p)) for p in (col.get("daily_powers") or [])[:7])
-        relics_pool = "、".join(i18n._RELIC_CN.get(str(r), str(r)) for r in (col.get("event_relics") or []))
+        relics_pool = "、".join(i18n.relic_cn(str(r)) for r in (col.get("event_relics") or []))
         n_regular = type_cnt.get("Regular", 0) + type_cnt.get("TeamFirstCapture", 0)
         mode_line = " · ".join(f"{label} {mode_cnt.get(sub, 0)}"
                                for sub, label in ((8, "最少现金"), (9, "最少层数"), (2, "竞速"), (4, "Boss"))
@@ -460,9 +459,6 @@ def ct_tile_html(col: dict, tile_id: str) -> str:
     gd = data.get("GameData") or {}
     dc = gd.get("dcModel") or {}
     rules = dc.get("startRules") or {}
-    tile_type = str(data.get("TileType") or "Regular")
-    relic = str(data.get("RelicType") or "None")
-
     # ---- 标题/模式 ----
     sub = gd.get("subGameType")
     boss = gd.get("bossData") or {}
@@ -472,7 +468,7 @@ def ct_tile_html(col: dict, tile_id: str) -> str:
     # Boss 模式还要叠加 Boss 名
     if sub == 4 and boss:
         idx = int(boss.get("bossBloon") or 0)
-        boss_name_cn = i18n.boss_cn(BOSSES_IN_ORDER[idx]) if 0 <= idx < len(BOSSES_IN_ORDER) else "Boss"
+        boss_name_cn = i18n.boss_cn(ctmap.BOSSES_IN_ORDER[idx]) if 0 <= idx < len(ctmap.BOSSES_IN_ORDER) else "Boss"
         tier = int(boss.get("TierCount") or 0)
         mode_cn = f"{mode_cn} {boss_name_cn}" + (f" T{tier}" if tier else "")
 
@@ -648,21 +644,3 @@ def _render_tile_monkey_grid(dc_items: list) -> str:
     """
     meta = {"_towers": dc_items}
     return rules._daily_monkey_grid(meta)
-
-
-def _render_tile_cell(tower: dict) -> str:
-    """单格瓦片（仿 _race_monkey_cell 站点版式）。"""
-    raw = str(tower.get("tower") or "").strip()
-    is_hero = bool(tower.get("isHero"))
-    icon = assets._tower_icon(raw, is_hero)
-    name = assets._tower_display_name(raw, is_hero)
-    category = assets._tower_category(raw, is_hero)
-    title = name
-    if icon:
-        cell = f"<div class='race-mk {category}' title='{util._esc(title)}'>"
-        cell += f"<img src='{util._esc(icon)}' alt='{util._esc(name)}'/>"
-    else:
-        cell = f"<div class='race-mk {category}' title='{util._esc(title)}'>"
-        cell += f"<div class='race-mk-fallback'>{util._esc(name)}</div>"
-    cell += "</div>"
-    return cell

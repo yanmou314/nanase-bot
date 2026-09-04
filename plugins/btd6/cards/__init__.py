@@ -80,12 +80,12 @@ from .overview import (  # noqa: F401
 
 from .player import (  # noqa: F401
     player_html,
+    player_oak_html,
 )
 
 from .rules import (  # noqa: F401
     _ROUND_BLOON_ICON_FILES,
     _ROUND_BLOON_TOKEN_RE,
-    _ct_html,
     _custom_round_details,
     _custom_round_set_keys,
     _custom_round_sets,
@@ -220,7 +220,6 @@ __all__ = [
     '_TOWER_CAT_COLORS',
     '_bg_cache',
     '_bg_data_url',
-    '_ct_html',
     '_list_shell',    '_custom_round_details',
     '_custom_round_set_keys',
     '_custom_round_sets',
@@ -279,6 +278,7 @@ __all__ = [
     'overview',
     'overview_html',
     'player_html',
+    'player_oak_html',
     'rules',
     'rules_html',
     'rush',
