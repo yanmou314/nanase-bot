@@ -395,6 +395,8 @@ async def chat(bot: Bot, event: MessageEvent):
     key = _load_key()
     reply = ""
     gid = str(getattr(event, "group_id", 0) or 0)
+    if gid == "864213945":  # OW 任务中继群：保持静默
+        return
     if key:
         try:
             _check_user_budget(uid)
@@ -437,6 +439,8 @@ async def poke(bot: Bot, event: PokeNotifyEvent):
     reply = ""
     key = _load_key()
     gid = str(event.group_id or 0)
+    if gid == "864213945":  # OW 任务中继群：保持静默
+        return
     if key and now - _last_poke.get(uid, 0) >= _POKE_RATE_LIMIT:
         try:
             _check_user_budget(uid)

@@ -10,7 +10,7 @@ from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import MessageEvent, MessageSegment
 from PIL import Image, ImageDraw, ImageFont
 
-from common import FONTS, OWNER, cleanup_cache, is_owner
+from common import FONTS, TEST_PRIVILEGED_GROUPS, cleanup_cache, is_owner
 
 _logger = logging.getLogger(__name__)
 _BASE_DIR = os.path.dirname(__file__)
@@ -22,6 +22,7 @@ _CACHE_LOCK = threading.RLock()
 _IMAGE_SYMBOLS = {
     "🤖": "◆",
     "🎲": "◆",
+    "🎈": "◆",
     "🎮": "◆",
     "💬": "◆",
     "⏳": "◆",
@@ -39,15 +40,26 @@ help_cmd = on_command("hp", aliases={"帮助", "help", "菜单"}, priority=1, bl
 TEXT = """🤖 机器人指令菜单
 ━━━━━━━━━━━━━━━━━━━━
 🎲 娱乐
-  .rp            · 抽签 + 今日运势（别名：抽签、运势、求签）
+  .rp            · 抽签 + 今日运势（别名：抽签、运势、求签、今日运势、今日运气）
   今天吃什么      · 群里聊到“吃什么/吃啥”时随机推荐美食
+
+🎈 BTD6（气球塔防6）
+  .btd6排行 竞赛|boss|领土 [P页码|排名] · 排行榜（默认前50；P2第2页；数字查该名次玩家）
+  .btd6活动       · 当前竞赛/Boss/领土/远征总览
+  .btd6竞速       · 竞赛规则详情 │ .btd6boss · Boss规则（标准+精英）
+  .btd6ct         · 争夺领土详情 │ .btd6rush · Boss Rush冲刺
+  .btd6每日       · 每日挑战 │ .btd6远征 · 远征 │ .btd6收集 · 收集活动
+  .btd6玩家 <OAK> · 玩家档案（含存档；OAK在游戏账号设置生成，私聊使用）
+  .btd6地图 最新|热门|点赞 [数量] · 自制地图榜单
+  .btd6历史 [竞速|boss|领土|远征|每日] [数量] · 历史活动归档
+  提示：发送 .btd6 查看完整 BTD6 帮助
 
 🎮 守望先锋（国服）
   .绑定 名字#数字  · 绑定你的战网ID（一次即可）
   .战报 [ID]      · 近期战绩图
   .段位 [ID]      · 段位历史图
   .强度 [ID]      · 强度分析图
-  .总结 [ID] [日]  · 上分总结图（今日/昨日/本周）
+  .总结 [ID]      · 上分总结图（仅今日）
   .我的ID         · 查看当前绑定
   .解绑           · 解除绑定
 
@@ -82,6 +94,8 @@ OWNER_TEXT = """
   .统计开启        · 本群开启每日指令统计（每天 00:00）
   .统计关闭        · 本群关闭指令统计
   .统计状态        · 查看已开启推送的群
+  .btd6推送开启/关闭/状态 · BTD6 活动自动推送管理（竞速/Boss/CT等刷新时推送）
+  .btd6预热         · 手动预热全部BTD6活动数据
 
 💬 随机插话（机器人围观群聊，按概率以人设插话）
   .插话开启        · 本群开启随机插话
@@ -93,7 +107,12 @@ OWNER_TEXT = """
   .自动通过 关键字  · 开启自动通过（附言匹配关键字即放行）
   .自动通过关闭    · 关闭自动通过
   .自动通过查看    · 查看当前关键字配置
-  .自动通过数量    · 查看关键字数量"""
+  .自动通过数量    · 查看关键字数量
+  .同意 QQ号      · 通过待审批的入群申请（战网验证超时转人工时用）
+  .战网验证 开启/关闭 · 按群开关入群战网ID验证（在本群发可省略群号）
+  .战网验证       · 查看各群验证开关状态
+  .ow维护 开启/关闭/状态 · OW查询维护开关
+  私聊回复 同意/拒绝 · 处理待审批的加群/好友申请（多个时引用通知消息）"""
 
 
 def _wrap_line(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> list[str]:
@@ -196,29 +215,43 @@ def _render_help_image(text: str, variant: str) -> str:
         return path
 
 
+TEST_GROUP_IDS = TEST_PRIVILEGED_GROUPS
+
+
+def _is_test_group(event: MessageEvent) -> bool:
+    gid = getattr(event, "group_id", None)
+    try:
+        return int(gid) in TEST_GROUP_IDS if gid is not None else False
+    except (TypeError, ValueError):
+        return False
+
+
 @help_cmd.handle()
 async def handle(bot: Bot, event: MessageEvent):
-    text = TEXT
-    variant = "public"
-    owner = is_owner(event)
-    if owner:
-        text += OWNER_TEXT
+    group_id = getattr(event, "group_id", None)
+    is_test = _is_test_group(event)
+    is_priv = is_owner(event)
+
+    # 测试群：完整菜单直接在群内展示；其他群：始终公开菜单在群内展示（不再私发）；
+    # 私聊：按权限展示
+    if is_test:
+        text = TEXT + OWNER_TEXT
         variant = "owner"
+    elif group_id is not None:
+        text = TEXT
+        variant = "public"
+    else:
+        if is_priv:
+            text = TEXT + OWNER_TEXT
+            variant = "owner"
+        else:
+            text = TEXT
+            variant = "public"
+
     try:
         path = await asyncio.to_thread(_render_help_image, text, variant)
         content = MessageSegment.image("file://" + path)
     except Exception:
         _logger.exception("帮助图片生成失败，回退发送文本")
         content = text
-    # 管理菜单标注「仅你可见」：群聊里不广播，私发给主人后群里只回简短确认
-    if owner and hasattr(event, "group_id"):
-        sent = True
-        try:
-            await bot.send_private_msg(user_id=int(OWNER), message=content)
-        except Exception:
-            sent = False
-            _logger.warning("主人帮助菜单私发失败", exc_info=True)
-        await help_cmd.finish(
-            "📖 完整菜单已私发给你" if sent else "📖 完整菜单私发失败，请稍后再试"
-        )
     await help_cmd.finish(content)

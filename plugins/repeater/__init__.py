@@ -122,6 +122,8 @@ async def repeater(bot: Bot, event: GroupMessageEvent):
     if len(_track) > 2000:
         _prune()
     gid = event.group_id
+    if gid == 864213945:  # OW 任务中继群：保持静默，不复读
+        return
     _last_msg_ts[gid] = time.time()  # 记录群活动时间（仅内存），供 _prune 判断
     fp = _fingerprint(event)
 
