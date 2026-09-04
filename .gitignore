@@ -43,3 +43,7 @@ plugins/**/cache/
 plugins-disabled/**/cache/
 plugins/**/approve_guard.json
 plugins/**/maintenance.json
+
+# 手工改动前的快照备份（*.before-YYYYMMDD）与素材备份目录
+*.before-*
+plugins/btd6/assets/ui_backup_*/
