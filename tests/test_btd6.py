@@ -538,11 +538,13 @@ def test_handler_leaderboard_failure(monkeypatch):
 
 
 def test_handler_rules_race_and_boss(monkeypatch):
+    """规则拆分后：.btd6竞速 只出竞赛规则；带 boss 参数回提示；.btd6boss 出双卡。"""
     boss_meta = dict(META, name="Phayze30")
     bodies = {
         btd6.URL_RACES: [RACE_ACTIVE],
         RACE_ACTIVE["metadata"]: META,
         btd6.URL_BOSSES: [BOSS_UPCOMING],
+        BOSS_UPCOMING["metadataStandard"]: boss_meta,
         BOSS_UPCOMING["metadataElite"]: boss_meta,
     }
     monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(bodies))
@@ -552,26 +554,28 @@ def test_handler_rules_race_and_boss(monkeypatch):
     btd6._cooldowns.clear()
     with pytest.raises(FinishedException):
         asyncio.run(btd6.rules_cmd.handlers[0](_ev(".btd6竞速 boss 精英")))
-    assert "Boss·精英「Phayze30」规则" in str(btd6.rules_cmd.finished[-1])
+    assert "已拆分" in str(btd6.rules_cmd.finished[-1])
+    btd6._cooldowns.clear()
+    # .btd6boss：标准+精英双卡（首卡 send、末卡 finish；渲染禁用 → 文本兜底）
+    with pytest.raises(FinishedException):
+        asyncio.run(btd6.boss_cmd.handlers[0](_ev(".btd6boss")))
+    assert "Boss·标准「Phayze30」规则" in str(btd6.boss_cmd.sent[-1])
+    assert "Boss·精英「Phayze30」规则" in str(btd6.boss_cmd.finished[-1])
 
 
-def test_handler_rules_ct_does_not_query_boss(monkeypatch):
+def test_handler_rules_non_race_redirects_without_fetch(monkeypatch):
+    """规则拆分后：.btd6竞速 带非 race 参数只回提示，不请求任何接口。"""
     calls = []
 
-    async def fake_fetch(url):
+    async def fail_fetch(url):
         calls.append(url)
-        if url == btd6.URL_CT:
-            return [CT_ACTIVE]
-        if url == btd6.URL_BOSSES:
-            raise AssertionError("CT 规则不应查询 Boss 接口")
         raise AssertionError(f"不应请求 {url}")
 
-    monkeypatch.setattr(btd6.nkapi, "fetch_body", fake_fetch)
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", fail_fetch)
     with pytest.raises(FinishedException):
         asyncio.run(btd6.rules_cmd.handlers[0](_ev(".btd6竞速 领土")))
-    text = str(btd6.rules_cmd.finished[-1])
-    assert "领土暂无通用规则数据" in text
-    assert btd6.URL_BOSSES not in calls
+    assert "已拆分" in str(btd6.rules_cmd.finished[-1])
+    assert not calls
 
 
 def test_validate_url_allows_nk_and_rejects_other_hosts():
@@ -702,6 +706,7 @@ def test_rules_html_grid_and_escape(monkeypatch, tmp_path):
     (gdir / "000-MonkeyVillage.webp").write_bytes(b"w")
     (gdir / "QuincyPortrait.webp").write_bytes(b"w")
     (gdir / "CorvusPortrait.webp").write_bytes(b"w")
+    (gdir / "SilasPortrait.webp").write_bytes(b"w")
     monkeypatch.setattr(btd6.assets, "GAME_ASSET_DIR", str(gdir))
     btd6._game_mem.clear()
     meta = dict(META)
@@ -710,7 +715,8 @@ def test_rules_html_grid_and_escape(monkeypatch, tmp_path):
         {"tower": "Alchemist", "max": 1},
         {"tower": "MonkeyVillage", "max": -1, "path1NumBlockedTiers": 3},
         {"tower": "Quincy", "max": 0, "isHero": True},            # 禁用英雄 → 移除
-        {"tower": "Silas", "max": 99, "isHero": True},            # 皮肤英雄 → 基础立绘
+        {"tower": "Silas", "max": 99, "isHero": True},            # 独立英雄 → 本名展示
+        {"tower": "CorvusDecryptor", "max": 99, "isHero": True},  # 皮肤英雄 → 基础立绘·皮肤
         {"tower": "<x>", "max": 2},
     ]
     html = btd6.rules_html({
@@ -722,6 +728,8 @@ def test_rules_html_grid_and_escape(monkeypatch, tmp_path):
     assert "✕" not in html  # 不再使用打叉样式
     assert "×1" in html
     assert "2-5-5" in html  # 路1禁3层 → 可升到 2 层，其余 5
+    # Silas 已是独立英雄（9/3 移出皮肤表）显示本名；CorvusDecryptor 仍是科沃斯皮肤
+    assert "塞拉斯" in html
     assert "科沃斯·皮肤" in html
     assert "&lt;x&gt;" in html and "<x>" not in html  # 无立绘的塔退化为文字并转义
     assert "初始资金" in html and "最快用时" in html and "气球强化" in html
@@ -1380,12 +1388,13 @@ def test_collect_daily_coop(monkeypatch):
 
 
 def test_rules_html_coop_card():
-    """Co-op 卡走每日系渲染：kind_label 覆盖统计行标签，日历徽章照常使用。"""
+    """Co-op 卡走每日系渲染：prefix 进入副标题，日历徽章照常使用。
+    9/3 版式调整后每日卡不再渲染事件行，kind_label 不再出现在卡片中。"""
     col = {"prefix": "每日Coop", "meta": META, "map_img": "", "side_img": "",
            "scoring_cn": "固定种子", "kind_label": "Co-op 挑战", "stale_note": ""}
     html = btd6.rules_html(col)
-    assert "每日Coop" in html and "Co-op 挑战" in html
-    assert "每日挑战" not in html  # 标签被 kind_label 覆盖
+    assert "每日Coop" in html
+    assert "每日挑战" not in html
     assert "race-emblem-img" in html  # 每日系日历徽章
 
 
@@ -1501,16 +1510,16 @@ def test_cache_eviction_cleans_side_dictionaries(monkeypatch):
 
 def test_handler_rules_boss_failure_releases_cooldown(monkeypatch):
     """C1：Boss 规则双版本全部失败时回滚冷却，允许立即重试。"""
-    event = _ev(".btd6竞速 boss")
+    event = _ev(".btd6boss")
 
     async def broken(url):
         raise RuntimeError("down")
 
     monkeypatch.setattr(btd6.nkapi, "fetch_body", broken)
     with pytest.raises(FinishedException):
-        asyncio.run(btd6.rules_cmd.handlers[0](event))
+        asyncio.run(btd6.boss_cmd.handlers[0](event))
     # 处理器入口先加冷却、失败路径必须回滚：结束消息为失败文案而非限频文案
-    assert "获取 BTD6 规则失败" in str(btd6.rules_cmd.finished[-1])
+    assert "获取 BTD6 规则失败" in str(btd6.boss_cmd.finished[-1])
     assert not any(k.endswith(":rules") for k in btd6._cooldowns)
 
 
