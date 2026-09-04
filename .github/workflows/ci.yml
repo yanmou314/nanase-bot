@@ -24,7 +24,18 @@ jobs:
           pip install -r requirements.txt
           pip install pytest
       - name: Run tests
-        run: python -m pytest -q
+        run: |
+          set -o pipefail
+          python -m pytest -q --tb=line -rf | tee /tmp/pytest.log
+      # 失败时把 pytest 摘要打成 ::error:: 注解（checks API 无需凭证即可读，便于离线排查）
+      - name: Dump failure summary
+        if: failure()
+        run: |
+          if [ -f /tmp/pytest.log ]; then
+            grep -E '^(FAILED|ERROR) |^E   ' /tmp/pytest.log | head -25 | while IFS= read -r l; do echo "::error::"; done
+          else
+            echo "::error::pytest log missing (failure before Run tests step)"
+          fi
 
   lint:
     runs-on: ubuntu-latest
