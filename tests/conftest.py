@@ -228,8 +228,26 @@ def _install_stubs():
     v11.Bot = Bot
     onebot.v11 = v11
 
+    class _Rule:
+        """nonebot.rule.Rule 最小桩：包装异步规则调用器。真实 nonebot 经 DI 按注解
+        注入 (matcher/event/state)，桩里优先按三参调用、失败则退回单参 (event)。"""
+
+        def __init__(self, *callers):
+            self.callers = callers
+
+        async def __call__(self, matcher, event, state):
+            for caller in self.callers:
+                try:
+                    ok = await caller(matcher, event, state)
+                except TypeError:
+                    ok = await caller(event)
+                if not ok:
+                    return False
+            return True
+
     rule = types.ModuleType("nonebot.rule")
     rule.to_me = lambda: (lambda *_a, **_k: True)
+    rule.Rule = _Rule
     params_mod = types.ModuleType("nonebot.params")
     params_mod.CommandArg = lambda: None
 

@@ -70,7 +70,7 @@ def _patch_relay(monkeypatch, has_image, segs=None):
     """桩掉中继查询，返回记录查询目标的列表。"""
     seen = []
 
-    async def fake_relay(tag, timeout=180, active_key=""):
+    async def fake_relay(tag, timeout=180, active_key="", group_id=None):
         seen.append(tag)
         return (has_image, list(segs or []))
 
@@ -135,7 +135,9 @@ def test_join_no_image_keeps_pending_and_notice_wraps_user_content(monkeypatch):
     asyncio.run(bnet_verify._handle_group_join(bot, ev))
 
     assert bot.group_requests == []  # 既不通过也不拒绝，保持待人工
-    assert bnet_verify.list_verify_pending().get("888", {}).get("tag") == "Player#12345"
+    rec = bnet_verify.list_verify_pending().get("888") or {}
+    assert rec.get("tag") == "Player#12345"
+    assert rec.get("user_id") == 888  # 记录必须带 QQ：.同意 依赖它改名片+绑定
     assert len(bot.sent_private) == 2
     assert "待人工审批" in str(bot.sent_private[0]["message"])
     assert "查询失败" in str(bot.sent_private[1]["message"])  # 中继返回内容转给主人
@@ -299,6 +301,56 @@ def test_approve_verify_by_qq_approves_and_clears(monkeypatch):
     assert cards == [(888, 555, "Player#12345")]
     assert "555" not in bnet_verify._verify_pending
     assert "已通过" in notice
+
+
+def test_approve_verify_by_qq_legacy_record_without_user_id(monkeypatch):
+    """旧格式记录（缺 user_id）：QQ 回退用记录键，绑定与改名片照常。"""
+    binds, cards = [], []
+    monkeypatch.setattr(
+        bnet_verify, "_auto_bind", lambda uid, tag: binds.append((uid, tag)) or True
+    )
+    monkeypatch.setattr(
+        bnet_verify, "_schedule_card", lambda bot, gid, uid, tag: cards.append((gid, uid, tag))
+    )
+    bnet_verify._verify_pending["556"] = {
+        "flag": "f8", "sub_type": "add", "group_id": 888,
+        "tag": "Old#0001", "ts": time.time(),
+    }
+    handled, notice = asyncio.run(bnet_verify.approve_verify_by_qq(FakeBot(), "556"))
+    assert handled is True
+    assert binds == [(556, "Old#0001")]
+    assert cards == [(888, 556, "Old#0001")]
+    assert "已通过" in notice and "缺少 QQ 号" not in notice
+
+
+def test_relay_verify_tracks_active_state(monkeypatch):
+    """中继等待期间登记 _verify_active（含群号），完成/超时后清除。"""
+    import sys
+    import types
+
+    holder: dict = {}
+
+    async def fake_submit(kind, tag, text=None, timeout=None):
+        fut = asyncio.get_running_loop().create_future()
+        holder["fut"] = fut
+        return fut
+
+    fake = types.ModuleType("plugins.owstats")
+    fake.submit_relay_task = fake_submit
+    monkeypatch.setitem(sys.modules, "plugins.owstats", fake)
+
+    async def scenario():
+        task = asyncio.ensure_future(
+            bnet_verify._relay_verify_profile("Player#12345", active_key="777", group_id=888))
+        await asyncio.sleep(0)  # 让 _relay_verify_profile 跑到登记 active
+        assert bnet_verify._verify_active.get("777", {}).get("tag") == "Player#12345"
+        assert bnet_verify._verify_active["777"].get("group_id") == 888
+        holder["fut"].set_result(([MessageSegment.text("x")], True))
+        return await task
+
+    has_image, segs = asyncio.run(scenario())
+    assert has_image is True and [str(s) for s in segs] == ["x"]
+    assert "777" not in bnet_verify._verify_active  # 完成后清除
 
 
 def test_approve_verify_by_qq_missing_record():
