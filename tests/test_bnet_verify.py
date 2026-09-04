@@ -1,9 +1,10 @@
 """bnet_verify 入群验证插件测试。"""
 
 import asyncio
+import time
 
 import pytest
-from conftest import FinishedException, GroupRequestEvent, Message
+from conftest import FinishedException, GroupRequestEvent, Message, MessageSegment
 
 from helpers import load_plugin
 
@@ -40,6 +41,12 @@ def _group_request(flag="f1", gid=888, uid=222, sub="add", comment=""):
 @pytest.fixture(autouse=True)
 def _state_file(tmp_path, monkeypatch):
     monkeypatch.setattr(bnet_verify, "STATE_FILE", str(tmp_path / "groups.json"))
+    monkeypatch.setattr(bnet_verify, "_VERIFY_FILE", str(tmp_path / "verify_state.json"))
+    bnet_verify._verify_pending.clear()
+    bnet_verify._verify_active.clear()
+    yield
+    bnet_verify._verify_pending.clear()
+    bnet_verify._verify_active.clear()
 
 
 def _enable(gid=888):
@@ -59,13 +66,19 @@ def _run(fn, *args):
         return exc.message
 
 
-def _patch_query(monkeypatch, status, error=None):
-    async def fake_query(tag):
-        return {"status": status, "error": error}
-    monkeypatch.setattr(bnet_verify, "query_overwatch_profile", fake_query)
+def _patch_relay(monkeypatch, has_image, segs=None):
+    """桩掉中继查询，返回记录查询目标的列表。"""
+    seen = []
+
+    async def fake_relay(tag, timeout=180, active_key=""):
+        seen.append(tag)
+        return (has_image, list(segs or []))
+
+    monkeypatch.setattr(bnet_verify, "_relay_verify_profile", fake_relay)
+    return seen
 
 
-# ---------------- clean_join_answer：附言即ID ----------------
+# ---------------- clean_join_answer：附言提取战网ID ----------------
 
 def test_clean_join_answer():
     assert bnet_verify.clean_join_answer("Player#12345") == "Player#12345"
@@ -75,11 +88,18 @@ def test_clean_join_answer():
     assert bnet_verify.clean_join_answer("") == ""
 
 
-# ---------------- 核验主流程 ----------------
+def test_clean_join_answer_extracts_from_question_comment():
+    # 附言常连带验证问题：优先取"答案："后的 ID
+    assert bnet_verify.clean_join_answer("问题：请填写你的战网ID\n答案：Yanmou#51293") == "Yanmou#51293"
+    # 无"答案："标记时取最后一个冒号之后
+    assert bnet_verify.clean_join_answer("请填写战网ID：Yanmou#51293") == "Yanmou#51293"
+
+
+# ---------------- 核验主流程（中继查图：有图自动通过，无图转人工） ----------------
 
 def test_join_found_approves_binds_and_schedules_card(monkeypatch):
     _enable(888)
-    _patch_query(monkeypatch, "found")
+    seen = _patch_relay(monkeypatch, True)
     binds, cards = [], []
     monkeypatch.setattr(
         bnet_verify, "_auto_bind", lambda uid, tag: binds.append((uid, tag)) or True
@@ -92,6 +112,7 @@ def test_join_found_approves_binds_and_schedules_card(monkeypatch):
     ev = _group_request(flag="f1", gid=888, uid=222, comment="Player#12345")
     asyncio.run(bnet_verify._handle_group_join(bot, ev))
 
+    assert seen == ["Player#12345"]  # 附言提取出的 ID 送中继查询
     assert bot.group_requests == [
         {"flag": "f1", "sub_type": "add", "approve": True, "reason": ""}
     ]
@@ -102,16 +123,22 @@ def test_join_found_approves_binds_and_schedules_card(monkeypatch):
     assert "Player#12345" in notice and "已自动绑定ID" in notice and "群名片" in notice
 
 
-def test_join_notice_wraps_user_content_as_text(monkeypatch):
-    """附言是申请人可控内容：必须整体包在 text 段里，不得解析出 CQ 码段。"""
+def test_join_no_image_keeps_pending_and_notice_wraps_user_content(monkeypatch):
+    """中继无图片结果（超时/上游异常）：不动审批，转人工并通知主人；
+    附言是申请人可控内容：必须整体包在 text 段里，不得解析出 CQ 码段。"""
     _enable(888)
-    _patch_query(monkeypatch, "error", error="upstream_down")
+    _patch_relay(monkeypatch, False, segs=[MessageSegment.text("查询失败：upstream_down")])
     bot = FakeBot()
     ev = _group_request(
         flag="fc", gid=888, uid=888, comment="[CQ:at,qq=all] Player#12345"
     )
     asyncio.run(bnet_verify._handle_group_join(bot, ev))
 
+    assert bot.group_requests == []  # 既不通过也不拒绝，保持待人工
+    assert bnet_verify.list_verify_pending().get("888", {}).get("tag") == "Player#12345"
+    assert len(bot.sent_private) == 2
+    assert "待人工审批" in str(bot.sent_private[0]["message"])
+    assert "查询失败" in str(bot.sent_private[1]["message"])  # 中继返回内容转给主人
     msg = bot.sent_private[0]["message"]
     assert all(getattr(seg, "type", None) == "text" for seg in msg.segments)
     assert "[CQ:at,qq=all]" in str(msg)  # 原文按纯文本展示
@@ -120,7 +147,7 @@ def test_join_notice_wraps_user_content_as_text(monkeypatch):
 def test_join_approve_api_failure_is_swallowed(monkeypatch):
     """flag 失效（申请人撤回等）导致审批 API 失败时：不绑定、不改卡、不崩。"""
     _enable(888)
-    _patch_query(monkeypatch, "found")
+    _patch_relay(monkeypatch, True)
     binds, cards = [], []
     monkeypatch.setattr(
         bnet_verify, "_auto_bind", lambda uid, tag: binds.append((uid, tag))
@@ -186,115 +213,98 @@ def test_set_card_with_retry_exhausts_without_raise(monkeypatch):
     assert len(calls) == 2  # 重试后放弃，不向调用方抛异常
 
 
-def test_join_not_found_rejects_with_reason(monkeypatch):
+def test_join_unrecognized_answer_rejects_without_relay(monkeypatch):
+    """附言里提不出战网ID（无 名字#数字）：直接拒绝，不发起中继查询。"""
     _enable(888)
-    _patch_query(monkeypatch, "not_found")
-    bot = FakeBot()
-    ev = _group_request(flag="f2", gid=888, uid=333, comment="Wrong#1234")
-    asyncio.run(bnet_verify._handle_group_join(bot, ev))
-
-    assert len(bot.group_requests) == 1
-    call = bot.group_requests[0]
-    assert call["approve"] is False
-    assert "战网ID不正确" in call["reason"] and "Wrong#1234" in call["reason"]
-
-
-def test_join_plain_text_treated_as_id(monkeypatch):
-    """不做提取：附言整体作为ID送查询，查不到按"战网ID不正确"拒绝。"""
-    _enable(888)
-    seen = []
-
-    async def fake_query(tag):
-        seen.append(tag)
-        return {"status": "not_found"}
-
-    monkeypatch.setattr(bnet_verify, "query_overwatch_profile", fake_query)
+    seen = _patch_relay(monkeypatch, True)
     bot = FakeBot()
     ev = _group_request(flag="f3", gid=888, uid=444, comment="我想进群看看")
     asyncio.run(bnet_verify._handle_group_join(bot, ev))
 
-    assert seen == ["我想进群看看"]
+    assert seen == []  # 不发查询
     call = bot.group_requests[0]
     assert call["approve"] is False
-    assert "战网ID不正确" in call["reason"] and "我想进群看看" in call["reason"]
+    assert "未能识别战网ID" in call["reason"]
 
 
-def test_join_empty_answer_rejects_without_query(monkeypatch):
+def test_join_empty_answer_rejects_without_relay(monkeypatch):
     _enable(888)
-    seen = []
-
-    async def fake_query(tag):
-        seen.append(tag)
-        return {"status": "found"}
-
-    monkeypatch.setattr(bnet_verify, "query_overwatch_profile", fake_query)
+    seen = _patch_relay(monkeypatch, True)
     bot = FakeBot()
     ev = _group_request(flag="f3b", gid=888, uid=445, comment="   ")
     asyncio.run(bnet_verify._handle_group_join(bot, ev))
 
     assert seen == []  # 空ID不发查询
     assert bot.group_requests[0]["approve"] is False
-    assert "不能为空" in bot.group_requests[0]["reason"]
-
-
-def test_join_upstream_error_leaves_pending_and_notifies(monkeypatch):
-    _enable(888)
-    _patch_query(monkeypatch, "error", error="too_many_requests")
-    bot = FakeBot()
-    ev = _group_request(flag="f4", gid=888, uid=555, comment="Player#12345")
-    asyncio.run(bnet_verify._handle_group_join(bot, ev))
-
-    assert bot.group_requests == []  # 异常时不动审批，保持待人工
-    assert len(bot.sent_private) == 1
-    assert "待人工处理" in str(bot.sent_private[0]["message"])
+    assert "未能识别战网ID" in bot.group_requests[0]["reason"]
 
 
 def test_join_unmanaged_group_ignored(monkeypatch):
-    _patch_query(monkeypatch, "found")
+    seen = _patch_relay(monkeypatch, True)
     bot = FakeBot()
     ev = _group_request(flag="f5", gid=999, uid=666, comment="Player#12345")  # 999 未开启
     asyncio.run(bnet_verify._handle_group_join(bot, ev))
 
+    assert seen == []
     assert bot.group_requests == []
     assert bot.sent_private == []
 
 
-def test_query_maps_responses(monkeypatch):
-    class _Resp:
-        def __init__(self, payload, status_code=200):
-            self._payload = payload
-            self.status_code = status_code
+# ---------------- 中继查询与人工审批 ----------------
 
-        def json(self):
-            return self._payload
+def test_relay_verify_profile_returns_image_flag(monkeypatch):
+    import sys
+    import types
 
-    class _Client:
-        def __init__(self, payload, status_code=200):
-            self._payload = payload
-            self._status = status_code
+    async def fake_submit(kind, tag, text=None, timeout=None):
+        assert kind == "verify"
+        fut = asyncio.get_running_loop().create_future()
+        fut.set_result(([MessageSegment.text("档案")], True))
+        return fut
 
-        async def post(self, url, json=None, timeout=None):
-            return _Resp(self._payload, self._status)
-
-    # ok → found
-    monkeypatch.setattr(
-        bnet_verify, "get_http_client",
-        lambda t: _Client({"ok": True, "resolved": {"full_id": "Player#12345"}}),
+    fake = types.ModuleType("plugins.owstats")
+    fake.submit_relay_task = fake_submit
+    monkeypatch.setitem(sys.modules, "plugins.owstats", fake)
+    has_image, segs = asyncio.run(
+        bnet_verify._relay_verify_profile("Player#12345", active_key="777")
     )
-    assert asyncio.run(bnet_verify.query_overwatch_profile("Player#12345"))["status"] == "found"
-    # bnet_not_found → not_found
+    assert has_image is True and [str(s) for s in segs] == ["档案"]
+    assert "777" not in bnet_verify._verify_active  # 用完即清
+
+
+def test_relay_verify_profile_swallows_missing_owstats(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "plugins.owstats", None)  # import → ImportError
+    assert asyncio.run(bnet_verify._relay_verify_profile("Player#12345")) == (False, [])
+
+
+def test_approve_verify_by_qq_approves_and_clears(monkeypatch):
+    binds, cards = [], []
     monkeypatch.setattr(
-        bnet_verify, "get_http_client",
-        lambda t: _Client({"ok": False, "error": "bnet_not_found"}, 400),
+        bnet_verify, "_auto_bind", lambda uid, tag: binds.append((uid, tag)) or True
     )
-    assert asyncio.run(bnet_verify.query_overwatch_profile("Nobody#0000"))["status"] == "not_found"
-    # 其他错误码 → error
     monkeypatch.setattr(
-        bnet_verify, "get_http_client",
-        lambda t: _Client({"ok": False, "error": "upstream_boom"}, 500),
+        bnet_verify, "_schedule_card", lambda bot, gid, uid, tag: cards.append((gid, uid, tag))
     )
-    result = asyncio.run(bnet_verify.query_overwatch_profile("Player#12345"))
-    assert result["status"] == "error" and result["error"] == "upstream_boom"
+    bnet_verify._verify_pending["555"] = {
+        "flag": "f7", "sub_type": "add", "group_id": 888,
+        "user_id": 555, "tag": "Player#12345", "ts": time.time(),
+    }
+    bot = FakeBot()
+    handled, notice = asyncio.run(bnet_verify.approve_verify_by_qq(bot, "555"))
+    assert handled is True
+    assert bot.group_requests[0]["approve"] is True
+    assert binds == [(555, "Player#12345")]
+    assert cards == [(888, 555, "Player#12345")]
+    assert "555" not in bnet_verify._verify_pending
+    assert "已通过" in notice
+
+
+def test_approve_verify_by_qq_missing_record():
+    handled, notice = asyncio.run(bnet_verify.approve_verify_by_qq(FakeBot(), "404"))
+    assert handled is False
+    assert "没有 QQ 404" in notice
 
 
 # ---------------- 主人开关 ----------------
