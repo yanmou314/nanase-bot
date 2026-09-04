@@ -114,6 +114,9 @@ def _restore_verify_state() -> None:
         logger.warning("[bnet_verify] 验证状态恢复失败", exc_info=True)
 
 
+_STARTED_AT = time.time()  # 进程启动时刻：区分重启前遗留的在途验证与重启后新发起的
+
+
 _restore_verify_state()
 
 
@@ -123,14 +126,14 @@ async def _report_interrupted_verifies() -> None:
     if not _verify_active:
         return
     await asyncio.sleep(60)
-    if not _verify_active:
+    # 只算重启前遗留的（ts 早于本次启动）：启动后新发起且仍在途的不算中断
+    interrupted = {qq: rec for qq, rec in _verify_active.items()
+                   if isinstance(rec, dict) and float(rec.get("ts") or 0) < _STARTED_AT}
+    if not interrupted:
         return
     lines = []
-    for qq, rec in list(_verify_active.items()):
-        if isinstance(rec, dict):
-            lines.append(f"群{rec.get('group_id')} QQ{qq}（{rec.get('tag')}）")
-    if not lines:
-        return
+    for qq, rec in interrupted.items():
+        lines.append(f"群{rec.get('group_id')} QQ{qq}（{rec.get('tag')}）")
     try:
         bot = get_bot()
         await bot.send_private_msg(
@@ -141,6 +144,11 @@ async def _report_interrupted_verifies() -> None:
                 + "\n如对方已进群请忽略；否则请在QQ客户端手动处理，或等对方重申请后用 .同意 QQ号 处理"))
     except Exception:
         logger.warning("[bnet_verify] 中断通知发送失败", exc_info=True)
+        return
+    # 通知即完结：清理已提醒的遗留记录，避免之后每次重启都重复提醒
+    for qq in interrupted:
+        _verify_active.pop(qq, None)
+    await _save_verify_state()
 
 
 def _remember_verify_pending(uid: str, rec: dict) -> None:
@@ -151,8 +159,12 @@ def _remember_verify_pending(uid: str, rec: dict) -> None:
     _verify_pending[uid] = rec
 
 
-async def _relay_verify_profile(tag: str, timeout: int = 180, active_key: str = ""):
-    """经 owstats 中继向对方机器人查大神数据。返回 (has_image, segs)，绝不抛异常。"""
+async def _relay_verify_profile(tag: str, timeout: int = 180,
+                                active_key: str = "", group_id: int | None = None):
+    """经 owstats 中继向对方机器人查大神数据。返回 (has_image, segs)，绝不抛异常。
+
+    active_key 提供时把本次查询登记进 _verify_active（含群号），机器人若在等待期间
+    重启，启动钩子据此通知主人哪些验证被中断。"""
     try:
         from plugins.owstats import submit_relay_task
     except Exception:
@@ -164,7 +176,7 @@ async def _relay_verify_profile(tag: str, timeout: int = 180, active_key: str = 
         logger.warning("[bnet_verify] 提交中继任务失败", exc_info=True)
         return (False, [])
     if active_key:
-        _verify_active[active_key] = {"tag": tag, "ts": time.time()}
+        _verify_active[active_key] = {"tag": tag, "group_id": group_id, "ts": time.time()}
         await _save_verify_state()
     try:
         segs, has_image = await asyncio.wait_for(fut, timeout + 10)
@@ -253,7 +265,8 @@ async def _handle_group_join(bot: Bot, event: GroupRequestEvent) -> None:
             "未能识别战网ID：请填写你的战网ID（形如 昵称#12345）后重新申请",
         )
         return
-    has_image, relay_segs = await _relay_verify_profile(tag)
+    has_image, relay_segs = await _relay_verify_profile(
+        tag, active_key=str(event.user_id), group_id=gid)
     if has_image:
         try:
             await bot.set_group_add_request(
@@ -278,7 +291,7 @@ async def _handle_group_join(bot: Bot, event: GroupRequestEvent) -> None:
         )
         return
     _remember_verify_pending(str(event.user_id), {
-        "flag": event.flag, "sub_type": event.sub_type,
+        "flag": event.flag, "sub_type": event.sub_type, "user_id": event.user_id,
         "group_id": gid, "tag": tag, "comment": comment, "ts": time.time(),
     })
     await _save_verify_state()
@@ -321,7 +334,8 @@ async def approve_verify_by_qq(bot, target_qq: str):
     if not rec or not isinstance(rec, dict):
         return (False,
                 f"没有 QQ {target} 的待审批入群申请（可能已处理，或机器人重启后记录丢失，可在QQ客户端手动处理）")
-    gid, uid, tag = rec.get("group_id"), rec.get("user_id"), rec.get("tag", "")
+    # user_id 缺失时回退用记录键（早期版本记录没存 user_id，键本身就是 QQ）
+    gid, uid, tag = rec.get("group_id"), rec.get("user_id") or target, rec.get("tag", "")
     try:
         uid_int = int(uid)
     except (TypeError, ValueError):
@@ -337,10 +351,12 @@ async def approve_verify_by_qq(bot, target_qq: str):
     _verify_pending.pop(target, None)
     await _save_verify_state()
     logger.info(f"[bnet_verify] 群 {gid} 主人手动通过 {uid}（战网ID {tag}）")
-    bound = _auto_bind(uid_int, tag) if uid_int else False
+    if not uid_int:
+        return (True,
+                f"✅ 已通过 群{gid} QQ{target}（{tag}），但记录缺少 QQ 号，请手工改名片与绑定")
+    bound = _auto_bind(uid_int, tag)
     try:
-        if uid_int:
-            _schedule_card(bot, gid, uid_int, tag)
+        _schedule_card(bot, gid, uid_int, tag)
     except Exception:
         pass
     bind_note = "已自动绑定ID" if bound else "自动绑定失败（owstats 不可用）"
