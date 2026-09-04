@@ -32,10 +32,21 @@ jobs:
         if: failure()
         run: |
           if [ -f /tmp/pytest.log ]; then
-            grep -E '^(FAILED|ERROR) |^E   ' /tmp/pytest.log | head -25 | while IFS= read -r l; do echo "::error::"; done
+            grep -E '^(FAILED|ERROR) |^E   ' /tmp/pytest.log | head -25 | while IFS= read -r l; do echo "::error::$l"; done
           else
             echo "::error::pytest log missing (failure before Run tests step)"
           fi
+      # 失败时把 pytest 输出尾部开成 issue（匿名可读，用于无凭证排查）
+      - name: Open failure issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          { tail -c 4000 /tmp/pytest.log 2>/dev/null || echo "pytest.log missing"; } > /tmp/fail.txt
+          echo "python: ${{ matrix.python-version }}" >> /tmp/fail.txt
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "CI failure at ${GITHUB_SHA::7} (py ${{ matrix.python-version }})" \
+            --body-file /tmp/fail.txt || true
 
   lint:
     runs-on: ubuntu-latest
