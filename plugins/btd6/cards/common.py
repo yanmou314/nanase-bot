@@ -87,7 +87,7 @@ body {{ width: {CARD_W}px; height: {h}px; font-family: "WenQuanYi Micro Hei", "N
 .mkgrid {{ text-align: center; padding: 4px 0 0; }}
 .mkwrap {{ display: inline-block; margin: 4px 3px; vertical-align: top; }}
 .mk {{ position: relative; width: 96px; }}
-.mk img {{ width: 94px; height: 94px; border-radius: 14px; border: 2px solid #699bd9; }}
+.mk img {{ width: 94px; height: 94px; border-radius: 14px; border: 2px solid #699bd9; object-fit: contain; }}
 .mk .nm {{ font-size: 16px; color: #cfe0f2; padding-top: 3px; text-align: center;
            white-space: nowrap; overflow: hidden; }}
 .mk .bd {{ position: absolute; top: 0; left: 0; width: 94px; height: 94px;

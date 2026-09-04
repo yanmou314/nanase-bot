@@ -358,24 +358,26 @@ async def _btd6_push_kind(kind: str) -> None:
     # 12 分钟窗口：:10 采样点距刷新点恰为 10min，10min 窗口会漏掉第三次容错采样
     window_ms = 12 * 60 * 1000
     last = _last_pushed()
-    # 单类检查（只取列表判断 id/start，重量级元数据/素材留到确认推送后再拉）
+    # 单类检查（只取列表判断 id/start，重量级元数据/素材留到确认推送后再拉）。
+    # 各类只取自己需要的列表接口（collect_overview 一次拉 5 个列表，采样场景纯浪费；
+    # fetch_body 有 TTL 缓存，同一刷新点相邻采样任务也不会重复打 API）
     try:
         ev = None
         if kind == "race":
-            data = await collect.collect_overview()
-            ev = util._pick_section(data["races"], now)
+            items = await collect._safe(nkapi.fetch_body(nkapi.URL_RACES), "push_race")
+            ev = util._pick_section(items if isinstance(items, list) else [], now)
         elif kind == "boss":
-            data = await collect.collect_overview()
-            ev = util._pick_section(data["bosses"], now)
+            items = await collect._safe(nkapi.fetch_body(nkapi.URL_BOSSES), "push_boss")
+            ev = util._pick_section(items if isinstance(items, list) else [], now)
         elif kind == "ct":
-            data = await collect.collect_overview()
-            ev = util.pick_active(data["cts"], now) or util.pick_next(data["cts"], now) or util.fallback_latest(data["cts"])
-        elif kind == "odyssey":
-            items = await collect._safe(nkapi.fetch_body(nkapi.URL_ODYSSEY)) or []
+            items = await collect._safe(nkapi.fetch_body(nkapi.URL_CT), "push_ct")
+            items = items if isinstance(items, list) else []
             ev = util.pick_active(items, now) or util.pick_next(items, now) or util.fallback_latest(items)
         elif kind == "rush":
-            data = await collect.collect_overview()
-            ev = util._pick_section(data.get("rush") or [], now)
+            items = await collect._safe(nkapi.fetch_body(nkapi.URL_EVENTS), "push_rush")
+            rush_list = [e for e in (items if isinstance(items, list) else [])
+                         if isinstance(e, dict) and e.get("type") == "bossRush"]
+            ev = util._pick_section(rush_list, now)
         elif kind == "daily":
             items = await collect._safe(nkapi.fetch_body(nkapi.URL_DAILY)) or []
             ev = next((x for x in items if str(x.get("name") or "").startswith("Standard")), None)

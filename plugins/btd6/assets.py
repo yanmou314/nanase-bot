@@ -239,6 +239,38 @@ def _ui_asset_data_url(fname: str) -> str:
     return url
 
 
+# 站点风素材（profile/奖章/UI，由 btd6apiexplorer.github.io/Assets 下载，随插件部署）。
+SITE_ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets", "site")
+_site_mem: OrderedDict[str, str] = OrderedDict()
+
+
+def _site_asset_data_url(rel: str) -> str:
+    """读取站点风本地素材并转 data: URL；缺失返回空串由调用方降级（只显示文字）。"""
+    if not rel or not re.fullmatch(r"[A-Za-z0-9_.\-/]+\.webp", rel):
+        return ""
+    if ".." in rel or rel.startswith("/"):
+        return ""
+    with _local_mem_lock:
+        hit = _site_mem.get(rel)
+        if hit:
+            _site_mem.move_to_end(rel)
+            return hit
+    path = os.path.join(SITE_ASSET_DIR, *rel.split("/"))
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return ""
+    if len(data) < 500:
+        return ""
+    url = "data:image/webp;base64," + base64.b64encode(data).decode("ascii")
+    with _local_mem_lock:
+        _site_mem[rel] = url
+        _site_mem.move_to_end(rel)
+        nkapi._prune_ordered(_site_mem, 128)
+    return url
+
+
 # 与游戏内猴子选择器一致的分类色；新塔缺少分类时仍可安全回退为普通蓝色。
 _TOWER_CATEGORY = {
     "DartMonkey": "primary", "BoomerangMonkey": "primary", "BombShooter": "primary",
@@ -301,8 +333,8 @@ def _tower_display_name(raw: str, is_hero: bool) -> str:
 
 # 英雄皮肤 → 基础英雄立绘（API 会把可用皮肤单列，本地只存基础立绘）
 _SKIN_PORTRAIT = {
-    "Silas": "CorvusPortrait.webp", "CorvusDecryptor": "CorvusPortrait.webp",
-    "DanDMonke": "PatFustyPortrait.webp", "FustyTheSnowman": "PatFustyPortrait.webp",
+    "CorvusDecryptor": "CorvusPortrait.webp",
+    "FustyTheSnowman": "PatFustyPortrait.webp",
     "KaijuPat": "PatFustyPortrait.webp",
     "ETn": "EtiennePortrait.webp", "BookWyrmEtienne": "EtiennePortrait.webp",
     "BikerBones": "BenjaminPortrait.webp", "BenJammin": "BenjaminPortrait.webp",
@@ -355,6 +387,7 @@ _BOSS_EVENT_ASSETS = {
     "dreadbloon": "boss-dreadbloon.png",
     "phayze": "boss-phayze.png",
     "blastapopoulos": "boss-blastapopoulos.png",
+    "diamondback": "boss-diamondback.png",
 }
 
 

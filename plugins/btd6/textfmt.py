@@ -339,7 +339,9 @@ def _odyssey_meta_lines(meta: dict | None) -> list[str]:
     return lines
 
 
-def odyssey_text(col: dict) -> str:
+def odyssey_text(col: dict, only: list[str] | None = None) -> str:
+    """远征文本版。only：只输出指定难度（easy/medium/hard）——
+    供 handle_odyssey 部分卡片渲染失败时回退剩余难度的文本，不重复已发内容。"""
     if col.get("empty"):
         return col["empty"]
     ev, diffs = col["ev"], col["diffs"]
@@ -352,6 +354,8 @@ def odyssey_text(col: dict) -> str:
         "",
     ]
     for d, label in i18n._ODYSSEY_DIFFS:
+        if only and d not in only:
+            continue
         diff = diffs.get(d) or {}
         meta = diff.get("meta")
         lines.append(f"【{label}】")
@@ -395,6 +399,31 @@ def player_text(col: dict) -> str:
         f" · 挑战完成 {util.fmt_cn_num(gp.get('challengesCompleted'))}",
         f"累计猴币 {util.fmt_cn_num(gp.get('cashEarned'))} · 奖杯 {util.fmt_cn_num(gp.get('totalTrophiesEarned'))}",
     ]
+    sv = col.get("save") or {}
+    if isinstance(sv, dict) and sv:
+        txp = sv.get("towerXP") or {}
+        try:
+            top_xp = sorted(
+                ((k, v) for k, v in txp.items() if isinstance(v, (int, float))),
+                key=lambda kv: kv[1], reverse=True)[:3]
+            top_xp_txt = "/".join(f"{i18n.tower_cn(k)}{util.fmt_cn_num(v)}" for k, v in top_xp) or "—"
+        except (AttributeError, TypeError):
+            top_xp_txt = "—"
+        lines.extend([
+            "",
+            "存档：",
+            f"  经验 {util.fmt_cn_num(sv.get('xp'))} · 老兵经验 {util.fmt_cn_num(sv.get('veteranXp'))}",
+            f"  猴币 {util.fmt_cn_num(sv.get('monkeyMoney'))}"
+            f" · 奖杯 {util.fmt_cn_num(sv.get('trophies'))}/{util.fmt_cn_num(sv.get('lifetimeTrophies'))}",
+            f"  对局 {util.fmt_cn_num(sv.get('gamesPlayed'))}"
+            f" · 最高回合 {sv.get('highestSeenRound') or '—'}"
+            f" · 竞速参赛 {util.fmt_cn_num(sv.get('totalRacesEntered'))}",
+            f"  每日 {util.fmt_cn_num(sv.get('totalDailyChallengesCompleted'))}"
+            f" · 远征 {util.fmt_cn_num(sv.get('totalCompletedOdysseys'))}"
+            f" · 成就 {len(sv.get('achievementsClaimed') or [])}"
+            f" · 知识点 {sv.get('knowledgePoints') if sv.get('knowledgePoints') is not None else '—'}",
+            f"  主英雄 {i18n.tower_cn(str(sv.get('primaryHero') or ''))} · 塔经验Top3 {top_xp_txt}",
+        ])
     note = col.get("stale_note") or ""
     if note:
         lines.extend(["", note])
@@ -504,7 +533,7 @@ def ct_text(col: dict) -> str:
                      + ("…" if len(powers) > 7 else ""))
     relics = col.get("event_relics") or []
     if relics:
-        lines.append("💎 本期遗物池：" + "、".join(i18n._RELIC_CN.get(str(r), str(r)) for r in relics))
+        lines.append("💎 本期遗物池：" + "、".join(i18n.relic_cn(str(r)) for r in relics))
     if not ct_tiles:
         lines.append("（地图布局数据暂缺，仅显示 NK 官方摘要）")
     note = col.get("stale_note") or ""
@@ -591,7 +620,7 @@ def ct_tile_text(col: dict, tile_id: str) -> str:
     if tile_type == "Banner":
         lines.append("格子类型：CT积分（旗帜）")
     if relic != "None":
-        lines.append(f"遗物：{i18n._RELIC_CN.get(relic, relic)}")
+        lines.append(f"遗物：{i18n.relic_cn(relic)}")
     heroes = ctmap.tile_heroes(gd)
     if heroes:
         if any(h == "ChosenPrimaryHero" for h in heroes):

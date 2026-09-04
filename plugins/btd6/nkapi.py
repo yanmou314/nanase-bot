@@ -6,6 +6,7 @@
 import asyncio
 import json
 import logging
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -28,6 +29,18 @@ URL_ODYSSEY = f"{API_ROOT}/btd6/odyssey"
 URL_EVENTS = f"{API_ROOT}/btd6/events"
 URL_RUSH = f"{API_ROOT}/btd6/bossRush"
 URL_USERS = f"{API_ROOT}/btd6/users/"
+URL_SAVE = f"{API_ROOT}/btd6/save/"
+
+
+_OAK_URL_RE = re.compile(r"(btd6/(?:save|users)/)oak_[^/?\s]+")
+
+
+def _mask_url(url: str) -> str:
+    """日志脱敏：OAK 等同账号凭证，绝不能落盘进日志。"""
+    try:
+        return _OAK_URL_RE.sub(r"\1oak_***", str(url))
+    except Exception:
+        return "?"
 # CT 社区数据集（BTD6 API Explorer 同源只读桶）：期数映射与逐格地图/模式/遗物布局
 URL_CT_EVENT_SEEDS = "https://storage.googleapis.com/btd6-ct-map/event-seeds.json"
 URL_CT_EVENT_DATA = "https://storage.googleapis.com/btd6-ct-map/events/{}"
@@ -259,7 +272,7 @@ async def _refresh_url(url: str) -> None:
     except Exception:
         fails = _refresh_fail_counts.get(url, 0) + 1
         _refresh_fail_counts[url] = fails
-        _logger.warning("BTD6 后台刷新失败（保留旧缓存） url=%s 连续失败 %d 次", url, fails, exc_info=True)
+        _logger.warning("BTD6 后台刷新失败（保留旧缓存） url=%s 连续失败 %d 次", _mask_url(url), fails, exc_info=True)
     else:
         _refresh_fail_counts.pop(url, None)
     finally:
@@ -308,7 +321,7 @@ async def _refresh_raw_url(url: str) -> None:
     except Exception:
         fails = _refresh_fail_counts.get(url, 0) + 1
         _refresh_fail_counts[url] = fails
-        _logger.warning("数据端点后台刷新失败（保留旧缓存） url=%s 连续失败 %d 次", url, fails, exc_info=True)
+        _logger.warning("数据端点后台刷新失败（保留旧缓存） url=%s 连续失败 %d 次", _mask_url(url), fails, exc_info=True)
     else:
         _refresh_fail_counts.pop(url, None)
     finally:
@@ -417,7 +430,7 @@ async def fetch_leaderboard_paginated(start_url: str, rows: int, touched: set[st
                         continue
                 break
             except Exception:
-                _logger.warning("排行榜分页拉取失败 url=%s", url, exc_info=True)
+                _logger.warning("排行榜分页拉取失败 url=%s", _mask_url(url), exc_info=True)
                 break
         if not isinstance(body, list):
             break
@@ -445,7 +458,7 @@ async def fetch_leaderboard_paginated(start_url: str, rows: int, touched: set[st
             with _cache_lock:
                 _lb_next_cache[url] = next_url
         except Exception:
-            _logger.warning("排行榜分页 next 获取失败 url=%s", url, exc_info=True)
+            _logger.warning("排行榜分页 next 获取失败 url=%s", _mask_url(url), exc_info=True)
             break
         url = next_url
     return entries[:rows]
