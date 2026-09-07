@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -25,6 +26,9 @@ _COMMAND_START = tuple(s for s in get_driver().config.command_start if s)
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), "repeater_state.json")
 
+# 单条消息段即可复读的 QQ 内置表情/商城大表情类型
+_REPEATABLE_SINGLE_TYPES = ("face", "mface", "bface")
+
 
 def _text_hash(text: str) -> str:
     """文本指纹只存哈希，不落盘原文（隐私）。"""
@@ -41,6 +45,9 @@ def _normalize_item(item) -> tuple:
             if isinstance(val, str) and re.fullmatch(r"[0-9a-f]{40}", val):
                 return ("t", val, "")
             return ("t", _text_hash(str(val)), "")
+        if kind == "f":
+            # 表情 payload（消息段）无法从哈希恢复；重启后仅参与计数，不再复读
+            return ("f", val, "")
         return (kind, val, val)  # 图片指纹（QQ 文件哈希，非消息内容）
     return item
 
@@ -111,9 +118,21 @@ def _fingerprint(event: GroupMessageEvent):
     if text and not (_COMMAND_START and text.startswith(_COMMAND_START)) and all(s.type == "text" for s in segs):
         return ("t", _text_hash(text), text)  # 哈希用于比对，原文仅存内存供复读发送
     if len(segs) == 1 and segs[0].type == "image":
+        # 商城表情（带 emoji_id 的 gif）以下发为 image 段，file 是内部引用（如 a3-xxx.gif），
+        # 用它重发会失败；改按表情处理：指纹取 emoji_id，payload 保留原消息段供重发
+        if segs[0].data.get("emoji_id"):
+            key = json.dumps({k: segs[0].data.get(k) for k in ("emoji_id", "emoji_package_id", "key", "summary")}, sort_keys=True, ensure_ascii=False)
+            return ("f", _text_hash(key), segs[0])
         file_id = segs[0].data.get("file") or segs[0].data.get("url") or ""
         if file_id:
             return ("i", file_id, file_id)
+    if len(segs) == 1 and segs[0].type in _REPEATABLE_SINGLE_TYPES:
+        # QQ 小黄脸（face）/表情商城大表情（mface）/VIP 表情（bface）：
+        # 指纹取消息段数据；payload 存原消息段供复读（仅内存，落盘只存哈希）
+        if not segs[0].data:
+            return None
+        key = json.dumps(segs[0].data, sort_keys=True, ensure_ascii=False)
+        return ("f", _text_hash(key), segs[0])
     return None
 
 
@@ -141,17 +160,20 @@ async def repeater(bot: Bot, event: GroupMessageEvent):
     ):
         _replied_fp.pop(gid, None)  # 复读链被打断（出现了不同消息），重置已复读标记
         return
-    if _replied_fp.get(gid) == fp:
-        return  # 同一串连续复读只触发一次
+    if _replied_fp.get(gid) == fp[:2]:
+        return  # 同一串连续复读只触发一次（表情指纹的 payload 是消息段对象，须按前两元比较）
 
-    _replied_fp[gid] = fp
+    _replied_fp[gid] = fp[:2]
     _replied_ts[gid] = time.time()
     try:
         if fp[0] == "t":
             # MessageSegment.text 包裹：用户输入的字面 [CQ:...] 不会被解析为真实 CQ 码
             await bot.send_group_msg(group_id=gid, message=MessageSegment.text(fp[2]))
-        else:
+        elif fp[0] == "i":
             # 图片 file_id 过期后发送失败常见，留痕避免插件静默失效无从察觉
             await bot.send_group_msg(group_id=gid, message=MessageSegment.image(fp[2]))
+        elif isinstance(fp[2], MessageSegment):
+            # QQ 表情/商城大表情：原样重发该消息段
+            await bot.send_group_msg(group_id=gid, message=fp[2])
     except Exception:
-        _logger.debug("复读发送失败（群 %s）", gid, exc_info=True)
+        _logger.warning("复读发送失败（群 %s）", gid, exc_info=True)

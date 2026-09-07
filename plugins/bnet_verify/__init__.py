@@ -250,6 +250,11 @@ async def _reject(bot: Bot, event: GroupRequestEvent, reason: str) -> None:
         )
         return
     logger.info(f"[bnet_verify] 群 {event.group_id} 拒绝 {event.user_id}：{reason}")
+    await _notify_owner(
+        bot,
+        MessageSegment.text(f"❌ 入群验证未通过，已自动拒绝\n🏘 群号：{event.group_id}\n👤 申请人QQ：{event.user_id}\n🚫 原因：")
+        + MessageSegment.text(reason),
+    )
 
 
 async def _handle_group_join(bot: Bot, event: GroupRequestEvent) -> None:
