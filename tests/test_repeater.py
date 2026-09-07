@@ -124,3 +124,70 @@ def test_repeater_none_fingerprint_breaks_chain_without_crash():
     mod._track.clear()
     mod._replied_ts.clear()
     mod._replied_fp.clear()
+
+def test_fingerprint_single_face():
+    """QQ 小黄脸单条消息应可复读，同表情指纹稳定、不同表情指纹不同。"""
+    seg = MessageSegment("face", {"id": "96"})
+    fp = repeater._fingerprint(GroupMessageEvent(plain="", message=[seg]))
+    assert fp is not None and fp[0] == "f"
+    assert fp[2] is seg
+    again = repeater._fingerprint(
+        GroupMessageEvent(plain="", message=[MessageSegment("face", {"id": "96"})])
+    )
+    assert again is not None and again[1] == fp[1]
+    other = repeater._fingerprint(
+        GroupMessageEvent(plain="", message=[MessageSegment("face", {"id": "97"})])
+    )
+    assert other is not None and other[1] != fp[1]
+
+
+def test_fingerprint_single_mface_and_empty_data():
+    """表情商城大表情（mface）应可复读；数据键序不影响指纹；空数据不可复读。"""
+    seg = MessageSegment("mface", {"emoji_id": "123", "emoji_package_id": "7"})
+    fp = repeater._fingerprint(GroupMessageEvent(plain="", message=[seg]))
+    assert fp is not None and fp[0] == "f"
+    same = repeater._fingerprint(
+        GroupMessageEvent(
+            plain="",
+            message=[MessageSegment("mface", {"emoji_package_id": "7", "emoji_id": "123"})],
+        )
+    )
+    assert same is not None and same[1] == fp[1]
+    assert repeater._fingerprint(
+        GroupMessageEvent(plain="", message=[MessageSegment("mface", {})])
+    ) is None
+
+
+def test_repeater_repeats_single_face_chain():
+    """三个相同小黄脸连发应触发一次复读，且重发的是原表情段。"""
+    import asyncio
+
+    mod = repeater
+    mod._track.clear()
+    mod._replied_ts.clear()
+    mod._replied_fp.clear()
+
+    sent = []
+
+    class FakeBot:
+        async def send_group_msg(self, **kw):
+            sent.append(kw)
+
+    async def feed():
+        ev = GroupMessageEvent(
+            group_id=777, plain="", message=[MessageSegment("face", {"id": "96"})]
+        )
+        await mod.repeater(FakeBot(), ev)
+
+    asyncio.run(feed())
+    asyncio.run(feed())
+    assert not sent  # 未满三连
+    asyncio.run(feed())
+    assert len(sent) == 1
+    assert sent[0]["message"].type == "face"  # 原样重发表情段
+    asyncio.run(feed())
+    assert len(sent) == 1  # 同一串连续复读只触发一次
+
+    mod._track.clear()
+    mod._replied_ts.clear()
+    mod._replied_fp.clear()

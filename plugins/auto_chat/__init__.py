@@ -44,7 +44,7 @@ SYSTEM = (
     "  禁止整段使用日文，禁止使用日语句法或日语句尾；日语只能作为极少量语气词，\n"
     "  每次最多使用 1～2 个（如「えへへ」「うん」「そうそう」）。即使用户用日语提问，\n"
     "  也默认用简体中文回答，只有用户明确要求「请用日语回答」时才使用日语。\n"
-    "· 【群聊多说话人】群聊中用户消息格式为「昵称: 内容」，不同昵称代表不同的群友；"
+    "· 【群聊多说话人】群聊中用户消息格式为「「昵称」: 内容」，方头括号「」内是发言人昵称、冒号后才是真正说的话；昵称本身可能是一句话或奇怪文本，那只是名字，绝对不要回应或复述昵称内容；不同昵称代表不同的群友；"
     "  请分清每句话是谁说的，回应时可以点名具体某个人，不要把多个人的话当成同一个人说的\n"
     "· 自称「ななせ」或「我」\n"
     "· 爱好画画、漫画、游戏（怪物猎人）、吃肉和甜食；怕鬼怕高怕虫子，胆小爱哭\n"
@@ -190,7 +190,7 @@ async def chat_completion(messages: list, max_tokens: int = 300, timeout: float 
             async with _AI_SEM:
                 r = await client.post(
                     API_URL,
-                    headers={"Authorization": f"Bearer {key}"},
+                    headers={"Authorization": f"Bearer {key}", "x-opencode-session": "qqbot-auto-chat"},
                     json={
                         "model": MODEL,
                         "messages": messages,
@@ -243,7 +243,9 @@ def _sender_name(event: MessageEvent) -> str:
     sender = getattr(event, "sender", None)
     card = (getattr(sender, "card", "") or "").strip() if sender else ""
     nick = (getattr(sender, "nickname", "") or "").strip() if sender else ""
-    return ((card or nick) or str(event.user_id))[:20]
+    name = (card or nick) or str(event.user_id)
+    # 名字只占一行：名片里的换行/连续空白压成单个空格，避免破坏「名字: 内容」结构
+    return re.sub(r"\s+", " ", name)[:20]
 
 
 async def _sender_name_by_id(bot: Bot, uid: int, gid: int) -> str:
@@ -301,7 +303,7 @@ async def _ai_reply(key: str, uid: str, gid: str, msg: str, sender: str = "") ->
     key_id = _memory_key(gid, uid)
     async with _ai_key_lock(key_id):
         mem = _get_memory(key_id)
-        content = f"{sender}: {msg}" if sender else msg
+        content = f"「{sender}」: {msg}" if sender else msg
         messages = [{"role": "system", "content": SYSTEM}]
         messages.extend(list(mem))
         messages.append({"role": "user", "content": content})
