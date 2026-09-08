@@ -199,51 +199,57 @@ async def submit_relay_task(kind: str, tag: str, text=None, timeout=None):
 relay_listener = on_message(priority=4, block=False)
 
 
-@relay_listener.handle()
-async def _relay_result(bot: Bot, event: MessageEvent):
-    """监听中继群里查询机器人的回复，去掉@自身后转发给原群/原用户（串行，无需任务ID关联）。"""
-    global _task_current
-    if not isinstance(event, GroupMessageEvent):
-        return
-    if event.group_id != RELAY_GROUP_ID or str(event.user_id) != str(RELAY_BOT_QQ):
-        return
-    if _task_current is None:
-        logger.info("owstats 中继群收到非任务结果，已忽略")
-        return
-    has_image = False
-    for _seg in event.message:
+# 对方机器人一条查询最多回两条消息：正常是 文本 + 图片；若第二条不是图片
+# 则为报错信息，直接中断本次查询；若查询发出后第一条就是图片，则只有在
+# 存在未过期的“缺图片收尾”记录时才视为上一任务的延迟回复并丢弃，否则按
+# 本任务的单图结果直接处理。
+SECOND_MSG_WAIT = 30  # 收到第一条文本后等待第二条的宽限秒数
+_ORPHAN_IMAGE_TTL = 300  # 缺图片收尾记录的有效期（秒）：超时后不再误伤后续任务的首条图片
+
+
+_orphan_image_times: list = []  # 缺图片收尾的时间戳（单调时钟），有它才可能是延迟图片
+
+
+def _prune_orphans(now: float) -> None:
+    cutoff = now - _ORPHAN_IMAGE_TTL
+    while _orphan_image_times and _orphan_image_times[0] <= cutoff:
+        _orphan_image_times.pop(0)
+
+
+def _note_missing_image() -> None:
+    """任务收尾时没见过图片：之后一条首条图片可能是它的延迟到达，先记一笔。"""
+    now = time.monotonic()
+    _prune_orphans(now)
+    _orphan_image_times.append(now)
+
+
+def _consume_orphan() -> bool:
+    """有未过期的缺图片记录则消费一条并返回 True（调用方应丢弃首条图片）。"""
+    now = time.monotonic()
+    _prune_orphans(now)
+    if _orphan_image_times:
+        _orphan_image_times.pop(0)
+        return True
+    return False
+
+
+def _msg_has_image(message) -> bool:
+    for _seg in message:
         if _seg.type == "image":
-            has_image = True
-            break
-    if not has_image and _PROGRESS_RE.search(event.message.extract_plain_text()):
-        logger.info("owstats 中继群收到进度提示，已忽略")
-        return
-    task = _task_current
-    _task_current = None
-    if str(task.get("group_id")) == "864213945":
-        logger.info("owstats 结果已在中继群内可见，跳过转回")
-        await _dispatch_next()
-        return
-    try:
-        self_id = str(bot.self_id)
-    except Exception:
-        self_id = ""
+            return True
+    return False
+
+
+def _strip_self_at(message, self_id: str) -> list:
     segs = []
-    for seg in event.message:
+    for seg in message:
         if seg.type == "at" and (str(seg.data.get("qq", "")) == self_id or seg.data.get("qq") == "all"):
             continue
         segs.append(seg)
-    elapsed = time.monotonic() - task["t0"] if task.get("t0") else 0.0
-    fut = task.get("future")
-    if fut is not None:
-        if not fut.done():
-            fut.set_result((segs, has_image))
-        await _dispatch_next()
-        return
-    if not segs:
-        body = MessageSegment.text("对方机器人返回了空结果，请重试～")
-    else:
-        body = Message(segs) + MessageSegment.text(f"\n用时 {elapsed:.1f}s")
+    return segs
+
+
+async def _send_to_requester(bot: Bot, task: dict, body) -> None:
     try:
         if str(task["user_id"]).isdigit():
             target_at = MessageSegment.at(int(task["user_id"]))
@@ -255,7 +261,157 @@ async def _relay_result(bot: Bot, event: MessageEvent):
             await bot.send_private_msg(user_id=int(task["user_id"]), message=body)
     except Exception:
         logger.warning("owstats 结果转发失败", exc_info=True)
+
+
+async def _complete_task_success(bot: Bot, task: dict, first_segs: list, second_segs: list) -> None:
+    """两段收齐（文本 + 图片）：合并转发，结束任务并派发下一个。"""
+    global _task_current
+    if _task_current is not task:
+        return
+    _task_current = None
+    elapsed = time.monotonic() - task["t0"] if task.get("t0") else 0.0
+    fut = task.get("future")
+    if fut is not None:
+        if not fut.done():
+            fut.set_result((list(first_segs) + list(second_segs), True))
+        await _dispatch_next()
+        return
+    if str(task.get("group_id")) == "864213945":
+        logger.info("owstats 结果已在中继群内可见，跳过转回")
+        await _dispatch_next()
+        return
+    combined = list(first_segs) + list(second_segs)
+    if not combined:
+        body = MessageSegment.text("对方机器人返回了空结果，请重试～")
+    else:
+        body = Message(combined) + MessageSegment.text(f"\n用时 {elapsed:.1f}s")
+    await _send_to_requester(bot, task, body)
     await _dispatch_next()
+
+
+async def _complete_task_single(bot: Bot, task: dict, single_segs: list) -> None:
+    """只收到一条文本且宽限内无第二条：按单条转发，结束任务。"""
+    global _task_current
+    if _task_current is not task:
+        return
+    _task_current = None
+    _note_missing_image()
+    elapsed = time.monotonic() - task["t0"] if task.get("t0") else 0.0
+    fut = task.get("future")
+    if fut is not None:
+        if not fut.done():
+            fut.set_result((list(single_segs), False))
+        await _dispatch_next()
+        return
+    if str(task.get("group_id")) == "864213945":
+        logger.info("owstats 结果已在中继群内可见，跳过转回")
+        await _dispatch_next()
+        return
+    if not single_segs:
+        body = MessageSegment.text("对方机器人返回了空结果，请重试～")
+    else:
+        body = Message(list(single_segs)) + MessageSegment.text(f"\n用时 {elapsed:.1f}s")
+    await _send_to_requester(bot, task, body)
+    await _dispatch_next()
+
+
+async def _abort_task_error(bot: Bot, task: dict, error_segs: list) -> None:
+    """第二条不是图片：视为报错，中断本次查询（丢弃第一条），通知请求方后派发下一个。"""
+    global _task_current
+    if _task_current is not task:
+        return
+    _task_current = None
+    logger.warning(f"owstats 任务 #{task.get('seq')} 第二条非图片，按报错中断")
+    fut = task.get("future")
+    if fut is not None:
+        if not fut.done():
+            fut.set_result((list(error_segs or []), False))
+        await _dispatch_next()
+        return
+    if str(task.get("group_id")) == "864213945":
+        logger.info("owstats 报错已在中继群内可见，跳过转回")
+        await _dispatch_next()
+        return
+    if error_segs:
+        body = Message([MessageSegment.text("查询失败，对方机器人返回：\n")]) + Message(error_segs)
+    else:
+        body = MessageSegment.text("查询失败，对方机器人返回报错，请稍后再试～")
+    await _send_to_requester(bot, task, body)
+    await _dispatch_next()
+
+
+async def _flush_first_after_wait(task_seq: int) -> None:
+    """第一条文本到达后宽限 SECOND_MSG_WAIT 秒仍无第二条：按单条转发，避免无限挂起。"""
+    global _task_current
+    await asyncio.sleep(SECOND_MSG_WAIT)
+    task = _task_current
+    if task is None or task.get("seq") != task_seq or not task.get("first_segs"):
+        return
+    logger.info(f"owstats 任务 #{task_seq} 只收到一条文本，超时按单条转发")
+    first = task.pop("first_segs")
+    try:
+        bot = get_bot()
+    except Exception:
+        logger.warning("owstats 单条转发失败：拿不到 Bot 实例，丢弃任务")
+        _task_current = None
+        _note_missing_image()
+        await _dispatch_next()
+        return
+    await _complete_task_single(bot, task, first)
+
+
+@relay_listener.handle()
+async def _relay_result(bot: Bot, event: MessageEvent):
+    """监听中继群里查询机器人的回复，两段归集后转发给原群/原用户（串行，无需任务ID关联）。"""
+    global _task_current
+    if not isinstance(event, GroupMessageEvent):
+        return
+    if event.group_id != RELAY_GROUP_ID or str(event.user_id) != str(RELAY_BOT_QQ):
+        return
+    if _task_current is None:
+        logger.info("owstats 中继群收到非任务结果，已忽略")
+        return
+    has_image = _msg_has_image(event.message)
+    if not has_image and _PROGRESS_RE.search(event.message.extract_plain_text()):
+        logger.info("owstats 中继群收到进度提示，已忽略")
+        return
+    try:
+        self_id = str(bot.self_id)
+    except Exception:
+        self_id = ""
+    task = _task_current
+    if not task.get("first_segs"):
+        # 还在等第一条：首条即图片时，只有存在未过期的缺图片收尾记录才视为
+        # 上一任务的延迟回复并丢弃；否则按本任务的单图结果直接成功处理。
+        if has_image:
+            if _consume_orphan():
+                logger.info(f"owstats 任务 #{task.get('seq')} 首条即图片，按延迟回复丢弃")
+                return
+            logger.info(f"owstats 任务 #{task.get('seq')} 首条即图片，按单图结果处理")
+            segs = _strip_self_at(event.message, self_id)
+            await _complete_task_success(bot, task, [], segs)
+            return
+        segs = _strip_self_at(event.message, self_id)
+        if not segs:
+            logger.info("owstats 中继群收到空文本，已忽略")
+            return
+        task["first_segs"] = segs
+        logger.info(f"owstats 任务 #{task.get('seq')} 收到第一条文本，等第二条图片（{SECOND_MSG_WAIT}s）")
+        asyncio.create_task(_flush_first_after_wait(task["seq"]))
+        return
+    # 已有第一条，在等第二条
+    if has_image:
+        first = task.pop("first_segs")
+        segs = _strip_self_at(event.message, self_id)
+        logger.info(f"owstats 任务 #{task.get('seq')} 收到第二条图片，合并转发")
+        await _complete_task_success(bot, task, first, segs)
+        return
+    segs = _strip_self_at(event.message, self_id)
+    if not segs:
+        logger.info("owstats 中继群收到空文本，已忽略")
+        return
+    logger.info(f"owstats 任务 #{task.get('seq')} 第二条非图片，按报错中断")
+    await _abort_task_error(bot, task, segs)
 
 
 if scheduler is not None:
@@ -270,6 +426,7 @@ if scheduler is not None:
             return
         task = _task_current
         _task_current = None
+        _note_missing_image()
         logger.warning(f"owstats 任务 #{task['seq']} 超时")
         fut = task.get("future")
         if fut is not None:
@@ -444,3 +601,39 @@ async def maintenance_toggle(event: MessageEvent, arg: Message = CommandArg()):
     else:
         await maintenance_cmd.finish(at_prefix(event) + "\u53c2\u6570\u9519\u8bef\uff0c\u7528\u6cd5\uff1a.ow\u7ef4\u62a4 \u5f00\u542f/\u5173\u95ed/\u72b6\u6001")
 
+
+owstatus_cmd = on_command("ow状态", aliases={"ow队列"}, priority=5, block=True)
+owreset_cmd = on_command("ow重置", aliases={"ow清理"}, priority=5, block=True)
+
+
+@owstatus_cmd.handle()
+async def ow_status(event: MessageEvent):
+    owner = str(os.getenv("QQBOT_OWNER", "1543758852")).strip()
+    if str(event.user_id) != owner:
+        await owstatus_cmd.finish(at_prefix(event) + "仅Bot主人可查看队列状态")
+    _prune_orphans(time.monotonic())
+    if _task_current is None:
+        cur = "当前无在途任务"
+    else:
+        t = _task_current
+        el = time.monotonic() - t["t0"] if t.get("t0") else 0.0
+        first = "已收到" if t.get("first_segs") else "未收到"
+        cur = f"在途 #{t.get('seq')}（{_task_kind_label(t.get('kind', ''))} {t.get('tag')}）：已等待 {el:.0f}s，第一条文本{first}"
+    await owstatus_cmd.finish(
+        at_prefix(event) + f"{cur}\n排队 {len(_task_queue)} 个，疑似延迟图片 {len(_orphan_image_times)} 条")
+
+
+@owreset_cmd.handle()
+async def ow_reset(event: MessageEvent):
+    global _task_current
+    owner = str(os.getenv("QQBOT_OWNER", "1543758852")).strip()
+    if str(event.user_id) != owner:
+        await owreset_cmd.finish(at_prefix(event) + "仅Bot主人可重置队列")
+    if _task_current is None:
+        await owreset_cmd.finish(at_prefix(event) + f"没有在途任务，排队 {len(_task_queue)} 个，无需重置")
+    task = _task_current
+    _task_current = None
+    logger.warning(f"owstats 主人手动丢弃在途任务 #{task.get('seq')}（{task.get('kind')} {task.get('tag')}）")
+    await _dispatch_next()
+    await owreset_cmd.finish(
+        at_prefix(event) + f"已丢弃在途任务 #{task.get('seq')}，排队 {len(_task_queue)} 个任务继续执行")
