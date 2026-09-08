@@ -94,6 +94,18 @@ def _spiral_positions(cx: float, cy: float, max_r: float, step: float = 3.0):
 _SIZE_STEPS = (1.0, 0.85, 0.7, 0.55, 0.45)
 _MIN_SIZE = 16
 _PAD = 2  # 词位图自带的外边距，越紧留白越少
+_FULL_ENTRIES = 60  # 铺满面板的参考词条数：达到该数时字号系数为 1，原样渲染
+
+
+def _size_boost(n_entries: int) -> float:
+    """词条不足时的字号放大系数：小群消息少、词条不够 60 个时按缺口整体放大。
+
+    缺口越大放得越大，上限 2 倍；词条充足（>=60）或为空时返回 1.0 原样不动。
+    排版自带的逐级缩小会兜住放得过大的词，保证不丢词。
+    """
+    if n_entries <= 0 or n_entries >= _FULL_ENTRIES:
+        return 1.0
+    return min(2.0, (_FULL_ENTRIES / n_entries) ** 0.7)
 
 
 def _word_bitmap(word: str, font: ImageFont.FreeTypeFont, color: str) -> Image.Image:
@@ -154,16 +166,20 @@ def _render(counter: Counter, n: int, msg_count: int, phrases: list[tuple[str, i
     # 至少取 60 个词参与排版，宁可用小字号填满面板也不留大片空白
     words = counter.most_common(max(n, 60))
     maxc = max(c for _, c in words) if words else 1
+    # 语录片段作为高优先级词条混排：字号排，
+    # 保证面板尽量铺满而不是缩在中间一小块（词够多时系数为 1，原样不动）
+    boost = _size_boost(len(words) + (len(phrases) if phrases else 0))
     rnd = random.Random(7)
     entries: list[tuple[str, int, str, bool]] = []
     for w, c in words:
-        size = int(20 + 110 * ((c / maxc) ** 1.3))
+        size = int((20 + 110 * ((c / maxc) ** 1.3)) * boost)
         entries.append((w, size, rnd.choice(PALETTE), rnd.random() < 0.22))
-    # 语录片段作为高优先级词条混排：字号按次数归一化到 36~60
+    # 语录片段作为高优先级词条混排：字号按次数归一化到 36~60（同样随词量放大）
     if phrases:
         qmax = max(c for _, c in phrases)
         for q, c in phrases:
-            entries.append((q, int(36 + 24 * (c / qmax)), rnd.choice(PALETTE), rnd.random() < 0.22))
+            entries.append((q, int((36 + 24 * (c / qmax)) * boost),
+                            rnd.choice(PALETTE), rnd.random() < 0.22))
     entries.sort(key=lambda e: -e[1])
 
     placed = _place(entries, W, H)
