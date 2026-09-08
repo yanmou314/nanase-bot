@@ -1,6 +1,7 @@
 """群里聊到“吃什么/吃啥”时，随机推荐一种食物。"""
 from __future__ import annotations
 
+import datetime
 import random
 import re
 import time
@@ -85,9 +86,14 @@ def allow(group_id: int, now: float) -> bool:
     return now - _last_reply.get(group_id, 0.0) >= COOLDOWN_SECONDS
 
 
-def pick() -> str:
-    """随机选一种食物。"""
-    return random.choice(FOODS)
+KFC_THURSDAY = "KFC 疯狂星期四（V我50）"
+
+
+def pick(now: datetime.date | None = None) -> str:
+    """随机选一种食物；“KFC 疯狂星期四（V我50）”仅周四作为彩蛋入池。"""
+    if (now or datetime.date.today()).weekday() == 3:
+        return random.choice(FOODS)
+    return random.choice([f for f in FOODS if f != KFC_THURSDAY])
 
 
 @eater.handle()

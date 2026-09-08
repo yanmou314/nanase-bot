@@ -30,7 +30,7 @@ _COMMAND_START = tuple(s for s in get_driver().config.command_start if s)
 poke_matcher = on_notice(priority=5, block=False)
 
 CFG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
-API_URL = "https://opencode.ai/zen/go/v1/chat/completions"
+API_URL = "https://api.deepseek.com/chat/completions"
 MODEL = "deepseek-v4-flash"
 _OWNER = os.getenv("QQBOT_OWNER", "").strip()
 
@@ -190,7 +190,7 @@ async def chat_completion(messages: list, max_tokens: int = 300, timeout: float 
             async with _AI_SEM:
                 r = await client.post(
                     API_URL,
-                    headers={"Authorization": f"Bearer {key}", "x-opencode-session": "qqbot-auto-chat"},
+                    headers={"Authorization": f"Bearer {key}"},
                     json={
                         "model": MODEL,
                         "messages": messages,

@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import random
 
 from conftest import GroupMessageEvent
@@ -42,6 +43,20 @@ def test_pick_returns_food_from_pool():
 def test_pick_is_random_enough():
     random.seed(42)
     assert len({wte.pick() for _ in range(300)}) > 20
+
+
+def test_pick_excludes_kfc_off_thursday():
+    sunday = datetime.date(2026, 9, 6)
+    random.seed(42)
+    for _ in range(300):
+        assert wte.pick(now=sunday) != wte.KFC_THURSDAY
+
+
+def test_pick_includes_kfc_on_thursday():
+    thursday = datetime.date(2026, 9, 10)
+    random.seed(42)
+    results = {wte.pick(now=thursday) for _ in range(300)}
+    assert wte.KFC_THURSDAY in results
 
 
 def test_handler_replies_and_respects_cooldown():

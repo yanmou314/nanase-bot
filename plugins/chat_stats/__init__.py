@@ -8,6 +8,8 @@ from contextlib import aclosing
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import jieba
+
 from nonebot import get_bot, get_driver, on_command, on_message
 from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment
@@ -42,8 +44,98 @@ words_status_cmd = on_command("词云状态", priority=5, block=True)
 
 _COMMAND_START = tuple(s for s in get_driver().config.command_start if s)  # 过滤空串，与 auto_chat 等插件一致
 
-STOPWORDS = set("的了是在我有和你这不那啊呢吧吗哦嗯就都要也会没很他说她我们他们自己一个没什么可以"
-                "真的还是因为所以但是然后现在今天明天昨天知道觉得应该可能如果这样那样这个那个什么为什么怎么")
+# 词级停用表：jieba 分词后按整词过滤；单字 token 一律不计，无需单字停用词
+STOPWORDS = frozenset("""
+我们 你们 他们 她们 自己 一个 一些 没有 什么 可以 就是 但是 然后 现在 今天 明天 昨天
+知道 觉得 应该 可能 如果 这样 那样 还是 因为 所以 已经 不过 真的 直接 只是 而且
+时候 地方 东西 时间 问题 有点 一点 不是 这个 那个 为什么 怎么 一下 起来 出来 大家
+""".split())
+
+jieba.setLogLevel(logging.WARNING)
+
+
+@get_driver().on_startup
+async def _warm_jieba():
+    """启动时预热分词词典（约 1 秒），避免首次词云请求阻塞事件循环。"""
+    try:
+        await asyncio.to_thread(jieba.initialize)
+    except Exception:
+        _logger.warning("jieba 预热失败，将在首次使用时重试", exc_info=True)
+
+
+def _count_into(counter: Counter, text: str) -> None:
+    """jieba 分词统计中文词：仅保留 ≥2 字的纯中文词，过滤停用词。
+
+    旧实现把 >8 字的连续中文按每 4 字切块，会把句子拦腰截断成无意义碎片。
+    """
+    for word in jieba.cut(text):
+        w = word.strip()
+        if len(w) < 2 or w in STOPWORDS:
+            continue
+        if not all("\u4e00" <= c <= "\u9fff" for c in w):
+            continue
+        counter[w] += 1
+
+
+def _quote_worthy(s: str) -> bool:
+    """判定一条消息是否可入选语录提取：长度适中（4~24 字）且非单字复读（如 哈哈哈哈、666666）。"""
+    s = s.strip()
+    return 4 <= len(s) <= 24 and len(set(s)) > 1
+
+
+def _phrase_from_sentence(s: str, counter: Counter, max_len: int = 8) -> str:
+    """从句子中按词边界截取一段 ≤max_len 字的短语（词云混排用，不整句上版）。
+
+    先按标点（含逗号）切子句，再在单个子句内以全局词频最高的词为锚点向两侧扩词；
+    跨子句拼接会得到"吃火锅然后看电影"这种语义不完整的串，禁止。
+    """
+    # 中文/英文标点均视为子句边界；表情、符号不是边界但会在 token 过滤时剔除
+    clauses = [c.strip() for c in re.split(r"[，。！？；、,.!?;:：…\s]+", s.strip()) if c.strip()]
+
+    def _score(w: str) -> int:
+        if w in counter:
+            return counter[w]
+        return max((v for k, v in counter.items() if len(k) >= 2 and k in w), default=0)
+
+    best = ""
+    best_score = -1
+    for clause in clauses:
+        # 只保留纯中文 token：表情、标点、字母混进短语会因字体缺字渲染成方框
+        words = [w for w in jieba.cut(clause) if w.strip() and all("\u4e00" <= c <= "\u9fff" for c in w)]
+        if not words:
+            continue
+        if sum(len(w) for w in words) <= max_len:
+            phrase = "".join(words)
+        else:
+            # 锚点：子句内全局词频最高的 ≥2 字词；没有则取中间词。
+            # 计分对 jieba 复合词（如"吃火锅"）做子串匹配，否则全局词"火锅"匹配不上
+            cands = [w for w in words if len(w) >= 2]
+
+            if not cands:
+                anchor_idx = len(words) // 2
+            else:
+                anchor_idx = max(range(len(words)),
+                                 key=lambda i: _score(words[i]) if words[i] in cands else -1)
+            lo = hi = anchor_idx
+            total = len(words[anchor_idx])
+            while total < max_len:
+                left = len(words[lo - 1]) if lo > 0 else max_len + 1
+                right = len(words[hi + 1]) if hi + 1 < len(words) else max_len + 1
+                if min(left, right) > max_len - total:
+                    break
+                if left <= right:
+                    lo -= 1
+                    total += left
+                else:
+                    hi += 1
+                    total += right
+            phrase = "".join(words[lo:hi + 1])
+        # 子句间取词频得分最高的一个短语
+        score = max((_score(w) for w in jieba.cut(clause)
+                     if len(w) >= 2 and w in counter), default=0)
+        if score > best_score:
+            best, best_score = phrase, score
+    return best
 
 
 def _sh_today() -> date:
@@ -96,6 +188,7 @@ async def _build_word_image(group_id: int, n: int) -> str | None:
         )
         args = (group_id, yesterday, WORDS_CUTOFF_HOUR, today.isoformat(), WORDS_CUTOFF_HOUR)
     counter: Counter = Counter()
+    phrase_counter: Counter = Counter()
     normal_message_count = 0
     # 流式逐行消费：活跃大群的全天文本不再一次性载入内存；
     # aclosing 保证循环体异常时也能立即释放游标与池连接
@@ -104,23 +197,23 @@ async def _build_word_image(group_id: int, n: int) -> str | None:
             if text.startswith(_COMMAND_START):
                 continue
             normal_message_count += 1
-            for seg in re.findall(r"[\u4e00-\u9fff]{2,}", text):
-                if len(seg) > 8:
-                    # 超长连续文本按 4 字非重叠分块切词（尾部不足 4 字的残余丢弃），
-                    # 避免整段作为一个"词"无法排版
-                    segs = [seg[i:i + 4] for i in range(0, len(seg) - 3, 4)]
-                else:
-                    segs = [seg]
-                for s in segs:
-                    if s not in STOPWORDS:
-                        counter[s] += 1
+            _count_into(counter, text)
+            if _quote_worthy(text):
+                # 不整句上版：按词边界截取 ≤8 字短语参与词云混排
+                p = _phrase_from_sentence(text, counter)
+                if p:
+                    phrase_counter[p] += 1
     if not counter:
         return None
+    # 被重复 ≥2 次的短语最多取 3 条，与常规词一起渲染
+    phrases = [(q, c) for q, c in phrase_counter.most_common(3) if c >= 2]
     await asyncio.to_thread(cleanup_cache, WORD_CACHE)  # 同步磁盘扫描不阻塞事件循环
     from .wordcloud_card import _render as render_cloud
     # PIL 渲染经全局渲染信号量串行化，避免小机器上并发渲染打爆内存
     async with RENDER_SEM:
-        return await asyncio.to_thread(render_cloud, counter, min(n, len(counter)), normal_message_count)
+        return await asyncio.to_thread(
+            render_cloud, counter, min(n, len(counter)), normal_message_count, phrases
+        )
 
 
 # ---------------- 龙王 ----------------
