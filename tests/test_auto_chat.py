@@ -106,12 +106,12 @@ def test_ai_reply_prefixes_sender_in_group_context(monkeypatch):
     asyncio.run(mod._ai_reply("key", "alice", "123", "第一句话", "小明"))
     asyncio.run(mod._ai_reply("key", "bob", "123", "第二句话", "小红"))
 
-    # 发给 AI 的最新一条消息带发言人前缀
-    assert calls[0][-1]["content"] == "小明: 第一句话"
-    assert calls[1][-1]["content"] == "小红: 第二句话"
+    # 发给 AI 的最新一条消息带发言人前缀（方头括号格式，与 SYSTEM 文档一致）
+    assert calls[0][-1]["content"] == "「小明」: 第一句话"
+    assert calls[1][-1]["content"] == "「小红」: 第二句话"
     # 历史上下文保留了不同人的发言，AI 能分清多说话人
-    assert any(m["content"] == "小明: 第一句话" for m in calls[1])
-    assert any(m["content"] == "小红: 第二句话" for m in mod._memory[("group", "123")])
+    assert any(m["content"] == "「小明」: 第一句话" for m in calls[1])
+    assert any(m["content"] == "「小红」: 第二句话" for m in mod._memory[("group", "123")])
 
 
 def test_ai_reply_private_chat_has_no_prefix(monkeypatch):
@@ -169,7 +169,7 @@ def test_sender_name_by_id_fetch_and_fallback():
 
 
 def test_system_prompt_documents_multi_speaker_format():
-    assert "昵称: 内容" in auto_chat.SYSTEM
+    assert "「昵称」: 内容" in auto_chat.SYSTEM
     assert "不同昵称代表不同的群友" in auto_chat.SYSTEM
 
 
