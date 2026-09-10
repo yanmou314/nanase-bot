@@ -15,6 +15,7 @@ plugins/**/config.json
 plugins/**/ai_config.json
 plugins/**/repeater_state.json
 plugins/**/join_state.json
+plugins/**/verify_state.json
 **/stats.db
 **/stats.db-*
 
