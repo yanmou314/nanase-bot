@@ -66,6 +66,7 @@ echo '{"dsn": "postgresql://bot:...@127.0.0.1:5432/qqbot"}' > plugins/chat_stats
 | `chat_stats` | `plugins/chat_stats/db.json` | `{"dsn": "postgresql://user:pass@127.0.0.1:5432/qqbot"}` |
 | `auto_chat` | `plugins/auto_chat/config.json` | `{"api_key": "sk-xxx"}` |
 | `news` | `plugins/news/ai_config.json` | `{"api_key": "..."}`（AI 晨报，可选） |
+| `ow_patch` | 无（官网直连，无需 key） | — |
 
 **含密钥的配置文件统一按 `.env` 的标准处理**（660 root:root + `setfacl -m u:qqbot:rw`），
 均已被 .gitignore 排除，禁止提交进 git。
