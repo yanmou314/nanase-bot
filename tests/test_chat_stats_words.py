@@ -1,5 +1,7 @@
+import os
 from collections import Counter
 
+import pytest
 from helpers import load_plugin
 
 cs = load_plugin("chat_stats")
@@ -87,6 +89,10 @@ def test_render_vertical_mixed(tmp_path, monkeypatch):
     assert os.path.getsize(path) > 0
 
 
+@pytest.mark.skipif(
+    not os.path.isfile("/usr/share/fonts/custom/ZCOOLQingKeHuangYou-Regular.ttf"),
+    reason="ZCOOL 字体未安装（CI runner 无生产字体）",
+)
 def test_coverage_zcool_common_chars():
     """站酷字体应覆盖常用汉字；字集过滤不得把常见字误判为缺失。"""
     from plugins.chat_stats import wordcloud_card as wc

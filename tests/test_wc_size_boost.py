@@ -1,5 +1,7 @@
+import os
 from collections import Counter
 
+import pytest
 from helpers import load_plugin
 
 load_plugin("chat_stats")
@@ -26,6 +28,18 @@ def test_size_boost_small_groups_scaled():
     assert wc._size_boost(10) >= b21 >= wc._size_boost(30) > wc._size_boost(59) > 1.0
 
 
+@pytest.mark.skipif(
+    not any(
+        os.path.isfile(p)
+        for p in (
+            "/usr/share/fonts/custom/ZCOOLKuaiLe-Regular.ttf",
+            "/usr/share/fonts/custom/ZCOOLQingKeHuangYou-Regular.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+        )
+    ),
+    reason="CJK 字体未安装（CI runner 无生产字体，像素覆盖率断言无意义）",
+)
 def test_render_small_counter_covers_panel(monkeypatch, tmp_path):
     monkeypatch.setattr(wc, "CACHE_DIR", str(tmp_path))
     c = Counter({
