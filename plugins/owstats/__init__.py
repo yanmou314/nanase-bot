@@ -232,7 +232,11 @@ async def _enqueue_task(kind: str, tag: str, group_id, user_id: str, matcher, ev
     waiting = len(_task_queue) - 1 + (1 if _task_current is not None else 0)
     label = _task_kind_label(kind)
     if str(getattr(event, "group_id", None)) != "864213945":
-        if waiting <= 0:
+        if _in_discard_window():
+            remain = int(max(0, _discarded_until - time.monotonic()))
+            await matcher.send(at_prefix(event) + MessageSegment.text(
+                f"已提交{label}查询（{tag}），中继冷却约 {remain}s 后自动派发～"))
+        elif waiting <= 0:
             await matcher.send(at_prefix(event) + MessageSegment.text(f"已提交{label}查询（{tag}），正在派发给查询机器人..."))
         else:
             await matcher.send(at_prefix(event) + MessageSegment.text(f"已提交{label}查询（{tag}），前面还有 {waiting} 个任务，完成後转发给你～"))
@@ -420,8 +424,12 @@ async def _send_claim_at(bot: Bot | None = None) -> bool:
         except Exception:
             logger.warning("owstats 领取失败：拿不到 Bot 实例")
             return False
-    # 先摘走在途任务，避免领取结果到达时与在途归集互相干扰
-    _requeue_current_overwrite()
+    # 先摘走在途任务，避免领取结果到达时与在途归集互相干扰。
+    # 只要发生了 requeue 就必须立刻开隔离窗：对方处旧查询的迟到回复
+    # 可能在领取 @ 发送失败后仍到达，不能喂给重发后的新任务。
+    overwritten = _requeue_current_overwrite() is not None
+    if overwritten:
+        _open_discard_window()
     try:
         await bot.send_group_msg(
             group_id=RELAY_GROUP_ID,
