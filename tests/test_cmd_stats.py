@@ -83,3 +83,64 @@ def test_render_allocates_space_for_all_top_rows(monkeypatch):
     html = captured["html"]
     assert html.count('class="row"') == 3
     assert re.search(r"@page \{ size: 900px 650px;", html)
+
+
+def test_catchup_skips_before_trigger(monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    sh = ZoneInfo("Asia/Shanghai")
+    monkeypatch.setattr(
+        cmd_stats, "datetime",
+        type("D", (), {"now": staticmethod(lambda tz=None: datetime(2026, 9, 12, 0, 3, tzinfo=tz or sh))}),
+    )
+    called = []
+    async def _boom():
+        called.append(1)
+    monkeypatch.setattr(cmd_stats, "_run_and_push_daily", _boom)
+    monkeypatch.setattr(cmd_stats, "_last_report_date", lambda: "")
+    asyncio.run(cmd_stats._cmd_stats_catchup())
+    assert called == []
+
+
+def test_catchup_skips_when_today_already_generated(monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    sh = ZoneInfo("Asia/Shanghai")
+    monkeypatch.setattr(
+        cmd_stats, "datetime",
+        type("D", (), {"now": staticmethod(lambda tz=None: datetime(2026, 9, 12, 8, 0, tzinfo=tz or sh))}),
+    )
+    called = []
+    async def _boom():
+        called.append(1)
+    monkeypatch.setattr(cmd_stats, "_run_and_push_daily", _boom)
+    monkeypatch.setattr(cmd_stats, "_last_report_date", lambda: "2026-09-12")
+    asyncio.run(cmd_stats._cmd_stats_catchup())
+    assert called == []
+
+
+def test_catchup_runs_after_trigger_when_missing(monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    sh = ZoneInfo("Asia/Shanghai")
+    monkeypatch.setattr(
+        cmd_stats, "datetime",
+        type("D", (), {"now": staticmethod(lambda tz=None: datetime(2026, 9, 12, 8, 0, tzinfo=tz or sh))}),
+    )
+    called = []
+    async def _ok():
+        called.append(1)
+    monkeypatch.setattr(cmd_stats, "_run_and_push_daily", _ok)
+    monkeypatch.setattr(cmd_stats, "_last_report_date", lambda: "2026-09-11")
+    asyncio.run(cmd_stats._cmd_stats_catchup())
+    assert called == [1]
+
+
+def test_mark_reported_writes_config(monkeypatch, tmp_path):
+    cfg = tmp_path / "push_config.json"
+    monkeypatch.setattr(cmd_stats, "CONFIG_FILE", str(cfg))
+    from datetime import date
+    cmd_stats._mark_reported(date(2026, 9, 12))
+    data = cfg.read_text(encoding="utf-8")
+    assert "2026-09-12" in data
+    assert cmd_stats._last_report_date() == "2026-09-12"

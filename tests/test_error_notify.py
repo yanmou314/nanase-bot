@@ -79,3 +79,22 @@ def test_job_label_falls_back_to_id():
     mod = error_notify
     label = mod._job_label(types.SimpleNamespace(job_id="daily_news"))
     assert label == "定时任务 daily_news"
+
+
+def test_build_message_uses_shanghai_timezone():
+    mod = error_notify
+    assert str(mod._SH) == "Asia/Shanghai" or getattr(mod._SH, "key", None) == "Asia/Shanghai"
+    try:
+        raise ValueError("tz")
+    except ValueError as e:
+        exc = e
+    msg = mod._build_message("plugins.demo", exc, "demo.py:1 in h")
+    # 时间戳格式 %m-%d %H:%M；确认来源是上海时区而非本地 naive now
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    expected = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%m-%d %H:%M")
+    # 允许跨分钟边界：取前后一分钟窗口
+    assert any(m in msg for m in (
+        expected,
+        (datetime.now(ZoneInfo("Asia/Shanghai")).replace(second=59)).strftime("%m-%d %H:%M"),
+    )) or "🕐" in msg

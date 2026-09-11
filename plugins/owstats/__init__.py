@@ -7,6 +7,7 @@ import time
 
 from nonebot import get_bot, logger, on_command, on_message
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageEvent, MessageSegment
+from nonebot.matcher import Matcher
 from nonebot.params import CommandArg
 
 from common import at_prefix, parse_tag, save_json_state
@@ -41,6 +42,7 @@ _DRAWING_RE = re.compile(r"仍在绘制|超过\s*QQ\s*官方|图片准备好后�
 DRAWING_CLAIM_DELAY = 300  # 通知到达后延迟领取秒数（约 5 分钟）
 DRAWING_CLAIM_TIMEOUT = 180  # 发出领取 @ 后等待图片的上限
 MAX_FROZEN_TASKS = 10  # 冻结任务上限，超出时放弃最旧的并提示用户
+LATE_MESSAGE_WINDOW = 45.0  # 超时/领取覆盖/重置后的迟到消息隔离窗（秒）
 
 # Maintenance mode: when enabled, all OW queries return maintenance message
 MAINTENANCE_MSG = "OW\u63a5\u53e3\u6b63\u5728\u7ef4\u62a4\u4e2d\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\uff5e"
@@ -123,6 +125,43 @@ _task_current = None  # 正在对方机器人处执行的任务
 _frozen_tasks: list = []  # 绘制超时待领取的任务（FIFO，含 claim_at）
 _claiming_task = None  # 已发出领取 @、正在等图片的任务
 _claim_sent_at = 0.0
+# 派发互斥：并发 _dispatch_next 只允许一次真正发送（先占槽再 await）
+_dispatch_lock: asyncio.Lock | None = None
+# 迟到消息隔离窗：超时/领取覆盖/重置后，窗口内 RELAY_BOT 的非领取消息直接丢弃
+_discarded_until = 0.0
+# 强引用 flush 任务，防止被 GC 掉导致宽限收尾丢失
+_flush_tasks: set = set()
+
+
+def _get_dispatch_lock() -> asyncio.Lock:
+    """惰性创建派发锁；跨 asyncio.run 时若锁未持有可安全复用。"""
+    global _dispatch_lock
+    if _dispatch_lock is None:
+        _dispatch_lock = asyncio.Lock()
+    return _dispatch_lock
+
+
+def _open_discard_window(seconds: float = LATE_MESSAGE_WINDOW) -> None:
+    """打开迟到消息隔离窗，避免旧任务的迟到回复写入下一任务 first_segs。"""
+    global _discarded_until
+    _discarded_until = time.monotonic() + seconds
+
+
+def _close_discard_window() -> None:
+    """关闭隔离窗（领取图已交付 / 状态已稳定，放行后续正常归集）。"""
+    global _discarded_until
+    _discarded_until = 0.0
+
+
+def _in_discard_window() -> bool:
+    return time.monotonic() < _discarded_until
+
+
+def _spawn_flush_wait(task_seq: int) -> None:
+    """启动单条宽限收尾任务并持有强引用，done 后从 set 移除。"""
+    t = asyncio.create_task(_flush_first_after_wait(task_seq))
+    _flush_tasks.add(t)
+    t.add_done_callback(_flush_tasks.discard)
 
 
 def _task_kind_label(kind: str) -> str:
@@ -133,44 +172,53 @@ async def _dispatch_next() -> None:
     """无在途任务且队列非空时，派发下一个任务到中继群。
 
     领取中（已 @ 对方等图片）不派发：避免新查询挤掉领取结果。
+    用 asyncio.Lock 串行化临界区：先写入 _task_current 再 await 发送，
+    防止两个并发 _dispatch_next 同时弹出任务双发。
     """
     global _task_current
-    if _claiming_task is not None:
-        return
-    if _task_current is not None or not _task_queue:
-        return
-    task = _task_queue.pop(0)
-    task["t0"] = time.monotonic()
-    try:
-        bot = get_bot()
-    except Exception:
-        _task_queue.insert(0, task)
-        logger.warning("owstats 任务派发失败：拿不到 Bot 实例")
-        return
-    text = task.get("text") or (" {} {}".format(TASK_CMD_TEXT.get(task["kind"], ""), task["tag"]))
-    try:
-        ret = await bot.send_group_msg(
-            group_id=RELAY_GROUP_ID,
-            message=MessageSegment.at(RELAY_BOT_QQ) + MessageSegment.text(text),
-        )
-        task["task_msg_id"] = (ret or {}).get("message_id") if isinstance(ret, dict) else None
-    except Exception:
-        _task_queue.insert(0, task)
-        logger.warning("owstats 任务派发失败", exc_info=True)
-        if str(task.get("group_id")) == "864213945":
+    async with _get_dispatch_lock():
+        if _claiming_task is not None:
             return
+        # 超时/重置后的隔离窗内不派发：避免新任务的合法回复被当作迟到消息丢弃
+        if _in_discard_window():
+            return
+        if _task_current is not None or not _task_queue:
+            return
+        task = _task_queue.pop(0)
+        task["t0"] = time.monotonic()
+        # 先占槽：await send 期间其他 dispatch 看到 _task_current 非空会直接返回
+        _task_current = task
         try:
-            if task.get("group_id"):
-                await bot.send_group_msg(
-                    group_id=int(task["group_id"]),
-                    message=MessageSegment.at(int(task["user_id"])) + MessageSegment.text("任务派发失败，请稍后再试～"))
-            else:
-                await bot.send_private_msg(user_id=int(task["user_id"]), message=MessageSegment.text("任务派发失败，请稍后再试～"))
+            bot = get_bot()
         except Exception:
-            pass
-        return
-    _task_current = task
-    logger.info(f"owstats 已派发任务 #{task['seq']}（{task['kind']} {task['tag']}）")
+            _task_current = None
+            _task_queue.insert(0, task)
+            logger.warning("owstats 任务派发失败：拿不到 Bot 实例")
+            return
+        text = task.get("text") or (" {} {}".format(TASK_CMD_TEXT.get(task["kind"], ""), task["tag"]))
+        try:
+            ret = await bot.send_group_msg(
+                group_id=RELAY_GROUP_ID,
+                message=MessageSegment.at(RELAY_BOT_QQ) + MessageSegment.text(text),
+            )
+            task["task_msg_id"] = (ret or {}).get("message_id") if isinstance(ret, dict) else None
+        except Exception:
+            _task_current = None
+            _task_queue.insert(0, task)
+            logger.warning("owstats 任务派发失败", exc_info=True)
+            if str(task.get("group_id")) == "864213945":
+                return
+            try:
+                if task.get("group_id"):
+                    await bot.send_group_msg(
+                        group_id=int(task["group_id"]),
+                        message=MessageSegment.at(int(task["user_id"])) + MessageSegment.text("任务派发失败，请稍后再试～"))
+                else:
+                    await bot.send_private_msg(user_id=int(task["user_id"]), message=MessageSegment.text("任务派发失败，请稍后再试～"))
+            except Exception:
+                pass
+            return
+        logger.info(f"owstats 已派发任务 #{task['seq']}（{task['kind']} {task['tag']}）")
 
 
 async def _enqueue_task(kind: str, tag: str, group_id, user_id: str, matcher, event) -> None:
@@ -288,6 +336,15 @@ def _pop_frozen(task: dict | None) -> dict | None:
     return None
 
 
+def _settle_future(task: dict | None) -> None:
+    """丢弃任务时统一结算 future：未完成则 set_result((None, False))。"""
+    if not task:
+        return
+    fut = task.get("future")
+    if fut is not None and not fut.done():
+        fut.set_result((None, False))
+
+
 def _requeue_current_overwrite() -> dict | None:
     """领取图片挤占了在途查询：把当前任务原样放回队首，待会儿重发。"""
     global _task_current
@@ -375,6 +432,8 @@ async def _send_claim_at(bot: Bot | None = None) -> bool:
         return False
     _claiming_task = _frozen_tasks.pop(0)
     _claim_sent_at = time.monotonic()
+    # 领取期间在途旧回复不得冒充领取图/首条：开隔离窗（仅放行 claiming 的图片）
+    _open_discard_window()
     logger.info(f"owstats 已为冻结任务 #{_claiming_task.get('seq')} 发送领取 @")
     return True
 
@@ -404,6 +463,8 @@ async def _deliver_frozen_image(bot: Bot, image_segs: list) -> bool:
     # 未走领取通道时（对方主动把缓存图贴在新查询 @ 后），在途查询会被覆盖，补一次重发
     _requeue_current_overwrite()
     logger.info(f"owstats 冻结任务 #{task.get('seq')} 领取图片已转发")
+    # 领取结果已交付：关掉隔离窗，让重发/下一任务能正常归集
+    _close_discard_window()
     await _dispatch_next()
     return True
 
@@ -430,6 +491,7 @@ async def _fail_claim_or_stale() -> None:
         except Exception:
             pass
     logger.warning(f"owstats 冻结任务 #{task.get('seq')} 领取失败")
+    _close_discard_window()
     await _dispatch_next()
 
 
@@ -531,24 +593,37 @@ async def _flush_first_after_wait(task_seq: int) -> None:
 
 
 @relay_listener.handle()
-async def _relay_result(bot: Bot, event: MessageEvent):
+async def _relay_result(bot: Bot, event: MessageEvent, matcher: Matcher):
     """监听中继群里查询机器人的回复，两段归集后转发给原群/原用户（串行，无需任务ID关联）。
 
     额外分支：
     - 「仍在绘制中，超过 QQ 5 分钟」→ 冻结任务，先去处理其他用户；
     - 首条即图片且存在冻结/领取中任务 → 交给冻结用户，在途查询重新入队。
+    命中中继机器人消息时 matcher.block=True，避免落到 auto_chat 等后续 matcher。
     """
     global _task_current
     if not isinstance(event, GroupMessageEvent):
         return
     if event.group_id != RELAY_GROUP_ID or str(event.user_id) != str(RELAY_BOT_QQ):
         return
+    # 中继结果由本 handler 专管：拦住后续 on_message（尤其 auto_chat）
+    try:
+        matcher.block = True
+    except Exception:
+        pass
     has_image = _msg_has_image(event.message)
     plain = event.message.extract_plain_text()
     try:
         self_id = str(bot.self_id)
     except Exception:
         self_id = ""
+
+    # 迟到消息隔离窗：超时/领取覆盖/重置后的在途旧回复不得写入下一任务；
+    # 仅放行「领取中 + 图片」的预期领取结果。
+    if _in_discard_window():
+        if not (has_image and _claiming_task is not None):
+            logger.info("owstats 丢弃隔离窗内的迟到中继消息")
+            return
 
     # 图片归属判定：
     # 1) 已发出领取 @ → 该图必是领取结果，即使压着在途任务也优先交付；
@@ -600,7 +675,7 @@ async def _relay_result(bot: Bot, event: MessageEvent):
             return
         task["first_segs"] = segs
         logger.info(f"owstats 任务 #{task.get('seq')} 收到第一条文本，等第二条图片（{SECOND_MSG_WAIT}s）")
-        asyncio.create_task(_flush_first_after_wait(task["seq"]))
+        _spawn_flush_wait(task["seq"])
         return
     # 已有第一条，在等第二条
     if has_image:
@@ -640,6 +715,7 @@ if scheduler is not None:
         if _claiming_task is not None:
             return
         if _task_current is None:
+            # 隔离窗未结束则本轮不派发，窗结束后下一轮 sweep 再派
             await _dispatch_next()
             return
         if time.monotonic() - (_task_current.get("t0") or 0.0) < (_task_current.get("timeout") or TASK_TIMEOUT):
@@ -647,15 +723,14 @@ if scheduler is not None:
         task = _task_current
         _task_current = None
         _note_missing_image()
+        _open_discard_window()  # 迟到回复不得写入下一任务；窗内禁止再派发
         logger.warning(f"owstats 任务 #{task['seq']} 超时")
         fut = task.get("future")
         if fut is not None:
             if not fut.done():
                 fut.set_result((None, False))
-            await _dispatch_next()
             return
         if str(task.get("group_id")) == "864213945":
-            await _dispatch_next()
             return
         try:
             bot = get_bot()
@@ -669,7 +744,6 @@ if scheduler is not None:
                 await bot.send_private_msg(user_id=int(task["user_id"]), message=msg)
         except Exception:
             pass
-        await _dispatch_next()
 
 
 def _resolve_tag(arg: Message, event: MessageEvent) -> tuple[str, bool]:
@@ -739,6 +813,9 @@ async def match_report(event: MessageEvent, arg: Message = CommandArg()):
         await matchrep_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.战报 名字#数字")
     if _is_maintenance():
         await matchrep_cmd.finish(at + MessageSegment.text(MAINTENANCE_MSG))
+    remain = _check_cooldown(str(event.user_id))
+    if remain > 0:
+        await matchrep_cmd.finish(at + MessageSegment.text(f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～"))
     await _enqueue_task("matchrep", tag, getattr(event, "group_id", None), str(event.user_id), matchrep_cmd, event)
 
 
@@ -753,6 +830,9 @@ async def rank_history(event: MessageEvent, arg: Message = CommandArg()):
         await rankhist_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.段位 名字#数字")
     if _is_maintenance():
         await rankhist_cmd.finish(at + MessageSegment.text(MAINTENANCE_MSG))
+    remain = _check_cooldown(str(event.user_id))
+    if remain > 0:
+        await rankhist_cmd.finish(at + MessageSegment.text(f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～"))
     await _enqueue_task("rankhist", tag, getattr(event, "group_id", None), str(event.user_id), rankhist_cmd, event)
 
 
@@ -767,6 +847,9 @@ async def strength(event: MessageEvent, arg: Message = CommandArg()):
         await strength_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.强度 名字#数字")
     if _is_maintenance():
         await strength_cmd.finish(at + MessageSegment.text(MAINTENANCE_MSG))
+    remain = _check_cooldown(str(event.user_id))
+    if remain > 0:
+        await strength_cmd.finish(at + MessageSegment.text(f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～"))
     await _enqueue_task("strength", tag, getattr(event, "group_id", None), str(event.user_id), strength_cmd, event)
 
 
@@ -795,6 +878,9 @@ async def summary(event: MessageEvent, arg: Message = CommandArg()):
         await summary_cmd.finish(at + MessageSegment.text(MAINTENANCE_MSG))
     if scope != "today":
         await summary_cmd.finish(at + MessageSegment.text("对方查询机器人暂只支持今日总结～"))
+    remain = _check_cooldown(str(event.user_id))
+    if remain > 0:
+        await summary_cmd.finish(at + MessageSegment.text(f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～"))
     await _enqueue_task("summary", tag, getattr(event, "group_id", None), str(event.user_id), summary_cmd, event)
 
 
@@ -862,16 +948,20 @@ async def ow_reset(event: MessageEvent):
     dropped = []
     if _task_current is not None:
         dropped.append(f"在途 #{_task_current.get('seq')}")
+        _settle_future(_task_current)
         _task_current = None
     if _claiming_task is not None:
         dropped.append(f"领取中 #{_claiming_task.get('seq')}")
+        _settle_future(_claiming_task)
         _claiming_task = None
         _claim_sent_at = 0.0
     while _frozen_tasks:
-        dropped.append(f"冻结 #{_frozen_tasks.pop(0).get('seq')}")
+        stale = _frozen_tasks.pop(0)
+        dropped.append(f"冻结 #{stale.get('seq')}")
+        _settle_future(stale)
     if not dropped:
         await owreset_cmd.finish(at_prefix(event) + f"没有在途/冻结任务，排队 {len(_task_queue)} 个，无需重置")
+    _open_discard_window()  # 窗内禁止派发，避免下一任务回复被当迟到消息
     logger.warning(f"owstats 主人手动丢弃：{'、'.join(dropped)}")
-    await _dispatch_next()
     await owreset_cmd.finish(
-        at_prefix(event) + f"已丢弃 {'、'.join(dropped)}，排队 {len(_task_queue)} 个任务继续执行")
+        at_prefix(event) + f"已丢弃 {'、'.join(dropped)}，排队 {len(_task_queue)} 个任务继续执行（约 {int(LATE_MESSAGE_WINDOW)}s 隔离窗后自动续跑）")

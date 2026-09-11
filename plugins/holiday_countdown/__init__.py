@@ -150,11 +150,34 @@ def _last_push_date() -> str:
         return str(load_json_state(STATE_FILE, STATE_LOCK).get("last_push_date") or "")
 
 
-def _mark_pushed(day: date) -> None:
-    """记录当日倒计时已推送完成，用于防重复推送与启动补发判断。"""
+def _push_status() -> tuple[str, list[int]]:
+    """返回 (last_push_date, 当日失败待补发群列表)。"""
+    with STATE_LOCK:
+        data = load_json_state(STATE_FILE, STATE_LOCK)
+        day = str(data.get("last_push_date") or "")
+        raw = data.get("failed_groups")
+        failed: list[int] = []
+        if isinstance(raw, list):
+            for g in raw:
+                try:
+                    gid = int(g)
+                except (TypeError, ValueError):
+                    continue
+                if gid > 0:
+                    failed.append(gid)
+        return day, failed
+
+
+def _mark_pushed(day: date, failed: list[int] | None = None) -> None:
+    """记录当日倒计时推送结果。
+
+    任一群成功即写 last_push_date；失败群写入 failed_groups 供同日定向补发，
+    避免部分失败时 catchup 对已送达群整表重推。
+    """
     with STATE_LOCK:
         data = load_json_state(STATE_FILE, STATE_LOCK)
         data["last_push_date"] = day.isoformat()
+        data["failed_groups"] = [int(g) for g in (failed or [])]
         save_json_state(STATE_FILE, data, STATE_LOCK)
 
 
@@ -446,22 +469,60 @@ async def test(event: MessageEvent):
 
 
 _push_running = False  # 推送进行中标记：定时触发与启动补发恰好并发时只跑一路
+_retry_day = ""  # 已安排过失败群补发的日期：每个自然日最多安排一次
 
 
-async def _push_daily_countdown() -> bool:
-    """推送当日倒计时到所有开启群；全部群送达才记录 last_push_date 并返回 True。"""
+def _schedule_failed_retry(today: str) -> None:
+    """部分群失败时注册 10 分钟后的一次性定向补发；防重复由 last_push_date + failed_groups 兜底。"""
+    global _retry_day
+    if _retry_day == today:
+        return
+    _retry_day = today
+    run_at = _now() + timedelta(minutes=10)
+    try:
+        scheduler.add_job(
+            _retry_pending_failed, "date", run_date=run_at, timezone="Asia/Shanghai",
+            id=f"daily_holiday_retry_{today}", replace_existing=True, misfire_grace_time=300,
+        )
+        _logger.warning("倒计时部分群推送失败，已安排 %s 定向补发", run_at.strftime("%H:%M"))
+    except Exception:
+        _logger.exception("倒计时失败群补发任务注册失败")
+
+
+async def _retry_pending_failed() -> None:
+    """同日定向补发 state 中记录的失败群；成功群不再重推。"""
+    day, failed = _push_status()
+    if day != _now().date().isoformat() or not failed:
+        return
+    await _push_daily_countdown(targets=set(failed))
+
+
+async def _push_daily_countdown(targets: set[int] | None = None) -> bool:
+    """推送当日倒计时。
+
+    - targets 为 None：新一天推全部开启群；同日仅补发 failed_groups 中的失败群。
+    - 任一群成功即写 last_push_date，并把仍失败的群记入 failed_groups。
+    - 全部失败时不写 last_push_date（新日），保留启动补发机会。
+    """
     global _push_running
-    today = _now().date().isoformat()
-    if _last_push_date() == today:
-        return True  # 今日已推送（定时与补发共用此标记，防重复）
+    today = _now().date()
+    today_s = today.isoformat()
     if _push_running:  # 另一路正在推送本次倒计时，无需重复
         return False
     _push_running = True
     try:
-        if _last_push_date() == today:  # 双重检查：进入前另一路可能刚好推完
-            return True
-        groups = _enabled_groups()
-        if not groups:
+        last_day, pending_failed = _push_status()
+        if targets is None:
+            if last_day == today_s:
+                if not pending_failed:
+                    return True  # 今日已全部送达
+                targets = set(pending_failed)
+            else:
+                targets = _enabled_groups()
+        if not targets:
+            # 同日补发时失败群已被关闭推送：清空 pending，避免反复空转
+            if last_day == today_s and pending_failed:
+                _mark_pushed(today, [])
             return False
         try:
             message = await _build_image_message()
@@ -475,37 +536,46 @@ async def _push_daily_countdown() -> bool:
             return False
         # 并发发送：单个群失败不影响其他群
         results = await asyncio.gather(
-            *(bot.send_group_msg(group_id=gid, message=message) for gid in groups),
+            *(bot.send_group_msg(group_id=gid, message=message) for gid in targets),
             return_exceptions=True,
         )
         sent = 0
-        failed = 0
-        for gid, result in zip(groups, results, strict=False):
+        still_failed: list[int] = []
+        for gid, result in zip(targets, results, strict=False):
             if isinstance(result, BaseException):
-                failed += 1
+                still_failed.append(int(gid))
                 _logger.warning("倒计时推送到群 %s 失败", gid, exc_info=result)
             else:
                 sent += 1
-        if failed:
-            # 部分群失败不算推送完成：不标记 last_push_date，保留当日再次触发时的补发机会；
-            # 但不做主动补发，避免向已收到的群重复推送
-            _logger.warning("倒计时推送未全部送达（成功 %s/共 %s），今日不标记已推送", sent, sent + failed)
-            return False
-        _mark_pushed(_now().date())  # 全部目标群送达才记录，防止重复推送
-        return True
+        if sent:
+            # 任一成功即记 last_push_date；失败群保留待同日定向补发，不重推已送达群
+            _mark_pushed(today, still_failed)
+            if still_failed:
+                _logger.warning(
+                    "倒计时推送部分送达（成功 %s/共 %s），失败群已记入待补发",
+                    sent, sent + len(still_failed),
+                )
+                _schedule_failed_retry(today_s)
+            return True
+        # 全部失败：新日不标记 last_push_date；同日补发保留原 pending
+        _logger.warning("倒计时推送全部失败（共 %s 群），今日不标记已推送", len(targets))
+        return False
     finally:
         _push_running = False
 
 
 @scheduler.scheduled_job("cron", hour=PUSH_TIME.hour, minute=PUSH_TIME.minute, id="daily_holiday_countdown", timezone="Asia/Shanghai")
 async def daily_holiday_countdown_job():
-    if _last_push_date() == _now().date().isoformat():
-        return  # 今日已推送（如启动补发已执行过），防重复
+    last_day, pending_failed = _push_status()
+    today_s = _now().date().isoformat()
+    if last_day == today_s and not pending_failed:
+        return  # 今日已全部送达（如启动补发已执行过），防重复
     await _push_daily_countdown()
 
 
 # 启动补发：APScheduler 用内存 jobstore，进程重启后错过的当日推送静默丢失，
 # bot 连上后检查"已过推送时刻且今日未推送"则立即补发一次。
+# 同日已有部分成功时只补发 failed_groups，不向已送达群重推。
 # 优先 on_bot_connect（此时 get_bot 可用）；无该钩子的环境（旧版 nonebot / 测试 stub）回退 on_startup。
 _register_catchup = getattr(get_driver(), "on_bot_connect", get_driver().on_startup)
 
@@ -516,6 +586,10 @@ async def _countdown_catchup(bot: Bot | None = None) -> None:
     now = _now()
     if (now.hour, now.minute) < (PUSH_TIME.hour, PUSH_TIME.minute):
         return  # 还没到当日推送时刻，交给定时任务
-    if _last_push_date() >= now.date().isoformat():
-        return  # 今日已推送（last_push_date 为今天或更晚），不重复
+    last_day, pending_failed = _push_status()
+    today_s = now.date().isoformat()
+    if last_day == today_s:
+        if pending_failed:
+            await _push_daily_countdown(targets=set(pending_failed))
+        return  # 今日已推送（全部成功或补发后），不重复
     await _push_daily_countdown()

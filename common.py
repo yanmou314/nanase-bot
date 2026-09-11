@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from nonebot.adapters.onebot.v11 import Message, MessageEvent, MessageSegment
@@ -20,18 +21,58 @@ _logger = logging.getLogger("qqbot.common")
 
 OWNER = os.getenv("QQBOT_OWNER", "REPLACE_WITH_OWNER_QQ")
 
-# 测试群：与主人同权，群内任意成员视为 owner（仅用于帮助菜单等管理命令的测试）
-TEST_PRIVILEGED_GROUPS = {864213945}
+
+def _parse_id_set(raw: str | None) -> set[int]:
+    """解析逗号分隔的整数集合；非法项静默跳过。"""
+    result: set[int] = set()
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            result.add(int(part))
+        except ValueError:
+            _logger.warning("忽略非法 id 项: %r", part)
+    return result
+
+
+# 测试群：仅当显式配置 QQBOT_TEST_PRIVILEGED_GROUPS 时才启用。
+# 默认空集——生产路径下不再有整群 owner 提权（含历史硬编码 864213945）。
+# 可选 QQBOT_TEST_OWNER_UIDS：非空时要求调用者 uid 同时命中白名单。
+TEST_PRIVILEGED_GROUPS = _parse_id_set(os.getenv("QQBOT_TEST_PRIVILEGED_GROUPS"))
+TEST_OWNER_UIDS = _parse_id_set(os.getenv("QQBOT_TEST_OWNER_UIDS"))
+
+
+def _first_existing(*candidates: str) -> str | None:
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
+_NOTO_BOLD_CANDIDATES = (
+    "/usr/share/fonts/custom/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+)
+_NOTO_REG_CANDIDATES = (
+    "/usr/share/fonts/custom/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+)
 
 FONTS = {
     "bold": "/usr/share/fonts/custom/ZCOOLKuaiLe-Regular.ttf",
-    "noto_bold": "/usr/share/fonts/custom/noto/NotoSansCJK-Bold.ttc",
-    "noto_reg": "/usr/share/fonts/custom/noto/NotoSansCJK-Regular.ttc",
+    # 候选链：custom/noto → opentype/noto；都不存在时保留首候选，交由调用方报错
+    "noto_bold": _first_existing(*_NOTO_BOLD_CANDIDATES) or _NOTO_BOLD_CANDIDATES[0],
+    "noto_reg": _first_existing(*_NOTO_REG_CANDIDATES) or _NOTO_REG_CANDIDATES[0],
 }
 
 # 渲染（weasyprint/Pillow）全局串行信号量：2 核 1.6G 的小机器上并发渲染
 # 容易打爆内存，所有重渲染都应经由它串行化。
 RENDER_SEM = asyncio.Semaphore(1)
+
+# 阻塞渲染专用线程池：避免 weasyprint/PIL 长任务占满默认 executor；
+# max_workers=2 给 wait_for 超时后残留的 worker 留一个接续槽，同时保证有界。
+_RENDER_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="qqbot-render")
 
 _NULL_LOCK = threading.RLock()
 
@@ -41,11 +82,26 @@ _last_cleanup: dict[str, float] = {}
 
 
 def is_owner(event: MessageEvent) -> bool:
+    """判断是否具备主人权限。
+
+    真实 OWNER 恒为 True；否则仅当事件所在群在 TEST_PRIVILEGED_GROUPS 且
+    （TEST_OWNER_UIDS 为空，或 event.user_id 命中该白名单）时才 True。
+    """
     if str(event.user_id) == OWNER:
         return True
     gid = getattr(event, "group_id", None)
+    if gid is None:
+        return False
     try:
-        return int(gid) in TEST_PRIVILEGED_GROUPS if gid is not None else False
+        gid_int = int(gid)
+    except (TypeError, ValueError):
+        return False
+    if gid_int not in TEST_PRIVILEGED_GROUPS:
+        return False
+    if not TEST_OWNER_UIDS:
+        return True
+    try:
+        return int(event.user_id) in TEST_OWNER_UIDS
     except (TypeError, ValueError):
         return False
 
@@ -214,6 +270,7 @@ async def save_json_state_async(path: str, data: dict, lock=None) -> None:
 # ---------------- 群成员昵称（带 TTL 的 LRU，跨插件共享单例） ----------------
 
 _NAME_TTL = 300.0  # 昵称缓存有效期（秒），沿用 chat_stats/cmd_stats 原实现
+_NAME_FAIL_TTL = 30.0  # NapCat 失败负缓存：短 TTL，避免 API 恢复后仍长期显示 QQ 号
 _NAME_CACHE_MAX = 10000  # 简单 LRU 上限，防止长期运行内存增长
 _member_name_cache: OrderedDict = OrderedDict()
 _member_name_ts: dict = {}
@@ -224,14 +281,16 @@ async def get_member_name(bot, group_id: int, user_id: int) -> str:
     """取群成员群名片/昵称，失败回退 QQ 号字符串；结果带 TTL 缓存（插件间共享）。
 
     单次查询 10 秒超时：NapCat 卡死时不致挂死调用方（日报等批量拉取场景）。
+    失败结果仅缓存 _NAME_FAIL_TTL（默认 30s），不写入 300s 负缓存。
     """
     key = (group_id, user_id)
     now = time.time()
     with _member_name_lock:
         cached = _member_name_cache.get(key)
-        if cached and now - _member_name_ts.get(key, 0) < _NAME_TTL:
+        if cached is not None and now - _member_name_ts.get(key, 0) < _NAME_TTL:
             _member_name_cache.move_to_end(key)
             return cached
+    failed = False
     try:
         info = await asyncio.wait_for(
             bot.get_group_member_info(group_id=group_id, user_id=user_id), 10
@@ -239,9 +298,11 @@ async def get_member_name(bot, group_id: int, user_id: int) -> str:
         name = info.get("card") or info.get("nickname") or str(user_id)
     except Exception:
         name = str(user_id)
+        failed = True
     with _member_name_lock:
         _member_name_cache[key] = name
-        _member_name_ts[key] = now
+        # 失败条目与成功条目共用 _member_name_ts，但读缓存时按失败短 TTL 过期
+        _member_name_ts[key] = now if not failed else now - (_NAME_TTL - _NAME_FAIL_TTL)
         _member_name_cache.move_to_end(key)
         while len(_member_name_cache) > _NAME_CACHE_MAX:
             old = _member_name_cache.popitem(last=False)
@@ -293,10 +354,17 @@ RENDER_TOTAL_TIMEOUT = 180
 
 async def render_html_to_png_async(html: str, prefix: str, cache_dir: str,
                                     max_age: int = 24 * 60 * 60, dpi: int = 144) -> str:
-    """render_html_to_png 的异步封装：经 RENDER_SEM 全局串行化后在线程池执行。"""
+    """render_html_to_png 的异步封装：经 RENDER_SEM 全局串行化后在专用渲染线程池执行。
+
+    使用专用 ThreadPoolExecutor（max_workers=2）而非默认 executor，避免 weasyprint/PIL
+    阻塞任务挤占 asyncio 默认线程池；wait_for 超时后 worker 可能仍在跑，但池有界。
+    """
     async with RENDER_SEM:
+        loop = asyncio.get_running_loop()
         return await asyncio.wait_for(
-            asyncio.to_thread(render_html_to_png, html, prefix, cache_dir, max_age, dpi),
+            loop.run_in_executor(
+                _RENDER_EXECUTOR, render_html_to_png, html, prefix, cache_dir, max_age, dpi
+            ),
             timeout=RENDER_TOTAL_TIMEOUT,
         )
 
@@ -325,11 +393,18 @@ _orphan_clients: list = []
 
 
 def get_http_client(timeout: float = 30.0):
-    """按超时参数缓存的 httpx.AsyncClient 单例。"""
+    """按超时参数缓存的 httpx.AsyncClient 单例。
+
+    若池内实例已 is_closed，先 pop 再注册新客户端，避免 setdefault 一直
+    挂着关闭实例、把新客户端永久丢进孤儿表。
+    """
     import httpx
 
     client = _http_clients.get(timeout)
-    if client is None or client.is_closed:
+    if client is not None and client.is_closed:
+        _http_clients.pop(timeout, None)
+        client = None
+    if client is None:
         new_client = httpx.AsyncClient(timeout=timeout)
         existing = _http_clients.setdefault(timeout, new_client)
         if existing is new_client:
