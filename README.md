@@ -39,28 +39,30 @@
 
 ## 🏗 架构
 
-```mermaid
-flowchart TB
-    QQ["QQ 群"]
-    NC["NapCatQQ"]
-    BOT["NoneBot2 机器人<br/>bot.py"]
-    PG["PostgreSQL<br/>聊天记录"]
-    AI["AI 接口<br/>智谱 · 一言"]
-    OW["OW 查询中继<br/>查询机器人 / NK 数据"]
-
-    QQ <-->|OneBot V11 WebSocket| NC
-    NC -->|"反连 127.0.0.1:8080"| BOT
-    BOT --> PG
-    BOT --> AI
-    BOT --> OW
+```
+┌──────────┐  OneBot V11   ┌──────────┐
+│ QQ Group │◄─────────────►│ NapCatQQ │
+└──────────┘  WebSocket    └─────┬────┘
+                                 │ 127.0.0.1:8080
+                        ┌─────────▼────────┐
+                        │  NoneBot2 Bot    │
+                        │     bot.py       │
+                        └─────────┬────────┘
+                                 │
+            ┼─────────────────────┼─────────────────────┼
+            │                     │                     │
+     ┌──────▼──────┐       ┌──────▼──────┐       ┌──────▼──────┐
+     │ PostgreSQL  │       │   AI API    │       │  OW Relay   │
+     │  chat logs  │       │ GLM / Yiyan │       │ query + NK  │
+     └─────────────┘       └─────────────┘       └─────────────┘
 ```
 
 
-- **QQ 群 / NapCatQQ**：群消息经 OneBot V11 WebSocket 反连 `127.0.0.1:8080`
-- **NoneBot2 机器人**：`bot.py` 加载各业务插件
+- **QQ Group / NapCatQQ**：群消息经 OneBot V11 WebSocket 反连 `127.0.0.1:8080`
+- **NoneBot2 Bot**：`bot.py` 加载各业务插件
 - **PostgreSQL**：群聊统计（龙王 / 词云）聊天记录
-- **AI 接口**：智谱 GLM · 一言（AI 聊天 / 晨报问候）
-- **OW 查询中继**：守望查询机器人任务中继 + Ninja Kiwi 开放数据（BTD6）
+- **AI API**：智谱 GLM · 一言（AI 聊天 / 晨报问候）
+- **OW Relay**：守望查询机器人任务中继 + Ninja Kiwi 开放数据（BTD6）
 
 ## 🚀 快速开始
 
