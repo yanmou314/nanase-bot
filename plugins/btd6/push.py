@@ -6,11 +6,11 @@ import threading
 import time
 from pathlib import Path
 
-from nonebot import get_bot, get_driver
-from nonebot.adapters.onebot.v11 import MessageSegment
+from nonebot import get_bot, get_driver, on_command
+from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageEvent, MessageSegment
 from nonebot_plugin_apscheduler import scheduler
 
-from common import load_json_state, save_json_state
+from common import is_owner, load_json_state, save_json_state
 
 from . import cards, collect, i18n, nkapi, util
 
@@ -227,6 +227,26 @@ async def _prewarm_daily_cards() -> int:
     return done
 
 
+async def _prewarm_coop_card() -> bool:
+    """预热 Co-op 挑战卡（与每日同源接口，期号变更是按 createdAt 的独立节奏）。
+
+    每日卡预热不覆盖 Co-op：coop 有独立 id/推送标记，首查原本冷渲染。
+    """
+    try:
+        col = await collect.collect_daily_coop()
+    except Exception:
+        _logger.warning("BTD6 Co-op 预热取数失败", exc_info=True)
+        return False
+    if not col or col.get("empty"):
+        return False
+    try:
+        await cards._render_card("btd6coop", lambda c=col: cards.rules_html(c))
+        return True
+    except Exception:
+        _logger.warning("BTD6 Co-op 预热渲染失败", exc_info=True)
+        return False
+
+
 # 注意：APScheduler 3.11 的 scheduled_job 装饰器内部恒以 replace_existing=True 注册，
 # 显式传该参数会因参数冲突抛 TypeError 使插件导入失败（校验见 test_push_jobs_apscheduler_compat）。
 @scheduler.scheduled_job("cron", hour=4, minute=0, id="btd6_prewarm",
@@ -241,7 +261,7 @@ async def btd6_prewarm_job():
                          timezone="Asia/Shanghai")
 async def btd6_prewarm_lb_hourly_job():
     """每小时 :10 错峰预热：进行中活动的榜单卡（race/boss/ct 各一张，无则跳过）
-    + 标准/高级每日卡（08:00 每日重置后最迟 10 分钟暖好，内容不变时近零成本）。
+    + 标准/高级每日卡 + Co-op 卡（08:00 每日重置后最迟 10 分钟暖好，内容不变时近零成本）。
 
     榜单卡含"剩余 X天X小时"相对时间（时间粒度按 15 分钟桶取整），04:00 预热的卡只对
     邻近时段有效；每小时错峰重渲才能让"首查秒回"持续生效。数据全部来自既有缓存/
@@ -262,6 +282,7 @@ async def btd6_prewarm_lb_hourly_job():
             if i < len(jobs) - 1:
                 await asyncio.sleep(1.0)
         await _prewarm_daily_cards()
+        await _prewarm_coop_card()
     except Exception:
         _logger.warning("BTD6 每小时预热异常", exc_info=True)
     finally:
@@ -290,7 +311,7 @@ async def _btd6_warm_on_connect(bot=None) -> None:
 # ---------------- 活动刷新推送（群自动播报） ----------------
 BTD6_PUSH_STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
 _BTD6_PUSH_LOCK = threading.RLock()
-_BTD6_PUSH_KINDS = ("race", "boss", "ct", "odyssey", "daily", "rush", "coop")
+_BTD6_PUSH_KINDS = ("race", "boss", "ct", "odyssey", "daily", "rush", "coop", "social")
 
 def _load_push_state() -> dict:
     return load_json_state(BTD6_PUSH_STATE_FILE, _BTD6_PUSH_LOCK)
@@ -344,8 +365,55 @@ def _push_change_group(group_id: int, enabled: bool) -> bool:
             save_json_state(BTD6_PUSH_STATE_FILE, data, _BTD6_PUSH_LOCK)
         return changed
 
+async def _fetch_push_event(kind: str, now: int, real_now: int):
+    """单类取当前事件（定时采样与手动检查共用）；无进行中返回 None。
+
+    各类只取自己需要的列表接口（collect_overview 一次拉 5 个列表，采样场景纯浪费；
+    fetch_body 有 TTL 缓存，同一刷新点相邻采样任务也不会重复打 API）。
+    """
+    if kind == "race":
+        items = await collect._safe(nkapi.fetch_body(nkapi.URL_RACES), "push_race")
+        return util._pick_section(items if isinstance(items, list) else [], now)
+    if kind == "boss":
+        items = await collect._safe(nkapi.fetch_body(nkapi.URL_BOSSES), "push_boss")
+        return util._pick_section(items if isinstance(items, list) else [], now)
+    if kind == "ct":
+        items = await collect._safe(nkapi.fetch_body(nkapi.URL_CT), "push_ct")
+        items = items if isinstance(items, list) else []
+        return util.pick_active(items, now) or util.pick_next(items, now) or util.fallback_latest(items)
+    if kind == "odyssey":
+        # 远征列表独立接口（与归档/预热同一数据源）
+        items = await collect._safe(nkapi.fetch_body(nkapi.URL_ODYSSEY), "push_odyssey")
+        return util._pick_section(items if isinstance(items, list) else [], now)
+    if kind == "rush":
+        items = await collect._safe(nkapi.fetch_body(nkapi.URL_EVENTS), "push_rush")
+        rush_list = [e for e in (items if isinstance(items, list) else [])
+                     if isinstance(e, dict) and e.get("type") == "bossRush"]
+        return util._pick_section(rush_list, now)
+    if kind == "social":
+        # 社交赛季与 Boss Rush 同源 /btd6/events，按 type 拆分；
+        # 刷新点不固定，只取进行中的一期（不取 next/latest，避免误推未开始/已结束）
+        items = await collect._safe(nkapi.fetch_body(nkapi.URL_EVENTS), "push_social")
+        social_list = [e for e in (items if isinstance(items, list) else [])
+                       if isinstance(e, dict) and e.get("type") == "socialseason"]
+        return util.pick_active(social_list, now)
+    if kind == "daily":
+        items = await collect._safe(nkapi.fetch_body(nkapi.URL_DAILY)) or []
+        return next((x for x in items if str(x.get("name") or "").startswith("Standard")), None)
+    if kind == "coop":
+        # Co-op 挑战与每日挑战同一列表（name 以 coop 开头）；未来排期的条目
+        # 元数据未开放，只取 createdAt ≤ 当前的最新一期
+        items = await collect._safe(nkapi.fetch_body(nkapi.URL_DAILY)) or []
+        return collect._coop_pick(items if isinstance(items, list) else [], real_now)
+    return None
+
+
 async def _btd6_push_kind(kind: str) -> None:
-    """精准采样：仅检查单类活动是否刚刷新，减少 99% 空轮询（原每5分钟全量检查 288次/日 → 现仅刷新点后3次/类）。"""
+    """精准采样：仅检查单类活动是否刚刷新；命中则入队，由防抖批量统一渲染后发送。
+
+    原每 5 分钟全量检查 288 次/日 → 现仅刷新点后 3 次/类。同小时多类（如每日+Coop）
+    错峰采样时先进队列，等防抖窗口结束后一起处理，避免总览卡重复发送。
+    """
     groups = _push_groups()
     if not groups:
         return
@@ -358,34 +426,8 @@ async def _btd6_push_kind(kind: str) -> None:
     # 12 分钟窗口：:10 采样点距刷新点恰为 10min，10min 窗口会漏掉第三次容错采样
     window_ms = 12 * 60 * 1000
     last = _last_pushed()
-    # 单类检查（只取列表判断 id/start，重量级元数据/素材留到确认推送后再拉）。
-    # 各类只取自己需要的列表接口（collect_overview 一次拉 5 个列表，采样场景纯浪费；
-    # fetch_body 有 TTL 缓存，同一刷新点相邻采样任务也不会重复打 API）
     try:
-        ev = None
-        if kind == "race":
-            items = await collect._safe(nkapi.fetch_body(nkapi.URL_RACES), "push_race")
-            ev = util._pick_section(items if isinstance(items, list) else [], now)
-        elif kind == "boss":
-            items = await collect._safe(nkapi.fetch_body(nkapi.URL_BOSSES), "push_boss")
-            ev = util._pick_section(items if isinstance(items, list) else [], now)
-        elif kind == "ct":
-            items = await collect._safe(nkapi.fetch_body(nkapi.URL_CT), "push_ct")
-            items = items if isinstance(items, list) else []
-            ev = util.pick_active(items, now) or util.pick_next(items, now) or util.fallback_latest(items)
-        elif kind == "rush":
-            items = await collect._safe(nkapi.fetch_body(nkapi.URL_EVENTS), "push_rush")
-            rush_list = [e for e in (items if isinstance(items, list) else [])
-                         if isinstance(e, dict) and e.get("type") == "bossRush"]
-            ev = util._pick_section(rush_list, now)
-        elif kind == "daily":
-            items = await collect._safe(nkapi.fetch_body(nkapi.URL_DAILY)) or []
-            ev = next((x for x in items if str(x.get("name") or "").startswith("Standard")), None)
-        elif kind == "coop":
-            # Co-op 挑战与每日挑战同一列表（name 以 coop 开头）；未来排期的条目
-            # 元数据未开放，只取 createdAt ≤ 当前的最新一期
-            items = await collect._safe(nkapi.fetch_body(nkapi.URL_DAILY)) or []
-            ev = collect._coop_pick(items if isinstance(items, list) else [], real_now)
+        ev = await _fetch_push_event(kind, now, real_now)
         if not isinstance(ev, dict):
             return
         ev_id = str(ev.get("id") or ev.get("name") or "")
@@ -393,148 +435,370 @@ async def _btd6_push_kind(kind: str) -> None:
         if not ev_id or last.get(kind) == ev_id:
             return
         start = int(ev.get("start") or 0)
-        if kind in ("daily", "coop"):
-            # daily/coop 无 start，以 id 变化即视为刷新
+        if kind in ("daily", "coop", "social"):
+            # daily/coop 无 start，以 id 变化即视为刷新；
+            # social 刷新点不固定，只取进行中活动，同样按 id 去重，不套 12 分钟窗口
             pass
         elif not start or not (0 <= real_now - start < window_ms):
             # 非窗口期内且非首次配置则跳过；首次配置 30 分钟内补发
             if last.get(kind) or not start or not (0 <= real_now - start < 30 * 60 * 1000):
                 return
-        # 确认要推送后才拉取重量级数据并渲染发送
-        await _btd6_push_single(kind, ev, ev_id, label, groups)
+        await _enqueue_push(kind, ev, ev_id, label)
     except Exception:
         _logger.warning("BTD6 精准推送 kind=%s 失败", kind, exc_info=True)
 
-async def _btd6_push_single(kind: str, ev: dict, ev_id: str, label: str, groups: set[int]) -> None:
-    try:
-        bot = get_bot()
-    except Exception:
+
+# ---------------- 批量推送：先渲染完再发；总览只发一次且在详情之前 ----------------
+
+# 同小时错峰采样最大约 40 秒（如 race:00 / boss:20 / odyssey:40），防抖窗口盖住即可合并
+_PUSH_BATCH_DELAY_S = 70.0
+_PENDING_BATCH_CAP = 32  # 防御：异常时缓冲不无限涨
+_pending_batch: dict[str, tuple[dict, str, str]] = {}  # kind -> (ev, ev_id, label)
+_batch_lock = threading.RLock()  # 与 state 同风格；跨线程仅保护 dict 读写
+_batch_flush_task: asyncio.Task | None = None
+_flush_in_progress = False  # 防抖任务已进入 flush 时不可 cancel，避免发送中途被打断
+# 总览已发出但详情失败的 kind：重试时只补详情，避免总览刷两遍
+_overview_already_sent: set[str] = set()
+_OVERVIEW_KINDS = frozenset({"race", "boss", "ct", "odyssey", "rush"})
+
+
+def _kind_display_name(kind: str, label: str) -> str:
+    kind_name = {"race": "竞速", "ct": "争夺领土", "rush": "Boss Rush",
+                 "boss": "Boss", "odyssey": "远征", "daily": "每日挑战",
+                 "coop": "Co-op", "social": "社交赛季"}.get(kind, kind)
+    if label:
+        event_name = i18n._EVENT_NAME_CN.get(label.strip())
+        return event_name or kind_name
+    return kind_name
+
+
+async def _enqueue_push(kind: str, ev: dict, ev_id: str, label: str) -> None:
+    """把待推活动放进批量缓冲；若已有防抖计时则并入，否则挂新计时。"""
+    global _batch_flush_task
+    with _batch_lock:
+        _pending_batch[kind] = (ev, ev_id, label)
+        if len(_pending_batch) > _PENDING_BATCH_CAP:
+            # 只保留最近写入的（dict 插入序），异常积压时不无限涨内存
+            drop = list(_pending_batch.keys())[: len(_pending_batch) - _PENDING_BATCH_CAP]
+            for k in drop:
+                _pending_batch.pop(k, None)
+        # 社季几乎不会与其他类并批，单独命中时立即发送，避免固定多等 70s
+        social_alone = kind == "social" and len(_pending_batch) == 1
+    if social_alone or _PUSH_BATCH_DELAY_S <= 0:
+        await _flush_push_batch()
         return
     try:
-        if kind in ("race", "ct", "rush"):
-            data = await collect.collect_overview()
-            path = await cards._render_card("btd6ov", lambda: cards.overview_html(data))
-            # 活动名优先用 i18n 汉化映射（NK 返回英文模板名）；查表用普通语句，
-            # 避免 f-string 内嵌字典字面量的 PEP 701 写法（3.12 前为语法错误）
-            kind_name = {"race": "竞速", "ct": "争夺领土", "rush": "Boss Rush"}.get(kind, kind)
-            event_name = i18n._EVENT_NAME_CN.get((label or "").strip())
-            if label:
-                text = f"🎮 BTD6 {event_name or kind_name}已刷新：{label}"
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        await _flush_push_batch()
+        return
+    # 仅取消仍在 sleep 的计时器；flush 进行中则不打断，新条目留给本轮结束后
+    # 的剩余检测或下一轮采样（flush 开头会 snapshot+clear，新条目会留在缓冲）。
+    if _batch_flush_task is not None and not _batch_flush_task.done() and not _flush_in_progress:
+        _batch_flush_task.cancel()
+    _batch_flush_task = loop.create_task(_delayed_flush())
+
+
+async def _delayed_flush() -> None:
+    try:
+        await asyncio.sleep(_PUSH_BATCH_DELAY_S)
+        await _flush_push_batch()
+    except asyncio.CancelledError:
+        # 被更新的采样顶替：新任务会带着更全的批次再 flush
+        pass
+
+
+def _resolve_overview_path(kind: str, shared_ov: str | None) -> str | None:
+    """批量场景下本类总览策略：已发过→跳过("")；有共享图→用共享；否则自渲(None)。"""
+    if kind not in _OVERVIEW_KINDS:
+        return None
+    if kind in _overview_already_sent:
+        return ""
+    return shared_ov
+
+
+async def _render_kind_payload(kind: str, ev: dict, label: str,
+                               overview_path: str | None = None) -> dict | None:
+    """渲染单类活动的全部卡片（不发送）。
+
+    overview_path:
+      None  — 本类需要总览且自行渲染
+      ""    — 跳过总览（本批/此前已发过目录，重试只补详情）
+      str   — 使用共享总览路径
+    返回:
+      overview: 总览卡路径（race/boss/ct/odyssey/rush）；daily/coop/social 为 None
+      announce: 与总览一起发出的刷新文案；无总览时为 ""
+      details:  [(text, image_path|None), ...] 总览之后的详情消息
+    """
+    try:
+        if kind in ("race", "boss", "ct", "rush"):
+            if overview_path == "":
+                path = None
+            elif overview_path is None:
+                data = await collect.collect_overview()
+                path = await cards._render_card("btd6ov", lambda: cards.overview_html(data))
             else:
-                text = f"🎮 BTD6 {kind_name} 已刷新"
-        elif kind == "odyssey":
-            col = await collect.collect_odyssey()
-            data = await collect.collect_overview()
-            path = await cards._render_card("btd6ov", lambda: cards.overview_html(data))
+                path = overview_path
+            text = f"🎮 BTD6 {_kind_display_name(kind, label)}已刷新：{label}" if label \
+                else f"🎮 BTD6 {_kind_display_name(kind, '')} 已刷新"
+            details: list[tuple[str, str | None]] = []
+            if kind == "boss":
+                for variant, vlab in (("standard", "标准"), ("elite", "精英")):
+                    col = await collect._safe(collect.collect_rules("boss", variant))
+                    if not col or col.get("empty"):
+                        continue
+                    p2 = await cards._render_card(
+                        f"btd6rule_{variant}", lambda c=col: cards.rules_html(c))
+                    vt = f"Boss·{vlab}规则：{label}" if label else f"Boss·{vlab}规则"
+                    details.append((vt, p2))
+            return {"overview": path, "announce": text, "label": label, "details": details}
+        if kind == "odyssey":
+            if overview_path == "":
+                path = None
+            elif overview_path is None:
+                data = await collect.collect_overview()
+                path = await cards._render_card("btd6ov", lambda: cards.overview_html(data))
+            else:
+                path = overview_path
             text = f"🏰 远征已刷新：{label}" if label else "🏰 远征已刷新"
-            # 与 handle_odyssey / 预热相同：注入 _unified_h 统一画布高度，
-            # 否则推送图 HTML 变化导致渲染缓存必然 miss，且与后续查询图高度不一
+            col = await collect.collect_odyssey()
+            if not col or col.get("empty"):
+                # 无有效远征数据：不能只靠总览把本期标成已推
+                return None
             try:
                 _inject_odyssey_unified_h(col)
             except Exception:
                 _logger.debug("BTD6 推送远征统一高度计算失败，使用各自高度", exc_info=True)
-            sent_any = False
+            details = []
             for d, lab in i18n._ODYSSEY_DIFFS:
                 try:
-                    p = await cards._render_card("btd6ody", lambda d=d, lab=lab: cards.odyssey_diff_html(col, d, lab))
-                    for gid in groups:
-                        try:
-                            await bot.send_group_msg(group_id=gid, message=MessageSegment.image(Path(p).as_uri()))
-                            sent_any = True
-                            await asyncio.sleep(0.6)
-                        except Exception:
-                            _logger.warning("BTD6 远征分图推送到群 %s 失败", gid, exc_info=True)
+                    p = await cards._render_card(
+                        "btd6ody", lambda d=d, lab=lab: cards.odyssey_diff_html(col, d, lab))
+                    details.append((f"远征·{lab}", p))
                 except Exception:
                     _logger.warning("BTD6 远征 %s 渲染失败", lab, exc_info=True)
-            for gid in groups:
-                try:
-                    await bot.send_group_msg(group_id=gid, message=MessageSegment.text(text) + MessageSegment.image(Path(path).as_uri()))
-                    sent_any = True
-                    await asyncio.sleep(0.5)
-                except Exception:
-                    _logger.warning("BTD6 推送到群 %s 失败 kind=%s", gid, kind, exc_info=True)
-            if sent_any:
-                # 分图与总览任一发送成功即标记，避免部分成功时下轮重发整组刷屏；全部失败时保留待推状态
-                await asyncio.to_thread(_set_last_pushed, kind, ev_id)
-            _logger.info("BTD6 精准推送 %s %s 到 %d 群（成功标记：%s）", kind, ev_id, len(groups), sent_any)
-            return
-        elif kind == "daily":
-            # 每日普通+高级双版本一起推送；标准/高级是独立编号，
-            # 期号前缀必须取自各次 collect_daily 返回的真实事件名，不能复用外层 label
-            pushed_any = False
+            if not details:
+                return None
+            return {"overview": path, "announce": text, "label": label, "details": details}
+        if kind == "daily":
+            details = []
             for adv in (False, True):
                 col = await collect._safe(collect.collect_daily(adv), "daily_push")
                 if not col or col.get("empty"):
                     continue
-                path = await cards._render_card("btd6dailya" if adv else "btd6daily", lambda c=col: cards.rules_html(c))
-                text = f"📅 每日挑战已刷新·{col.get('prefix') or collect._daily_prefix(label, adv)}"
-                for gid in groups:
-                    try:
-                        await bot.send_group_msg(group_id=gid, message=MessageSegment.text(text) + MessageSegment.image(Path(path).as_uri()))
-                        pushed_any = True
-                        await asyncio.sleep(0.6)
-                    except Exception:
-                        _logger.warning("BTD6 推送到群 %s 失败 kind=%s adv=%s", gid, kind, adv, exc_info=True)
-            if pushed_any:
-                # 至少一个群发送成功才标记已推送；全部失败时保留待推状态，下次采样重试
-                await asyncio.to_thread(_set_last_pushed, kind, ev_id)
-                _logger.info("BTD6 精准推送 %s %s 到 %d 群", kind, ev_id, len(groups))
-            return
-        elif kind == "boss":
-            # Boss 标准+精英双版本：先推总览，再推两套详细规则
-            data = await collect.collect_overview()
-            path = await cards._render_card("btd6ov", lambda: cards.overview_html(data))
-            text = f"🎮 BTD6 Boss已刷新：{label}" if label else "🎮 BTD6 Boss 已刷新"
-            sent_any = False
-            for gid in groups:
-                try:
-                    await bot.send_group_msg(group_id=gid, message=MessageSegment.text(text) + MessageSegment.image(Path(path).as_uri()))
-                    sent_any = True
-                    await asyncio.sleep(0.5)
-                except Exception:
-                    _logger.warning("BTD6 推送到群 %s 失败 kind=%s", gid, kind, exc_info=True)
-            for variant, vlab in [("standard", "标准"), ("elite", "精英")]:
-                col = await collect._safe(collect.collect_rules("boss", variant))
-                if not col or col.get("empty"):
-                    continue
-                p2 = await cards._render_card(f"btd6rule_{variant}", lambda c=col: cards.rules_html(c))
-                vt = f"Boss·{vlab}规则：{label}" if label else f"Boss·{vlab}规则"
-                for gid in groups:
-                    try:
-                        await bot.send_group_msg(group_id=gid, message=MessageSegment.text(vt) + MessageSegment.image(Path(p2).as_uri()))
-                        sent_any = True
-                        await asyncio.sleep(0.6)
-                    except Exception:
-                        _logger.warning("BTD6 Boss %s 推送到群 %s 失败", vlab, gid, exc_info=True)
-            if sent_any:
-                # 全部发送失败时不标记，下次采样窗口重试
-                await asyncio.to_thread(_set_last_pushed, kind, ev_id)
-                _logger.info("BTD6 精准推送 %s %s 到 %d 群", kind, ev_id, len(groups))
-            return
-        elif kind == "coop":
-            # Co-op 挑战单卡推送；名称取 metadata.name（已无 "coop - " 前缀）
+                p = await cards._render_card(
+                    "btd6dailya" if adv else "btd6daily", lambda c=col: cards.rules_html(c))
+                t = f"📅 每日挑战已刷新·{col.get('prefix') or collect._daily_prefix(label, adv)}"
+                details.append((t, p))
+            return {"overview": None, "announce": "", "label": label, "details": details} if details else None
+        if kind == "coop":
             col = await collect._safe(collect.collect_daily_coop(), "coop_push")
             if not col or col.get("empty"):
-                return
-            path = await cards._render_card("btd6coop", lambda c=col: cards.rules_html(c))
+                return None
+            p = await cards._render_card("btd6coop", lambda c=col: cards.rules_html(c))
             coop_name = str((col.get("meta") or {}).get("name") or "").strip()
-            text = f"🤝 Co-op 挑战已刷新：{coop_name}" if coop_name else "🤝 Co-op 挑战已刷新"
+            t = f"🤝 Co-op 挑战已刷新：{coop_name}" if coop_name else "🤝 Co-op 挑战已刷新"
+            return {"overview": None, "announce": "", "label": label, "details": [(t, p)]}
+        if kind == "social":
+            # 社交赛季：无独立规则卡/榜单，只推一条文本（名称+起止日期）
+            name = (label or "").strip() or str(ev.get("name") or "").strip() or "社交赛季"
+            start, end = int(ev.get("start") or 0), int(ev.get("end") or 0)
+            t = f"🤝 社交赛季已开启：{name}"
+            if start and end:
+                t += f"（{util.fmt_date(start)} - {util.fmt_date(end)}）"
+            return {"overview": None, "announce": "", "label": label, "details": [(t, None)]}
+    except Exception:
+        _logger.warning("BTD6 推送渲染 kind=%s 失败", kind, exc_info=True)
+        return None
+    return None
+
+
+async def _send_push_batch(payloads: list[tuple[str, str, dict]], groups: set[int]) -> dict:
+    """先发总览目录（至多一张），再发各类详情；全部渲染完成后才开始发送。
+
+    返回 per-kind 结果，供调用方只标记真正推出去的类：
+      overview_ok: 总览消息是否至少在一个群发出
+      detail_ok:   {kind: 该类详情是否至少一条发出}
+    """
+    empty = {"overview_ok": False, "detail_ok": {k: False for k, _i, _p in payloads}}
+    try:
+        bot = get_bot()
+    except Exception:
+        return empty
+    if not payloads or not groups:
+        return empty
+    overview_path = next((p.get("overview") for _k, _i, p in payloads if p.get("overview")), None)
+    ov_payloads = [p for _k, _i, p in payloads if p.get("overview")]
+    if overview_path:
+        if len(ov_payloads) == 1:
+            ov_text = ov_payloads[0].get("announce") or ""
         else:
-            return
-        sent_any = False
-        for gid in groups:
+            # 多类同时刷新：合并为一条目录文案，总览图只发一次
+            short = "、".join(
+                _kind_display_name(k, str(p.get("label") or ""))
+                for k, _i, p in payloads if p.get("overview")
+            )
+            ov_text = f"🎮 BTD6 活动已刷新：{short}"
+    else:
+        ov_text = ""
+    # 稳定顺序，便于群友阅读
+    order = {k: i for i, k in enumerate(_BTD6_PUSH_KINDS)}
+    payloads = sorted(payloads, key=lambda x: order.get(x[0], 99))
+    # (text, path, owner_kind)；owner_kind=None 表示共享总览
+    messages: list[tuple[str, str | None, str | None]] = []
+    if overview_path:
+        messages.append((ov_text, overview_path, None))
+    for kind, _ev_id, p in payloads:
+        for text, path in p.get("details") or []:
+            messages.append((text, path, kind))
+    if not messages:
+        return empty
+    detail_ok: dict[str, bool] = {k: False for k, _i, _p in payloads}
+    overview_ok = False
+    for gid in groups:
+        for text, path, owner in messages:
             try:
-                await bot.send_group_msg(group_id=gid, message=MessageSegment.text(text) + MessageSegment.image(Path(path).as_uri()))
-                sent_any = True
+                if path and text:
+                    msg = MessageSegment.text(text) + MessageSegment.image(Path(path).as_uri())
+                elif path:
+                    msg = MessageSegment.image(Path(path).as_uri())
+                else:
+                    msg = MessageSegment.text(text or "")
+                await bot.send_group_msg(group_id=gid, message=msg)
+                if owner is None:
+                    overview_ok = True
+                else:
+                    detail_ok[owner] = True
                 await asyncio.sleep(0.5)
             except Exception:
-                _logger.warning("BTD6 推送到群 %s 失败 kind=%s", gid, kind, exc_info=True)
-        if sent_any:
-            # 至少一个群发送成功才标记已推送；全部失败时下次采样重试
-            await asyncio.to_thread(_set_last_pushed, kind, ev_id)
-        _logger.info("BTD6 精准推送 %s %s 到 %d 群（成功标记：%s）", kind, ev_id, len(groups), sent_any)
+                _logger.warning("BTD6 推送到群 %s 失败 owner=%s", gid, owner, exc_info=True)
+    return {"overview_ok": overview_ok, "detail_ok": detail_ok}
+
+
+def _kind_push_ok(kind: str, payload: dict, result: dict) -> bool:
+    """该 kind 是否算「完整推送成功」——只有成功才允许写 last_pushed。
+
+    - 有详情（Boss 规则 / 远征分图 / 每日 / Co-op / 社季）：至少一条详情发出
+    - 纯总览（竞速 / CT / Rush）：总览发出即可
+    - 总览已发但详情全失败：不算成功，重试时跳过总览只补详情
+    """
+    details = payload.get("details") or []
+    if details:
+        return bool(result.get("detail_ok", {}).get(kind))
+    if payload.get("overview"):
+        return bool(result.get("overview_ok"))
+    return False
+
+
+async def _flush_push_batch() -> None:
+    """取出缓冲中的全部待推活动：统一渲染 → 统一发送 → 按 kind 成功才标记。"""
+    global _flush_in_progress, _batch_flush_task
+    with _batch_lock:
+        pending = dict(_pending_batch)
+        _pending_batch.clear()
+    if not pending:
+        return
+    groups = _push_groups()
+    if not groups:
+        with _batch_lock:
+            for k, v in pending.items():
+                _pending_batch.setdefault(k, v)
+        return
+    try:
+        get_bot()
     except Exception:
-        _logger.warning("BTD6 推送 kind=%s 失败", kind, exc_info=True)
+        # bot 不可用：整批放回，等下轮采样或手动补推
+        with _batch_lock:
+            for k, v in pending.items():
+                _pending_batch.setdefault(k, v)
+        return
+    _flush_in_progress = True
+    try:
+        # 需要总览的类型共享同一张渲染结果，避免两类同时刷新时渲/发两遍目录
+        need_shared_ov = any(
+            k in _OVERVIEW_KINDS and k not in _overview_already_sent for k in pending)
+        shared_ov: str | None = None
+        if need_shared_ov:
+            try:
+                ov_data = await collect.collect_overview()
+                shared_ov = await cards._render_card(
+                    "btd6ov", lambda: cards.overview_html(ov_data))
+            except Exception:
+                _logger.warning("BTD6 批量推送总览渲染失败，各类回退自渲", exc_info=True)
+                shared_ov = None
+        payloads: list[tuple[str, str, dict]] = []
+        render_failed: list[str] = []
+        for kind in _BTD6_PUSH_KINDS:
+            if kind not in pending:
+                continue
+            ev, ev_id, label = pending[kind]
+            payload = await _render_kind_payload(
+                kind, ev, label,
+                overview_path=_resolve_overview_path(kind, shared_ov))
+            if payload:
+                payloads.append((kind, ev_id, payload))
+            else:
+                render_failed.append(kind)
+        # 渲染失败：放回缓冲，交给后续采样/防抖重试，不静默丢弃
+        if render_failed:
+            with _batch_lock:
+                for kind in render_failed:
+                    if kind in pending:
+                        _pending_batch.setdefault(kind, pending[kind])
+            _logger.warning("BTD6 批量推送渲染失败已回填 kinds=%s", render_failed)
+        if not payloads:
+            return
+        result = await _send_push_batch(payloads, groups)
+        to_mark: list[tuple[str, str]] = []
+        to_retry: list[str] = []
+        for kind, ev_id, p in payloads:
+            if _kind_push_ok(kind, p, result):
+                to_mark.append((kind, ev_id))
+                if kind in _OVERVIEW_KINDS:
+                    _overview_already_sent.add(kind)
+            else:
+                to_retry.append(kind)
+                # 总览已发出但本类未完成：标记 skip，重试只补详情
+                if result.get("overview_ok") and kind in _OVERVIEW_KINDS:
+                    _overview_already_sent.add(kind)
+        for kind, ev_id in to_mark:
+            await asyncio.to_thread(_set_last_pushed, kind, ev_id)
+            # 本期已完成，下一期新 id 再重新渲染总览
+            _overview_already_sent.discard(kind)
+        if to_retry:
+            with _batch_lock:
+                for kind in to_retry:
+                    if kind in pending:
+                        _pending_batch.setdefault(kind, pending[kind])
+            _logger.warning("BTD6 批量推送未完成已回填 kinds=%s (marked=%s)",
+                            to_retry, [k for k, _ in to_mark])
+        if to_mark:
+            _logger.info(
+                "BTD6 批量推送 %s 到 %d 群（成功标记）",
+                ",".join(f"{k}={i}" for k, i in to_mark), len(groups))
+    finally:
+        _flush_in_progress = False
+    # flush 期间新入队/失败回填的条目：再挂一轮防抖
+    with _batch_lock:
+        leftover = bool(_pending_batch)
+    if leftover and _PUSH_BATCH_DELAY_S > 0:
+        try:
+            _batch_flush_task = asyncio.get_running_loop().create_task(_delayed_flush())
+        except RuntimeError:
+            pass
+
+
+async def _btd6_push_single(kind: str, ev: dict, ev_id: str, label: str, groups: set[int]) -> None:
+    """单类立即推送（手动补推/兼容旧调用）：同样先渲染完再发，总览在详情之前。"""
+    payload = await _render_kind_payload(kind, ev, label)
+    if not payload:
+        return
+    result = await _send_push_batch([(kind, ev_id, payload)], groups)
+    ok = _kind_push_ok(kind, payload, result)
+    if ok:
+        await asyncio.to_thread(_set_last_pushed, kind, ev_id)
+    _logger.info("BTD6 精准推送 %s %s 到 %d 群（成功标记：%s）",
+                 kind, ev_id, len(groups), ok)
 
 
 # 精准采样：已知刷新点后 0/5/10 分钟各一次（3 次容错，覆盖 API 延迟）
@@ -599,3 +863,90 @@ async def btd6_push_coop_0(): await _btd6_push_kind("coop")
 async def btd6_push_coop_5(): await _btd6_push_kind("coop")
 @scheduler.scheduled_job("cron", hour=16, minute=10, second=30, id="btd6_push_coop_10", timezone="Asia/Shanghai")
 async def btd6_push_coop_10(): await _btd6_push_kind("coop")
+
+# 社交赛季：刷新点不固定（NK 未公布固定周常），每小时 :15 采样一次；
+# 只取进行中，id 与 last_pushed 不同即推送（无 12 分钟窗口，避免漏检）
+@scheduler.scheduled_job("cron", minute=15, second=45, id="btd6_push_social", timezone="Asia/Shanghai")
+async def btd6_push_social_job(): await _btd6_push_kind("social")
+
+
+# ---------------- 手动推送检查（owner 调试/补推） ----------------
+
+push_check_cmd = on_command("btd6推送检查", priority=5, block=True)
+
+_PUSH_KIND_CN = {"race": "竞速", "boss": "Boss", "ct": "争夺领土", "odyssey": "远征",
+                 "daily": "每日挑战", "rush": "Boss Rush", "coop": "Co-op",
+                 "social": "社交赛季"}
+_PUSH_KIND_ALIAS = {"竞速": "race", "boss": "boss", "领土": "ct", "ct": "ct",
+                    "远征": "odyssey", "odyssey": "odyssey", "每日": "daily", "daily": "daily",
+                    "rush": "rush", "coop": "coop",
+                    "社季": "social", "社交": "social", "社交赛季": "social", "social": "social"}
+
+
+def _parse_push_kind(text: str) -> str:
+    parts = (text or "").strip().split()
+    if len(parts) < 2:
+        return ""
+    return _PUSH_KIND_ALIAS.get(parts[1].strip().lower(), "")
+
+
+@push_check_cmd.handle()
+async def _push_check(event: MessageEvent):
+    """`.btd6推送检查 [kind]`：无参数看各路当前/已推对照；带 kind 则把当期强制补推到本群。
+
+    强制补推仍以 id 去重（已推送的不重发），只跳过“刷新点 12 分钟窗口”限制，
+    用于窗口期服务异常/重启导致的漏推。
+    """
+    if not is_owner(event):
+        await push_check_cmd.finish("❌ 你没有权限使用此功能")
+    kind = _parse_push_kind(event.get_plaintext())
+    if kind not in _BTD6_PUSH_KINDS:
+        lines = []
+        try:
+            now = util.bucket_now()
+            real_now = int(time.time() * 1000)
+            last = _last_pushed()
+            for k in _BTD6_PUSH_KINDS:
+                try:
+                    ev = await _fetch_push_event(k, now, real_now)
+                except Exception:
+                    ev = None
+                cur = str((ev or {}).get("id") or (ev or {}).get("name") or "-") \
+                    if isinstance(ev, dict) else "-"
+                mark = "✅" if last.get(k) == cur and cur != "-" else "❌"
+                lines.append(f"{mark}{_PUSH_KIND_CN[k]}：当前 {cur} / 已推 {last.get(k, '-')}")
+        except Exception:
+            await push_check_cmd.finish("检查失败，请稍后再试")
+            return
+        await push_check_cmd.finish("🔍 BTD6 推送对照（当前 / 已推）：\n" + "\n".join(lines)
+                                    + "\n用法：.btd6推送检查 远征（强制补推当期到本群）")
+        return
+    if not isinstance(event, GroupMessageEvent):
+        await push_check_cmd.finish("补推请在群里使用（将发到本群）")
+    try:
+        now = util.bucket_now()
+        real_now = int(time.time() * 1000)
+        ev = await _fetch_push_event(kind, now, real_now)
+    except Exception:
+        await push_check_cmd.finish("抓取失败，请稍后再试")
+        return
+    if not isinstance(ev, dict):
+        await push_check_cmd.finish(f"{_PUSH_KIND_CN[kind]}当前无进行中活动")
+        return
+    ev_id = str(ev.get("id") or ev.get("name") or "")
+    label = str(ev.get("name") or "")
+    if not ev_id:
+        await push_check_cmd.finish("当期活动无有效 id，拒绝推送")
+        return
+    if _last_pushed().get(kind) == ev_id:
+        await push_check_cmd.finish(f"{_PUSH_KIND_CN[kind]}当期（{ev_id}）已推送过，无需重推")
+        return
+    try:
+        get_bot()  # 只验证实例可用，实际发送由 _btd6_push_single 内部获取
+    except Exception:
+        await push_check_cmd.finish("拿不到 Bot 实例，请稍后再试")
+        return
+    await _btd6_push_single(kind, ev, ev_id, label, {int(event.group_id)})
+    if _last_pushed().get(kind) == ev_id:
+        return  # 推送成功（_btd6_push_single 内已发图，无需额外回执刷屏）
+    await push_check_cmd.finish("补推失败，详情见日志")

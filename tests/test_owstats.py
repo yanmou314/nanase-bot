@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import pytest
 from conftest import FinishedException, Message, MessageEvent, MessageSegment
@@ -17,6 +18,9 @@ def _reset_relay_state():
         owstats._task_current = None
         owstats._task_seq = 0
         owstats._orphan_image_times.clear()
+        owstats._frozen_tasks.clear()
+        owstats._claiming_task = None
+        owstats._claim_sent_at = 0.0
     _clear()
     yield
     _clear()
@@ -207,7 +211,7 @@ def test_owstatus_and_reset_owner_only():
     assert "仅Bot主人" in str(msg2)
     owstats._task_current = _make_task()
     msg3 = _run(owstats.ow_reset, ev_owner)
-    assert "已丢弃在途任务" in str(msg3)
+    assert "已丢弃" in str(msg3) and "在途" in str(msg3)
     assert owstats._task_current is None
 
 
@@ -234,3 +238,248 @@ def test_relay_future_resolves_combined():
         assert has_image is True
         assert len(segs) == 2
     asyncio.run(_go())
+
+
+# ---------------- 绘制超时：冻结 → 自动领取 → 覆盖重发 ----------------
+
+_DRAWING_TEXT = (
+    "@nanase <@32196B7A6081B25F0A8970B5EFF8C33B> 仍在绘制中，"
+    "但预计会超过 QQ 官方 5 分钟回复时限。图片准备好后请再次 @机器人领取，缓存 24 小时。"
+)
+
+
+def test_drawing_re_matches_notice_but_not_progress():
+    assert owstats._DRAWING_RE.search(_DRAWING_TEXT)
+    assert owstats._DRAWING_RE.search("仍在绘制中，请稍后")
+    assert not owstats._DRAWING_RE.search("正在生成，请稍候")
+    assert not owstats._DRAWING_RE.search("Yanmou 的今日总结")
+
+
+def test_drawing_notice_freezes_task_and_notifies_user():
+    bot = _relay_bot()
+    owstats._task_current = _make_task()
+    asyncio.run(owstats._relay_result(bot, _relay_event(Message([MessageSegment.text(_DRAWING_TEXT)]))))
+    assert owstats._task_current is None
+    assert len(owstats._frozen_tasks) == 1
+    frozen = owstats._frozen_tasks[0]
+    assert frozen.get("claim_at", 0) > frozen.get("frozen_at", 0)
+    # 通知原用户等待领取
+    assert len(bot.sent_group) == 1
+    body = str(bot.sent_group[0]["message"])
+    assert "5 分钟" in body or "5分钟" in body
+    assert "领取" in body
+
+
+def test_drawing_notice_as_second_msg_also_freezes():
+    bot = _relay_bot()
+    owstats._task_current = _make_task()
+    asyncio.run(owstats._relay_result(bot, _relay_event(Message([MessageSegment.text("标题正文")]))))
+    asyncio.run(owstats._relay_result(bot, _relay_event(Message([MessageSegment.text(_DRAWING_TEXT)]))))
+    assert owstats._task_current is None
+    assert len(owstats._frozen_tasks) == 1
+    assert not owstats._frozen_tasks[0].get("first_segs")
+
+
+def test_freeze_dispatches_next_queued_task():
+    class _Bot:
+        def __init__(self):
+            self.self_id = "10000"
+            self.sent_group = []
+            self.sent_private = []
+
+        async def send_group_msg(self, group_id=None, message=None, **kwargs):
+            self.sent_group.append({"group_id": group_id, "message": message})
+            return {"message_id": 1}
+
+        async def send_private_msg(self, user_id=None, message=None, **kwargs):
+            self.sent_private.append({"user_id": user_id, "message": message})
+            return {"message_id": 1}
+
+    bot = _Bot()
+    owstats._task_current = _make_task(seq=1)
+    nxt = _make_task(seq=2, kind="strength", tag="B#2")
+    owstats._task_queue.append(nxt)
+
+    def _fake_get_bot():
+        return bot
+
+    orig = owstats.get_bot
+    owstats.get_bot = _fake_get_bot
+    try:
+        asyncio.run(owstats._relay_result(bot, _relay_event(Message([MessageSegment.text(_DRAWING_TEXT)]))))
+    finally:
+        owstats.get_bot = orig
+    assert len(owstats._frozen_tasks) == 1
+    assert owstats._task_current is not None
+    assert owstats._task_current.get("seq") == 2
+    # 冻结通知 + 派发下一个查询
+    kinds = [str(x["message"]) for x in bot.sent_group]
+    assert any("领取" in k for k in kinds)
+    assert any("快速强度指数" in k for k in kinds)
+
+
+def test_send_claim_at_after_delay():
+    class _Bot:
+        def __init__(self):
+            self.sent_group = []
+
+        async def send_group_msg(self, group_id=None, message=None, **kwargs):
+            self.sent_group.append({"group_id": group_id, "message": message})
+            return {"message_id": 1}
+
+    bot = _Bot()
+    frozen = _make_task(seq=7)
+    frozen["claim_at"] = 0.0  # 已到期
+    owstats._frozen_tasks.append(frozen)
+    # 在途任务会被领取覆盖，应先放回队首
+    owstats._task_current = _make_task(seq=8, kind="strength", tag="B#2")
+
+    async def _go():
+        assert await owstats._send_claim_at(bot) is True
+    asyncio.run(_go())
+    assert owstats._claiming_task is frozen
+    assert len(bot.sent_group) == 1
+    assert bot.sent_group[0]["group_id"] == owstats.RELAY_GROUP_ID
+    assert owstats._task_current is None
+    assert owstats._task_queue and owstats._task_queue[0].get("seq") == 8
+
+
+def test_dispatch_blocked_while_claiming():
+    class _Bot:
+        def __init__(self):
+            self.sent_group = []
+
+        async def send_group_msg(self, group_id=None, message=None, **kwargs):
+            self.sent_group.append({"group_id": group_id, "message": message})
+            return {"message_id": 1}
+
+    bot = _Bot()
+    owstats._claiming_task = _make_task(seq=1)
+    owstats._task_queue.append(_make_task(seq=2, kind="strength", tag="B#2"))
+
+    def _fake_get_bot():
+        return bot
+
+    orig = owstats.get_bot
+    owstats.get_bot = _fake_get_bot
+    try:
+        asyncio.run(owstats._dispatch_next())
+    finally:
+        owstats.get_bot = orig
+    assert owstats._task_current is None
+    assert len(owstats._task_queue) == 1
+    assert bot.sent_group == []
+
+
+def test_second_image_not_stolen_by_pending_frozen():
+    """冻结待领取时，在途任务的第二条图仍应正常归集，不能被冻结抢走。"""
+    bot = _relay_bot()
+    frozen = _make_task(seq=1, user_id="111", group_id=10001)
+    frozen["claim_at"] = time.monotonic() + 1000  # 还没到领取时间
+    owstats._frozen_tasks.append(frozen)
+    current = _make_task(seq=2, user_id="222", group_id=10002)
+    owstats._task_current = current
+
+    asyncio.run(owstats._relay_result(bot, _relay_event(Message([MessageSegment.text("正文")]))))
+    assert current.get("first_segs")
+    asyncio.run(owstats._relay_result(bot, _relay_event(Message([MessageSegment.image("http://x/ok.png")]))))
+    # 正常完成当前任务，冻结仍挂着
+    assert owstats._task_current is None
+    assert len(owstats._frozen_tasks) == 1
+    delivered = [s for s in bot.sent_group if s["group_id"] == 10002]
+    assert delivered and "ok.png" in str(delivered[0]["message"])
+    assert "正文" in str(delivered[0]["message"])
+    # 不应把图发给冻结用户
+    assert not any(s["group_id"] == 10001 for s in bot.sent_group)
+
+
+def test_first_image_without_claim_goes_to_frozen_and_requeues():
+    """未发领取 @，但对方把缓存图贴在了新查询后：首条图仍给冻结用户。"""
+    bot = _relay_bot()
+    frozen = _make_task(seq=1, user_id="111", group_id=10001)
+    frozen["t0"] = time.monotonic() - 400
+    owstats._frozen_tasks.append(frozen)
+    current = _make_task(seq=2, user_id="222", group_id=10002, kind="strength", tag="B#2")
+    owstats._task_current = current
+
+    asyncio.run(owstats._relay_result(bot, _relay_event(Message([MessageSegment.image("http://x/cached.png")]))))
+    delivered = [s for s in bot.sent_group if s["group_id"] == 10001]
+    assert delivered and "cached.png" in str(delivered[0]["message"])
+    assert owstats._task_current is None
+    assert owstats._task_queue and owstats._task_queue[0].get("seq") == 2
+    assert not owstats._frozen_tasks
+
+
+def test_send_claim_at_respects_delay():
+    bot = _relay_bot()
+    frozen = _make_task()
+    frozen["claim_at"] = time.monotonic() + 1000
+    owstats._frozen_tasks.append(frozen)
+
+    async def _go():
+        assert await owstats._send_claim_at(bot) is False
+    asyncio.run(_go())
+    assert owstats._claiming_task is None
+
+
+def test_first_image_delivers_to_frozen_and_requeues_current():
+    bot = _relay_bot()
+    frozen = _make_task(seq=1, user_id="111", group_id=10001)
+    frozen["t0"] = time.monotonic() - 400
+    owstats._frozen_tasks.append(frozen)
+    # 模拟已在领取中
+    owstats._claiming_task = frozen
+    owstats._frozen_tasks.remove(frozen)
+    # 在途另一用户查询（会被覆盖）
+    current = _make_task(seq=2, user_id="222", group_id=10002, kind="strength", tag="B#2")
+    owstats._task_current = current
+
+    asyncio.run(owstats._relay_result(bot, _relay_event(Message([MessageSegment.image("http://x/done.png")]))))
+    # 冻结用户收到图片
+    delivered = [s for s in bot.sent_group if s["group_id"] == 10001]
+    assert delivered and "done.png" in str(delivered[0]["message"])
+    assert "绘制完成" in str(delivered[0]["message"])
+    # 在途任务被覆盖 → 重新入队，不在途
+    assert owstats._task_current is None
+    assert len(owstats._task_queue) == 1
+    assert owstats._task_queue[0].get("seq") == 2
+    assert owstats._claiming_task is None
+
+
+def test_first_image_without_frozen_keeps_existing_orphan_behavior():
+    owstats._note_missing_image()
+    bot = _relay_bot()
+    owstats._task_current = _make_task()
+    asyncio.run(owstats._relay_result(bot, _relay_event(Message([MessageSegment.image("http://x/old.png")]))))
+    assert owstats._task_current is not None
+    assert bot.sent_group == []
+
+
+def test_claim_timeout_fails_frozen_task():
+    bot = _relay_bot()
+    frozen = _make_task(seq=3, user_id="333", group_id=10003)
+    frozen["t0"] = time.monotonic() - 600
+    owstats._claiming_task = frozen
+    owstats._claim_sent_at = time.monotonic() - 9999
+
+    def _fake_get_bot():
+        return bot
+
+    orig = owstats.get_bot
+    owstats.get_bot = _fake_get_bot
+    try:
+        asyncio.run(owstats._fail_claim_or_stale())
+    finally:
+        owstats.get_bot = orig
+    assert owstats._claiming_task is None
+    assert any("领取超时" in str(s["message"]) for s in bot.sent_group)
+
+
+def test_ow_status_shows_frozen():
+    import time as _time
+    ev_owner = MessageEvent(user_id=10000, group_id=888)
+    frozen = _make_task(seq=9)
+    frozen["claim_at"] = _time.monotonic() + 120
+    owstats._frozen_tasks.append(frozen)
+    msg = _run(owstats.ow_status, ev_owner)
+    assert "冻结" in str(msg) and "#9" in str(msg)
