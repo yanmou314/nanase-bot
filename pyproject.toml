@@ -24,6 +24,8 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # btd6/__init__.py：兼容单文件加载的 __path__ shim 必须先于相对导入执行
 "plugins/btd6/__init__.py" = ["E402"]
+# 词云字号测试：必须先 load_plugin(chat_stats) 再 import wordcloud_card
+"tests/test_wc_size_boost.py" = ["E402"]
 
 [tool.nonebot]
 plugin_dirs = ["plugins"]
