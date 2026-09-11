@@ -489,6 +489,27 @@ def test_claim_timeout_fails_frozen_task():
 
 
 
+
+def test_claim_send_failure_opens_discard_window():
+    """领取 @ 发送失败：在途任务已 requeue，必须开隔离窗防止旧回复串台。"""
+    class _Bot:
+        async def send_group_msg(self, **kwargs):
+            raise RuntimeError("send fail")
+    bot = _Bot()
+    frozen = _make_task(seq=1)
+    frozen["claim_at"] = 0.0
+    owstats._frozen_tasks.append(frozen)
+    owstats._task_current = _make_task(seq=2, kind="strength", tag="B#2")
+
+    async def _go():
+        assert await owstats._send_claim_at(bot) is False
+    asyncio.run(_go())
+    assert owstats._claiming_task is None
+    assert owstats._task_current is None
+    assert owstats._task_queue and owstats._task_queue[0].get("seq") == 2
+    assert owstats._in_discard_window()
+
+
 def test_dispatch_blocked_during_discard_window():
     """超时/重置打开隔离窗后，不得立刻派发下一任务，避免其回复被当迟到消息丢弃。"""
     class _Bot:
