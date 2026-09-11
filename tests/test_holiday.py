@@ -1,4 +1,7 @@
-from datetime import date, datetime
+import asyncio
+import tempfile
+from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from helpers import load_plugin
 
@@ -98,3 +101,105 @@ def test_build_message_contains_sections():
 def test_format_date_weekday_label():
     assert "周五" == holiday._format_date(date(2026, 8, 14)).split("（")[1].rstrip("）")
     assert "周日" == holiday._format_date(date(2026, 8, 16)).split("（")[1].rstrip("）")
+
+
+# ---------------- 部分失败定向补发（T15） ----------------
+
+
+class _FakeBot:
+    def __init__(self, fail_groups: set[int] | None = None):
+        self.fail_groups = set(fail_groups or ())
+        self.sent: list[int] = []
+
+    async def send_group_msg(self, group_id: int, message=None):
+        if group_id in self.fail_groups:
+            raise RuntimeError(f"send failed: {group_id}")
+        self.sent.append(group_id)
+        return {}
+
+
+def _setup_push_env(monkeypatch, groups: set[int], fail: set[int] | None = None):
+    """隔离 STATE_FILE，注入假 bot / 消息构建，并重置推送进行中标记。"""
+    tmp = tempfile.mkdtemp()
+    state_file = str(Path(tmp) / "state.json")
+    monkeypatch.setattr(holiday, "STATE_FILE", state_file)
+    monkeypatch.setattr(holiday, "_push_running", False)
+    monkeypatch.setattr(holiday, "_retry_day", "")
+    # 直接写 groups，避免依赖锁内迁移路径
+    from common import save_json_state
+    save_json_state(state_file, {"groups": sorted(groups)}, holiday.STATE_LOCK)
+    bot = _FakeBot(fail)
+    monkeypatch.setattr(holiday, "get_bot", lambda: bot)
+    monkeypatch.setattr(holiday, "_build_image_message", lambda: asyncio.sleep(0, result="msg"))
+    # 避免真实 scheduler 注册一次性任务
+    monkeypatch.setattr(holiday, "_schedule_failed_retry", lambda today: None)
+    return bot, state_file
+
+
+def test_partial_failure_marks_pushed_and_records_failed(monkeypatch):
+    bot, state_file = _setup_push_env(monkeypatch, {1, 2, 3}, fail={2})
+    ok = asyncio.run(holiday._push_daily_countdown())
+    assert ok is True
+    day, failed = holiday._push_status()
+    assert day == holiday._now().date().isoformat()
+    assert failed == [2]
+    assert sorted(bot.sent) == [1, 3]
+
+
+def test_catchup_same_day_only_retries_failed(monkeypatch):
+    bot, state_file = _setup_push_env(monkeypatch, {1, 2, 3}, fail={2})
+    asyncio.run(holiday._push_daily_countdown())
+    assert sorted(bot.sent) == [1, 3]
+
+    # 同日补发：只推失败群 2，成功群 1/3 不再重推
+    bot.fail_groups = set()
+    bot.sent.clear()
+    # 模拟过了 17:00
+    now = holiday._now().replace(hour=18, minute=0)
+    monkeypatch.setattr(holiday, "_now", lambda: now)
+    asyncio.run(holiday._countdown_catchup())
+    assert bot.sent == [2]
+    day, failed = holiday._push_status()
+    assert day == now.date().isoformat()
+    assert failed == []
+
+
+def test_catchup_next_day_full_push(monkeypatch):
+    bot, state_file = _setup_push_env(monkeypatch, {1, 2}, fail={2})
+    # 先完成一次部分成功推送
+    asyncio.run(holiday._push_daily_countdown())
+    assert sorted(bot.sent) == [1]
+    # 次日 18:00：应全量推送，而不是只补 failed
+    tomorrow = holiday._now().replace(hour=18, minute=0) + timedelta(days=1)
+    monkeypatch.setattr(holiday, "_now", lambda: tomorrow)
+    bot.fail_groups = set()
+    bot.sent.clear()
+    asyncio.run(holiday._countdown_catchup())
+    assert sorted(bot.sent) == [1, 2]
+    day, failed = holiday._push_status()
+    assert day == tomorrow.date().isoformat()
+    assert failed == []
+
+
+def test_all_success_does_not_record_failed(monkeypatch):
+    bot, state_file = _setup_push_env(monkeypatch, {1, 2}, fail=set())
+    ok = asyncio.run(holiday._push_daily_countdown())
+    assert ok is True
+    day, failed = holiday._push_status()
+    assert day == holiday._now().date().isoformat()
+    assert failed == []
+    assert sorted(bot.sent) == [1, 2]
+    # 再次推送应直接跳过
+    bot.sent.clear()
+    ok2 = asyncio.run(holiday._push_daily_countdown())
+    assert ok2 is True
+    assert bot.sent == []
+
+
+def test_all_fail_does_not_mark_pushed(monkeypatch):
+    bot, state_file = _setup_push_env(monkeypatch, {1, 2}, fail={1, 2})
+    ok = asyncio.run(holiday._push_daily_countdown())
+    assert ok is False
+    day, failed = holiday._push_status()
+    assert day == ""
+    assert failed == []

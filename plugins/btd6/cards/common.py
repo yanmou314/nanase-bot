@@ -19,14 +19,17 @@ def _bg_data_url() -> str:
 
     top, bottom = (0, 43, 86), (0, 59, 119)
     strip = Image.new("RGB", (1, 256))
-    for y in range(256):
-        t = y / 255
-        strip.putpixel((0, y), tuple(int(top[i] + (bottom[i] - top[i]) * t) for i in range(3)))
-    import io
+    try:
+        for y in range(256):
+            t = y / 255
+            strip.putpixel((0, y), tuple(int(top[i] + (bottom[i] - top[i]) * t) for i in range(3)))
+        import io
 
-    buf = io.BytesIO()
-    strip.save(buf, "PNG")
-    url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+        buf = io.BytesIO()
+        strip.save(buf, "PNG")
+        url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    finally:
+        strip.close()
     _bg_cache["bg"] = url
     return url
 

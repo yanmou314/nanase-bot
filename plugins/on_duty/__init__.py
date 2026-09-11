@@ -292,12 +292,16 @@ def _bound_tag(uid: str) -> str:
 
 async def _squads_text(bot: Bot, gid: str) -> str:
     """全部小队的纯文本名单（不 @ 人）；无小队返回空串。"""
-    with _LOCK:
-        state = _load_state()
-        squads = _squads_of(state, gid)
-        if _purge_expired(squads):
-            _persist_squads(state, gid, squads)
-        snapshot = [(i + 1, dict(sq)) for i, sq in enumerate(squads)]
+
+    def _load_and_purge():
+        with _LOCK:
+            state = _load_state()
+            squads = _squads_of(state, gid)
+            if _purge_expired(squads):
+                _persist_squads(state, gid, squads)
+            return [(i + 1, dict(sq)) for i, sq in enumerate(squads)]
+
+    snapshot = await asyncio.to_thread(_load_and_purge)
     if not snapshot:
         return ""
     lines = [f"🎮 当前小队 {len(snapshot)} 支："]
@@ -335,7 +339,8 @@ async def _(event: GroupMessageEvent):
         await create_matcher.finish(at_prefix(event) + MessageSegment.text(
             "用法：.上号已有=还缺，如 .上号2=3 = 已有2人、缺3人，共5人小队，你当队长"
             f"（两项各 ≤{MAX_CREATE_PART}，总人数 ≤{MAX_SQUAD_SIZE}）"))
-    ok, no, err = _create_squad(str(event.group_id), str(event.user_id), have, need)
+    ok, no, err = await asyncio.to_thread(
+        _create_squad, str(event.group_id), str(event.user_id), have, need)
     if not ok:
         await create_matcher.finish(at_prefix(event) + MessageSegment.text(err))
     await create_matcher.finish(at_prefix(event) + MessageSegment.text(
@@ -348,7 +353,8 @@ join_matcher = on_message(Rule(_rule_join), priority=3, block=True)
 @join_matcher.handle()
 async def _(event: GroupMessageEvent):
     m = _match_re(event, RE_JOIN)
-    ok, msg = _join_squad(str(event.group_id), str(event.user_id), int(m.group(1)))
+    ok, msg = await asyncio.to_thread(
+        _join_squad, str(event.group_id), str(event.user_id), int(m.group(1)))
     if ok:
         await join_matcher.finish(at_prefix(event) + MessageSegment.text(f"✅ 已加入 {msg}"))
     await join_matcher.finish(at_prefix(event) + MessageSegment.text(msg))
@@ -371,7 +377,8 @@ off_matcher = on_message(Rule(_rule_off), priority=3, block=True)
 
 @off_matcher.handle()
 async def _(event: GroupMessageEvent):
-    kind, msg = _leave_squad(str(event.group_id), str(event.user_id))
+    kind, msg = await asyncio.to_thread(
+        _leave_squad, str(event.group_id), str(event.user_id))
     if kind == "leader":
         await off_matcher.finish(at_prefix(event) + MessageSegment.text(f"👋 队长下班，{msg}"))
     if kind == "member":
@@ -403,7 +410,7 @@ async def _(event, arg=CommandArg()):
     gid = _parse_gid(event, arg)
     if not gid:
         await enable_cmd.finish("用法：.上号开启 [群号]（在本群发送可省略群号）")
-    changed = _set_enabled(str(gid), True)
+    changed = await asyncio.to_thread(_set_enabled, str(gid), True)
     if not changed:
         await enable_cmd.finish(f"群 {gid} 的上号榜本来就是开着的")
     await enable_cmd.finish(f"✅ 已开启群 {gid} 的上号榜（.上号A=B / .加入N / .谁玩 / .下班）")
@@ -416,7 +423,7 @@ async def _(event, arg=CommandArg()):
     gid = _parse_gid(event, arg)
     if not gid:
         await disable_cmd.finish("用法：.上号关闭 [群号]（在本群发送可省略群号）")
-    changed = _set_enabled(str(gid), False)
+    changed = await asyncio.to_thread(_set_enabled, str(gid), False)
     if not changed:
         await disable_cmd.finish(f"群 {gid} 的上号榜本来就没开")
     await disable_cmd.finish(f"✅ 已关闭群 {gid} 的上号榜")
@@ -426,7 +433,7 @@ async def _(event, arg=CommandArg()):
 async def _(event):
     if not is_owner(event):
         await status_cmd.finish("只有主人可以查看上号榜状态")
-    enabled = _load_state().get("enabled")
+    enabled = (await asyncio.to_thread(_load_state)).get("enabled")
     groups = enabled if isinstance(enabled, list) else []
     usage = "\n用法：.上号开启 [群号] / .上号关闭 [群号]（在本群发送可省略群号）"
     if not groups:

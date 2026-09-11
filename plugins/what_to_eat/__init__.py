@@ -18,6 +18,14 @@ _COMMAND_START = tuple(s for s in get_driver().config.command_start if s)
 # 每群回复冷却，防止连续刷“吃什么”刷屏
 COOLDOWN_SECONDS = 10
 _last_reply: dict[int, float] = {}
+_MAX_LAST_REPLY = 2000  # 冷却记账上限：FIFO 淘汰最旧，防止长期运行内存增长
+
+
+def _remember_reply(group_id: int, now: float) -> None:
+    """记录本群回复时间；超过上限时按插入顺序淘汰最旧条目。"""
+    _last_reply[group_id] = now
+    while len(_last_reply) > _MAX_LAST_REPLY:
+        _last_reply.pop(next(iter(_last_reply)))
 
 FOODS: list[str] = [
     "火锅",
@@ -105,5 +113,5 @@ async def recommend(event: GroupMessageEvent):
     now = time.monotonic()
     if not allow(event.group_id, now):
         return
-    _last_reply[event.group_id] = now
+    _remember_reply(event.group_id, now)
     await eater.send(f"吃{pick()}")

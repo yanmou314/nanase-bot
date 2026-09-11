@@ -192,8 +192,10 @@ def _body_size(body) -> int:
             return 0
 
 
-def _cache_put(url: str, body) -> None:
-    size = _body_size(body)
+def _cache_put(url: str, body, size: int | None = None) -> None:
+    """写缓存。size 已知时（如 HTTP 原始 content 长度）跳过 json.dumps 估算。"""
+    if size is None:
+        size = _body_size(body)
     with _cache_lock:
         _cache[url] = (time.monotonic() + CACHE_TTL, body)
         _cache.move_to_end(url)
@@ -219,6 +221,21 @@ def _cache_put(url: str, body) -> None:
             oldest, _ = _cache.popitem(last=False)
             total -= _cache_sizes.get(oldest, 0)
             _evict(oldest, drop_cache=True, drop_stale=True)
+
+
+async def _cache_put_async(url: str, body, *, size: int | None = None) -> None:
+    """事件循环路径的缓存写入：未提供 size 时把 json.dumps 估算放到线程池。
+
+    大 body 的 dumps 是 CPU/内存同步操作，直接在协程里跑会卡事件循环；
+    调用方若已有序列化字节（如 r.content）应直接传 size=len(r.content)。
+    空容器/None 估算成本可忽略，避免无谓 to_thread 开销。
+    """
+    if size is None:
+        if not body:
+            size = _body_size(body)
+        else:
+            size = await asyncio.to_thread(_body_size, body)
+    _cache_put(url, body, size=size)
 
 
 def _stale_age(url: str) -> float | None:
@@ -266,7 +283,7 @@ async def _refresh_url(url: str) -> None:
             _refresh_fail_counts.pop(url, None)
             return
         if isinstance(data, dict) and data.get("success") and data.get("body") is not None:
-            _cache_put(url, data["body"])
+            await _cache_put_async(url, data["body"], size=len(r.content or b""))
             with _cache_lock:
                 _lb_next_cache[url] = data.get("next")
     except Exception:
@@ -317,7 +334,7 @@ async def _refresh_raw_url(url: str) -> None:
         r.raise_for_status()
         if len(r.content or b"") > MAX_JSON_BYTES:
             raise ValueError("BTD6 API 响应过大")
-        _cache_put(url, r.json())
+        await _cache_put_async(url, r.json(), size=len(r.content or b""))
     except Exception:
         fails = _refresh_fail_counts.get(url, 0) + 1
         _refresh_fail_counts[url] = fails
@@ -362,7 +379,7 @@ async def _fetch_json_raw_remote(url: str):
     if len(r.content or b"") > MAX_JSON_BYTES:
         raise ValueError("BTD6 API 响应过大")
     data = r.json()
-    _cache_put(url, data)
+    await _cache_put_async(url, data, size=len(r.content or b""))
     return data
 
 
@@ -384,7 +401,7 @@ async def _fetch_body_remote(url: str):
             return []
         raise RuntimeError(f"NK API 返回异常: {error}")
     body = data["body"]
-    _cache_put(url, body)
+    await _cache_put_async(url, body, size=len(r.content or b""))
     with _cache_lock:
         _lb_next_cache[url] = data.get("next")  # 信封里的 next 一并缓存，分页无需重复请求
     return body
@@ -420,7 +437,7 @@ async def fetch_leaderboard_paginated(start_url: str, rows: int, touched: set[st
                     raise RuntimeError("NK API 返回异常")
                 body = data["body"]
                 next_url = data.get("next")
-                _cache_put(url, body)
+                await _cache_put_async(url, body, size=len(r.content or b""))
                 with _cache_lock:
                     _lb_next_cache[url] = next_url
                 if isinstance(body, list):

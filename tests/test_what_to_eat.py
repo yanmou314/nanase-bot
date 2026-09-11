@@ -82,3 +82,26 @@ def test_handler_replies_and_respects_cooldown():
     asyncio.run(handler(miss))
     assert 65536 not in wte._last_reply
     assert len(wte.eater.sent) == 1
+
+
+def test_last_reply_capped_fifo_evicts_oldest():
+    wte._last_reply.clear()
+    max_n = wte._MAX_LAST_REPLY
+    for i in range(max_n + 5):
+        wte._remember_reply(i, float(i))
+    assert len(wte._last_reply) == max_n
+    # 最早写入的 0..4 被 FIFO 淘汰
+    for gone in range(5):
+        assert gone not in wte._last_reply
+    assert 5 in wte._last_reply
+    assert max_n + 4 in wte._last_reply
+    wte._last_reply.clear()
+
+
+def test_remember_reply_keeps_recent_values():
+    wte._last_reply.clear()
+    wte._remember_reply(42, 100.0)
+    wte._remember_reply(42, 200.0)
+    assert wte._last_reply[42] == 200.0
+    assert len(wte._last_reply) == 1
+    wte._last_reply.clear()
