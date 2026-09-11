@@ -12,6 +12,7 @@ import httpx
 from nonebot import get_driver, logger, on_message, on_notice
 from nonebot.adapters.onebot.v11 import (
     Bot,
+    GroupMessageEvent,
     MessageEvent,
     MessageSegment,
     PokeNotifyEvent,
@@ -19,6 +20,9 @@ from nonebot.adapters.onebot.v11 import (
 from nonebot.rule import to_me
 
 from common import close_http_clients, get_http_client
+
+# OW 任务中继群：本插件保持静默，避免吃掉查询机器人消息 / 产生 AI 噪音
+RELAY_GROUP_ID = 864213945
 
 chat_matcher = on_message(rule=to_me(), priority=5, block=True)
 
@@ -380,6 +384,9 @@ async def _notify_owner_ai_failure(bot: Bot, exc: Exception) -> None:
 
 @chat_matcher.handle()
 async def chat(bot: Bot, event: MessageEvent):
+    # 中继群直接静默：不占冷却、不进 AI、不抢 relay 状态机
+    if isinstance(event, GroupMessageEvent) and getattr(event, "group_id", None) == RELAY_GROUP_ID:
+        return
     uid = str(event.user_id)
     now = time.time()
     if now - _last_chat.get(uid, 0) < _RATE_LIMIT:
@@ -397,7 +404,7 @@ async def chat(bot: Bot, event: MessageEvent):
     key = _load_key()
     reply = ""
     gid = str(getattr(event, "group_id", 0) or 0)
-    if gid == "864213945":  # OW 任务中继群：保持静默
+    if gid == str(RELAY_GROUP_ID):  # OW 任务中继群：保持静默
         return
     if key:
         try:
@@ -441,7 +448,7 @@ async def poke(bot: Bot, event: PokeNotifyEvent):
     reply = ""
     key = _load_key()
     gid = str(event.group_id or 0)
-    if gid == "864213945":  # OW 任务中继群：保持静默
+    if gid == str(RELAY_GROUP_ID):  # OW 任务中继群：保持静默
         return
     if key and now - _last_poke.get(uid, 0) >= _POKE_RATE_LIMIT:
         try:

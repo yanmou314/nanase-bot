@@ -29,7 +29,6 @@ from common import (
     FONTS,
     OWNER,
     RENDER_SEM,
-    TEST_PRIVILEGED_GROUPS,
     cleanup_cache,
     close_http_clients,
     get_http_client,
@@ -66,7 +65,8 @@ _MAX_STITCH_HEIGHT = 25000  # 拼合高度上限（px）
 _MAX_FILE_BYTES = 8 * 1024 * 1024  # 成图文件上限
 _RENDER_ATTEMPTS = 3  # 长截图偶发失败重试次数
 _MAX_CHUNK_IMAGES = 3  # 分块回落最多正文图数（+1 张标题卡）
-_RELAY_SKIP = {str(x) for x in TEST_PRIVILEGED_GROUPS}  # 任务中继群默认不推
+RELAY_GROUP_ID = 864213945  # 任务中继群（与 owstats.RELAY_GROUP_ID 保持一致）
+_RELAY_SKIP = {str(RELAY_GROUP_ID)}  # 任务中继群默认不推
 _SEND_SOURCE_LINK = True  # 图后追加官网原文链接（QQ 会展开成官方卡片）；不需要就改 False
 
 _IMG_ALLOW_HOSTS = ("ld5.res.netease.com", "nie.res.netease.com")

@@ -1508,6 +1508,46 @@ def test_cache_eviction_cleans_side_dictionaries(monkeypatch):
     assert url2 in btd6._cache  # 新条目仍在预算内
 
 
+def test_cache_put_async_skips_sync_dumps_when_size_known(monkeypatch):
+    """T17a：事件循环路径缓存写入——已提供 size 时不触发 json.dumps 估算。"""
+    url = "https://data.ninjakiwi.com/async-sized"
+    body = {"pad": "a" * 500}
+    dumped = []
+
+    def _spy(_body):
+        dumped.append(1)
+        return 1
+
+    monkeypatch.setattr(btd6.nkapi, "_body_size", _spy)
+    asyncio.run(btd6.nkapi._cache_put_async(url, body, size=4242))
+    assert dumped == []  # 未 dumps
+    assert btd6._cache_sizes[url] == 4242
+    assert btd6._cache_get(url) is body
+
+
+def test_cache_put_async_uses_to_thread_for_unknown_size(monkeypatch):
+    """T17a：未提供 size 时估算走 asyncio.to_thread，不阻塞事件循环。"""
+    url = "https://data.ninjakiwi.com/async-threaded"
+    body = {"pad": "b" * 500}
+    seen: list[str] = []
+    orig = btd6.nkapi._body_size
+
+    def _spy(_body):
+        seen.append("sync")
+        return orig(_body)
+
+    monkeypatch.setattr(btd6.nkapi, "_body_size", _spy)
+
+    async def _fake_to_thread(fn, *a, **k):
+        seen.append("to_thread")
+        return fn(*a, **k)
+
+    monkeypatch.setattr(btd6.nkapi.asyncio, "to_thread", _fake_to_thread)
+    asyncio.run(btd6.nkapi._cache_put_async(url, body))
+    assert "to_thread" in seen  # 经线程池估算
+    assert btd6._cache_sizes[url] == orig(body)
+
+
 def test_handler_rules_boss_failure_releases_cooldown(monkeypatch):
     """C1：Boss 规则双版本全部失败时回滚冷却，允许立即重试。"""
     event = _ev(".btd6boss")

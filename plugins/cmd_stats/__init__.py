@@ -7,7 +7,7 @@ import threading
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from nonebot import get_bot, on_command
+from nonebot import get_bot, get_driver, on_command
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
 from nonebot.message import run_postprocessor
 from nonebot_plugin_apscheduler import scheduler
@@ -314,8 +314,29 @@ async def _run_daily() -> str:
 
 
 
-@scheduler.scheduled_job("cron", hour=0, minute=5, id="daily_cmd_stats", timezone="Asia/Shanghai")
-async def daily_cmd_stats_job():
+def _last_report_date() -> str:
+    """读取最近一次日报生成日期（YYYY-MM-DD，上海时区）；从未生成返回空串。"""
+    return str(_load_config().get("last_report_date") or "")
+
+
+def _mark_reported(day: date) -> None:
+    """记录当日日报已生成，用于启动 catchup 防重复补跑。"""
+
+    def _rmw() -> None:
+        with _config_lock:
+            data = load_json_state(CONFIG_FILE, _config_lock)
+            data["last_report_date"] = day.isoformat()
+            save_json_state(CONFIG_FILE, data, _config_lock)
+
+    _rmw()
+
+
+async def _mark_reported_async(day: date) -> None:
+    await asyncio.to_thread(_mark_reported, day)
+
+
+async def _run_and_push_daily() -> None:
+    """生成并推送前一日指令统计日报；成功生成后记录 last_report_date。"""
     groups = _target_groups()
     if not groups:
         return
@@ -328,11 +349,33 @@ async def daily_cmd_stats_job():
     except Exception:
         _logger.exception("每日指令统计生成失败")
         return
+    await _mark_reported_async(datetime.now(_SH).date())
     for group_id in groups:
         try:
             await bot.send_group_msg(group_id=group_id, message=MessageSegment.image("file://" + path))
         except Exception:
             _logger.exception("指令统计推送到群 %s 失败", group_id)
+
+
+@scheduler.scheduled_job("cron", hour=0, minute=5, id="daily_cmd_stats", timezone="Asia/Shanghai")
+async def daily_cmd_stats_job():
+    await _run_and_push_daily()
+
+
+# 启动 catchup：APScheduler 用内存 jobstore，进程重启后错过的当日日报静默丢失。
+# 过触发点（00:05，上海时区）且今日未生成则补跑一次；对齐 news 模式。
+# 优先 on_bot_connect（此时 get_bot 可用）；无该钩子的环境回退 on_startup。
+_register_catchup = getattr(get_driver(), "on_bot_connect", get_driver().on_startup)
+
+
+@_register_catchup
+async def _cmd_stats_catchup(bot=None) -> None:
+    now = datetime.now(_SH)
+    if (now.hour, now.minute) < (0, 5):
+        return  # 还没到当日触发点，交给定时任务
+    if _last_report_date() >= now.date().isoformat():
+        return  # 今日已生成，不重复
+    await _run_and_push_daily()
 
 
 # ---------------- 多群开关命令 ----------------

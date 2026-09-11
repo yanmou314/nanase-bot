@@ -68,24 +68,40 @@ def _rounds_txt(gd: dict) -> str:
 
 
 def _decode_asset(data_url: str) -> Image.Image | None:
+    """打开素材图；调用方负责 close 返回值。"""
     if not data_url.startswith("data:image/"):
         return None
+    img = None
     try:
         raw = base64.b64decode(data_url.split(",", 1)[1], validate=True)
-        return Image.open(io.BytesIO(raw))
+        img = Image.open(io.BytesIO(raw))
+        img.load()  # 立即解码，释放底层 BytesIO 依赖
+        return img
     except Exception:  # noqa: BLE001  # 素材损坏按缺失处理
+        if img is not None:
+            img.close()
         return None
 
 
 def _cover_crop(img: Image.Image, tw: int, th: int) -> Image.Image:
-    """缩放并中心裁剪到目标尺寸（object-fit: cover）。"""
+    """缩放并中心裁剪到目标尺寸（object-fit: cover）。
+
+    中间 convert/resize 结果在函数内 close；入参 img 由调用方负责 close。
+    """
     sw, sh = img.size
     scale = max(tw / sw, th / sh)
     nw, nh = max(1, round(sw * scale)), max(1, round(sh * scale))
-    img = img.convert("RGB").resize((nw, nh), Image.LANCZOS)
+    converted = img.convert("RGB")
+    try:
+        resized = converted.resize((nw, nh), Image.LANCZOS)
+    finally:
+        converted.close()
     left = (nw - tw) // 2
     top = (nh - th) // 2
-    return img.crop((left, top, left + tw, top + th))
+    try:
+        return resized.crop((left, top, left + tw, top + th))
+    finally:
+        resized.close()
 
 
 def _hex_bbox_pts(tw: float, th: float) -> list[tuple[float, float]]:
@@ -135,7 +151,13 @@ def _render_board(col: dict, view: str | None = None, badge: bool = False) -> tu
         key = (name, tw, th)
         if key not in thumbs:
             img = _asset_img(name) if name else None
-            thumbs[key] = _cover_crop(img, tw, th) if img is not None else None
+            if img is None:
+                thumbs[key] = None
+            else:
+                try:
+                    thumbs[key] = _cover_crop(img, tw, th)
+                finally:
+                    img.close()
         return thumbs[key]
 
     def icon(name: str, target: float) -> Image.Image | None:
@@ -145,11 +167,18 @@ def _render_board(col: dict, view: str | None = None, badge: bool = False) -> tu
             if img is None:
                 thumbs[key] = None
             else:
-                img = img.convert("RGBA")
-                w, h = img.size
-                scale = target / max(w, h)
-                thumbs[key] = img.resize((max(1, round(w * scale)), max(1, round(h * scale))),
-                                         Image.LANCZOS)
+                try:
+                    rgba = img.convert("RGBA")
+                    try:
+                        w, h = rgba.size
+                        scale = target / max(w, h)
+                        thumbs[key] = rgba.resize(
+                            (max(1, round(w * scale)), max(1, round(h * scale))),
+                            Image.LANCZOS)
+                    finally:
+                        rgba.close()
+                finally:
+                    img.close()
         return thumbs[key]
 
     def tile_xy(q: int, r: int) -> tuple[float, float]:
@@ -158,8 +187,11 @@ def _render_board(col: dict, view: str | None = None, badge: bool = False) -> tu
 
     def paste_hex_art(cx: float, cy: float, art: Image.Image, Ri: float, tw: int, th: int) -> None:
         mask = Image.new("L", (tw, th), 0)
-        ImageDraw.Draw(mask).polygon(_hex_bbox_pts(tw, th), fill=255)
-        board.paste(art, (int(cx - tw / 2), int(cy - th / 2)), mask)
+        try:
+            ImageDraw.Draw(mask).polygon(_hex_bbox_pts(tw, th), fill=255)
+            board.paste(art, (int(cx - tw / 2), int(cy - th / 2)), mask)
+        finally:
+            mask.close()
 
     def fill_hex(cx: float, cy: float, color: tuple[int, int, int], Ri: float) -> None:
         draw.polygon([(cx + Ri * math.cos(math.radians(60 * k - 30)),
@@ -177,11 +209,17 @@ def _render_board(col: dict, view: str | None = None, badge: bool = False) -> tu
             if img is None:
                 decor_cache[key] = None
             else:
-                img = img.convert("RGBA")
-                sw, sh = img.size
-                scale = min(tw / sw, th / sh)
-                nw, nh = max(1, round(sw * scale)), max(1, round(sh * scale))
-                decor_cache[key] = img.resize((nw, nh), Image.LANCZOS)
+                try:
+                    rgba = img.convert("RGBA")
+                    try:
+                        sw, sh = rgba.size
+                        scale = min(tw / sw, th / sh)
+                        nw, nh = max(1, round(sw * scale)), max(1, round(sh * scale))
+                        decor_cache[key] = rgba.resize((nw, nh), Image.LANCZOS)
+                    finally:
+                        rgba.close()
+                finally:
+                    img.close()
         return decor_cache[key]
 
     def paste_center(cx: float, cy: float, img: Image.Image) -> None:
@@ -288,8 +326,17 @@ def _render_board(col: dict, view: str | None = None, badge: bool = False) -> tu
                   anchor="mm", stroke_width=max(1, round(1.1 * s)), stroke_fill=_TXT_STROKE)
 
     buf = io.BytesIO()
-    board.save(buf, "PNG", optimize=True)
-    data_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    try:
+        board.save(buf, "PNG", optimize=True)
+        data_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    finally:
+        board.close()
+        for _im in thumbs.values():
+            if _im is not None:
+                _im.close()
+        for _im in decor_cache.values():
+            if _im is not None:
+                _im.close()
     if len(_BOARD_CACHE) > 24:
         _BOARD_CACHE.clear()
     _BOARD_CACHE[cache_key] = (data_url, css_w, css_h)

@@ -3,7 +3,7 @@ import json
 
 import pytest
 import httpx
-from conftest import MessageEvent
+from conftest import GroupMessageEvent, MessageEvent
 
 from helpers import load_plugin
 
@@ -401,3 +401,36 @@ def test_chat_completion_5xx_and_429_are_retried(monkeypatch):
 
     assert out == "成功回复"
     assert client.calls == 3
+
+
+def test_auto_chat_ignores_relay_group(monkeypatch):
+    """中继群消息不得触发 AI：GroupMessageEvent.group_id == RELAY_GROUP_ID 直接 return。"""
+    mod = auto_chat
+    calls = []
+
+    async def fake_ai_reply(*args, **kwargs):
+        calls.append(args)
+        return "不应该回复"
+
+    monkeypatch.setattr(mod, "_ai_reply", fake_ai_reply)
+    monkeypatch.setattr(mod, "_load_key", lambda: "sk-test")
+    mod._last_chat.clear()
+
+    class _Bot:
+        self_id = "10000"
+
+    ev = GroupMessageEvent(
+        group_id=mod.RELAY_GROUP_ID,
+        user_id=12345,
+        plain="查询机器人你好",
+    )
+    asyncio.run(mod.chat(_Bot(), ev))
+    assert calls == []
+    assert "12345" not in mod._last_chat  # 冷却也不应被占用
+
+
+def test_auto_chat_relay_group_id_matches_owstats():
+    # 与 owstats 中继群常量保持一致，避免改一处漏一处
+    from helpers import load_plugin as _lp
+    ow = _lp("owstats")
+    assert auto_chat.RELAY_GROUP_ID == ow.RELAY_GROUP_ID == 864213945
