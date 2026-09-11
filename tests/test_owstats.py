@@ -94,24 +94,6 @@ def test_query_cooldown_blocks_second_call_within_window():
     assert owstats._check_cooldown("u2") == 0.0  # 不同用户互不影响
 
 
-# ---------------- 维护开关 ----------------
-
-def test_maintenance_toggle_and_file_state(tmp_path, monkeypatch):
-    monkeypatch.setattr(owstats, "MAINTENANCE_FILE", str(tmp_path / "maintenance.json"))
-    assert owstats._is_maintenance() is False  # 缺文件 → 不维护
-    ev = MessageEvent(user_id=10000, group_id=888)  # conftest 固定 QQBOT_OWNER=10000
-    _run(owstats.maintenance_toggle, ev, Message([MessageSegment.text("开启")]))
-    assert owstats._is_maintenance() is True
-    _run(owstats.maintenance_toggle, ev, Message([MessageSegment.text("关闭")]))
-    assert owstats._is_maintenance() is False
-
-
-def test_maintenance_toggle_rejects_non_owner():
-    ev = MessageEvent(user_id=222, group_id=888)
-    msg = _run(owstats.maintenance_toggle, ev, Message([MessageSegment.text("开启")]))
-    assert "仅Bot主人" in str(msg)
-
-
 # ---------------- 两段归集：文本+图片 / 报错中断 / 延迟图片丢弃 ----------------
 
 def _relay_bot():

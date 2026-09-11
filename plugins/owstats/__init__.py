@@ -18,7 +18,6 @@ except ImportError:  # 测试 stub 环境缺依赖时跳过定时任务
     scheduler = None
 
 BIND_FILE = os.path.join(os.path.dirname(__file__), "bindings.json")
-MAINTENANCE_FILE = os.path.join(os.path.dirname(__file__), "maintenance.json")
 _LOCK = threading.RLock()
 
 # ---- 任务中继模式：本机不再直调 overstats API ----
@@ -44,20 +43,6 @@ DRAWING_CLAIM_TIMEOUT = 180  # 发出领取 @ 后等待图片的上限
 MAX_FROZEN_TASKS = 10  # 冻结任务上限，超出时放弃最旧的并提示用户
 LATE_MESSAGE_WINDOW = 45.0  # 超时/领取覆盖/重置后的迟到消息隔离窗（秒）
 
-# Maintenance mode: when enabled, all OW queries return maintenance message
-MAINTENANCE_MSG = "OW\u63a5\u53e3\u6b63\u5728\u7ef4\u62a4\u4e2d\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\uff5e"
-
-def _is_maintenance() -> bool:
-    try:
-        with open(MAINTENANCE_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-        return bool(data.get("enabled"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError, AttributeError):
-        return False
-
-def _set_maintenance(enabled: bool) -> None:
-    save_json_state(MAINTENANCE_FILE, {"enabled": bool(enabled), "updated": int(time.time())}, _LOCK)
-
 matchrep_cmd = on_command("战报", aliases={"战绩图", "report"}, priority=5, block=True)
 rankhist_cmd = on_command("段位", aliases={"段位历史", "rank"}, priority=5, block=True)
 strength_cmd = on_command("强度", aliases={"强度分析", "strength"}, priority=5, block=True)
@@ -65,7 +50,6 @@ summary_cmd = on_command("总结", aliases={"上分总结"}, priority=5, block=T
 bind_cmd = on_command("绑定", aliases={"bind"}, priority=5, block=True)
 unbind_cmd = on_command("解绑", aliases={"unbind"}, priority=5, block=True)
 myid_cmd = on_command("我的ID", aliases={"我的绑定", "myid"}, priority=5, block=True)
-maintenance_cmd = on_command("ow\u7ef4\u62a4", aliases={"OW\u7ef4\u62a4", "ow\u5173\u95ed", "ow\u5f00\u542f", "ow\u5f00\u5173"}, priority=5, block=True)
 
 
 _bind_cache: dict | None = None
@@ -819,8 +803,6 @@ async def match_report(event: MessageEvent, arg: Message = CommandArg()):
         await matchrep_cmd.finish(at + _BAD_ID_HINT)
     if not tag:
         await matchrep_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.战报 名字#数字")
-    if _is_maintenance():
-        await matchrep_cmd.finish(at + MessageSegment.text(MAINTENANCE_MSG))
     remain = _check_cooldown(str(event.user_id))
     if remain > 0:
         await matchrep_cmd.finish(at + MessageSegment.text(f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～"))
@@ -836,8 +818,6 @@ async def rank_history(event: MessageEvent, arg: Message = CommandArg()):
         await rankhist_cmd.finish(at + _BAD_ID_HINT)
     if not tag:
         await rankhist_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.段位 名字#数字")
-    if _is_maintenance():
-        await rankhist_cmd.finish(at + MessageSegment.text(MAINTENANCE_MSG))
     remain = _check_cooldown(str(event.user_id))
     if remain > 0:
         await rankhist_cmd.finish(at + MessageSegment.text(f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～"))
@@ -853,8 +833,6 @@ async def strength(event: MessageEvent, arg: Message = CommandArg()):
         await strength_cmd.finish(at + _BAD_ID_HINT)
     if not tag:
         await strength_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.强度 名字#数字")
-    if _is_maintenance():
-        await strength_cmd.finish(at + MessageSegment.text(MAINTENANCE_MSG))
     remain = _check_cooldown(str(event.user_id))
     if remain > 0:
         await strength_cmd.finish(at + MessageSegment.text(f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～"))
@@ -882,38 +860,12 @@ async def summary(event: MessageEvent, arg: Message = CommandArg()):
         await summary_cmd.finish(at + _BAD_ID_HINT)
     if not tag:
         await summary_cmd.finish(at + "请先绑定你的 ID：.绑定 名字#数字\n或直接指定：.总结 名字#数字")
-    if _is_maintenance():
-        await summary_cmd.finish(at + MessageSegment.text(MAINTENANCE_MSG))
     if scope != "today":
         await summary_cmd.finish(at + MessageSegment.text("对方查询机器人暂只支持今日总结～"))
     remain = _check_cooldown(str(event.user_id))
     if remain > 0:
         await summary_cmd.finish(at + MessageSegment.text(f"查询太频繁啦，请 {int(remain) + 1} 秒后再试～"))
     await _enqueue_task("summary", tag, getattr(event, "group_id", None), str(event.user_id), summary_cmd, event)
-
-
-# ---------------- Maintenance toggle ----------------
-@maintenance_cmd.handle()
-async def maintenance_toggle(event: MessageEvent, arg: Message = CommandArg()):
-    raw = arg.extract_plain_text().strip().lower()
-    owner = str(os.getenv("QQBOT_OWNER", "1543758852")).strip()
-    if str(event.user_id) != owner:
-        await maintenance_cmd.finish(at_prefix(event) + "\u4ec5Bot\u4e3b\u4eba\u53ef\u64cd\u4f5c\u7ef4\u62a4\u5f00\u5173")
-    if raw in {"\u5f00\u542f", "\u5f00", "on", "enable", "1", "\u7ef4\u62a4"}:
-        _set_maintenance(True)
-        await maintenance_cmd.finish(at_prefix(event) + "\u2705 \u5df2\u5f00\u542f\u7ef4\u62a4\u6a21\u5f0f\uff0cOW\u67e5\u8be2\u5c06\u63d0\u793a\u7ef4\u62a4\u4e2d")
-    elif raw in {"\u5173\u95ed", "\u5173", "off", "disable", "0", "\u6062\u590d"}:
-        _set_maintenance(False)
-        await maintenance_cmd.finish(at_prefix(event) + "\u2705 \u5df2\u5173\u95ed\u7ef4\u62a4\u6a21\u5f0f\uff0cOW\u67e5\u8be2\u5df2\u6062\u590d")
-    elif raw in {"\u72b6\u6001", "\u67e5\u8be2", "status"}:
-        enabled = _is_maintenance()
-        await maintenance_cmd.finish(at_prefix(event) + ("\uD83D\uDD27 \u5f53\u524d\u4e3a\u7ef4\u62a4\u4e2d" if enabled else "\u2705 \u5f53\u524d\u6b63\u5e38\u8fd0\u884c"))
-    elif not raw:
-        enabled = _is_maintenance()
-        status = "\u7ef4\u62a4\u4e2d" if enabled else "\u6b63\u5e38"
-        await maintenance_cmd.finish(at_prefix(event) + f"\u5f53\u524d\uff1a{status}\n\u7528\u6cd5\uff1a.ow\u7ef4\u62a4 \u5f00\u542f/\u5173\u95ed/\u72b6\u6001")
-    else:
-        await maintenance_cmd.finish(at_prefix(event) + "\u53c2\u6570\u9519\u8bef\uff0c\u7528\u6cd5\uff1a.ow\u7ef4\u62a4 \u5f00\u542f/\u5173\u95ed/\u72b6\u6001")
 
 
 owstatus_cmd = on_command("ow状态", aliases={"ow队列"}, priority=5, block=True)
