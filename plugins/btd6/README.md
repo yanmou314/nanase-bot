@@ -19,7 +19,7 @@ nkapi(取数层) ─┼─→ assets(素材) ─→ collect(采集) ─→ textf
 | `collect.py` | 采集层：`collect_overview/daily/daily_coop/rules/maps/odyssey/player/player_oak/rush/collectevent/ct/leaderboard(_page)`、`site_data()` 与 `profile_*`（OAK 档案页的网站口径统计）、`_coop_pick`（Co-op 选期：createdAt ≤ 当前取最新）、`_challenge_map_img`、`fetch_leaderboard_page`、`fetch_rank_entry`、`_safe` |
 | `textfmt.py` | 文本渲染：`build_overview`、`_single_event_text`、`format_rules`、排行/地图/远征/玩家/rush/收集活动/CT 文本；`odyssey_text(only=)` 支持只输出部分难度（部分卡片渲染失败时的回退） |
 | `cards/` | 渲染层：`common`(外壳 CSS)/`overview`/`leaderboard`/`odyssey`/`rules`/`rush`/`player`/`collectevent`/`ctmap`/`help`；`__init__` 为渲染管线（`_render_card`/`_send_card`/`_finish_multi_cards`，内容哈希缓存）并统一再导出 |
-| `push.py` | 后台任务：history.json 归档、`_prewarm_once` 预热、活动刷新精准推送（race/boss/ct/odyssey/daily/coop/rush 七类，各类仅采样自己的列表接口）与全部 apscheduler 定时任务 |
+| `push.py` | 后台任务：history.json 归档、`_prewarm_once` 预热（含每小时榜单/每日/Co-op）、活动刷新精准推送（race/boss/ct/odyssey/daily/coop/rush/social 八类）。采样命中后进入 `_pending_batch` 防抖缓冲（70s），统一 `_flush_push_batch`：先共享渲染一张总览，各类详情全部渲完后再发送（总览只发一次且在详情之前）；社季每小时采样、纯文本推送 |
 | `handlers.py` | 18 个 nonebot matcher/命令 handler 与参数解析（`parse_kind` 等）；规则命令已拆分：`.btd6竞速`（竞赛规则）与 `.btd6boss`（Boss 标准+精英双卡）；`.btd6每日` 一次并发取标准+高级+Coop 三卡；命令参数词表在此 |
 | `rushgen.py` | Boss Rush 阶段数据生成器（独立，未拆分改动） |
 | `instagen.py` | 收集活动 Featured Insta 计划表生成器（独立）：活动 ID 种子 → 洗牌 → 8 小时轮换 4 塔，BTD6 API Explorer 算法移植 |

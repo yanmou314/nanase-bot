@@ -1327,10 +1327,10 @@ def test_push_coop_kind_picks_latest_created(monkeypatch, tmp_path):
     monkeypatch.setattr(btd6.push, "BTD6_PUSH_STATE_FILE", str(tmp_path / "state.json"))
     seen = {}
 
-    async def fake_single(kind, ev, ev_id, label, groups):
+    async def fake_enqueue(kind, ev, ev_id, label):
         seen["kind"], seen["ev_id"] = kind, ev_id
 
-    monkeypatch.setattr(btd6.push, "_btd6_push_single", fake_single)
+    monkeypatch.setattr(btd6.push, "_enqueue_push", fake_enqueue)
     monkeypatch.setattr(btd6.push, "_push_groups", lambda: {100})
     monkeypatch.setattr(btd6.push, "get_bot", lambda: object())
     now_ms = int(time.time() * 1000)
@@ -1508,6 +1508,46 @@ def test_cache_eviction_cleans_side_dictionaries(monkeypatch):
     assert url2 in btd6._cache  # 新条目仍在预算内
 
 
+def test_cache_put_async_skips_sync_dumps_when_size_known(monkeypatch):
+    """T17a：事件循环路径缓存写入——已提供 size 时不触发 json.dumps 估算。"""
+    url = "https://data.ninjakiwi.com/async-sized"
+    body = {"pad": "a" * 500}
+    dumped = []
+
+    def _spy(_body):
+        dumped.append(1)
+        return 1
+
+    monkeypatch.setattr(btd6.nkapi, "_body_size", _spy)
+    asyncio.run(btd6.nkapi._cache_put_async(url, body, size=4242))
+    assert dumped == []  # 未 dumps
+    assert btd6._cache_sizes[url] == 4242
+    assert btd6._cache_get(url) is body
+
+
+def test_cache_put_async_uses_to_thread_for_unknown_size(monkeypatch):
+    """T17a：未提供 size 时估算走 asyncio.to_thread，不阻塞事件循环。"""
+    url = "https://data.ninjakiwi.com/async-threaded"
+    body = {"pad": "b" * 500}
+    seen: list[str] = []
+    orig = btd6.nkapi._body_size
+
+    def _spy(_body):
+        seen.append("sync")
+        return orig(_body)
+
+    monkeypatch.setattr(btd6.nkapi, "_body_size", _spy)
+
+    async def _fake_to_thread(fn, *a, **k):
+        seen.append("to_thread")
+        return fn(*a, **k)
+
+    monkeypatch.setattr(btd6.nkapi.asyncio, "to_thread", _fake_to_thread)
+    asyncio.run(btd6.nkapi._cache_put_async(url, body))
+    assert "to_thread" in seen  # 经线程池估算
+    assert btd6._cache_sizes[url] == orig(body)
+
+
 def test_handler_rules_boss_failure_releases_cooldown(monkeypatch):
     """C1：Boss 规则双版本全部失败时回滚冷却，允许立即重试。"""
     event = _ev(".btd6boss")
@@ -1669,7 +1709,11 @@ def test_prewarm_lb_hourly_only_ongoing(monkeypatch):
     async def fake_daily(adv):
         return {"empty": "暂无每日挑战数据"}  # 每日卡预热：empty 时跳过，不渲染
 
+    async def fake_coop():
+        return {"empty": "暂无 Co-op 挑战数据"}
+
     monkeypatch.setattr(btd6.collect, "collect_daily", fake_daily)
+    monkeypatch.setattr(btd6.collect, "collect_daily_coop", fake_coop)
 
     asyncio.run(btd6.push.btd6_prewarm_lb_hourly_job())
     assert rendered == ["btd6lb", "btd6lb"]
@@ -1935,3 +1979,377 @@ def test_collect_ct_empty(monkeypatch):
     monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory({btd6.URL_CT: []}))
     col = asyncio.run(btd6.collect_ct())
     assert "当前没有争夺领土活动" in col.get("empty", "")
+
+
+def test_push_kind_odyssey_picks_current(monkeypatch, tmp_path):
+    """odyssey 采样：取进行中的一期；今日漏推的根因就是这里缺分支。"""
+    monkeypatch.setattr(btd6.push, "BTD6_PUSH_STATE_FILE", str(tmp_path / "state.json"))
+    seen = {}
+
+    async def fake_enqueue(kind, ev, ev_id, label):
+        seen["kind"], seen["ev_id"] = kind, ev_id
+
+    monkeypatch.setattr(btd6.push, "_enqueue_push", fake_enqueue)
+    monkeypatch.setattr(btd6.push, "_push_groups", lambda: {100})
+    monkeypatch.setattr(btd6.push, "get_bot", lambda: object())
+    now_ms = int(time.time() * 1000)
+    items = [
+        {"id": "ody-old", "name": "Old", "start": now_ms - 7 * DAY, "end": now_ms - DAY},
+        {"id": "ody-new", "name": "Spikey Monkeys",
+         "start": now_ms - 5 * 60 * 1000, "end": now_ms + 6 * DAY},
+    ]
+
+    async def fake_fetch(url):
+        return items
+
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", fake_fetch)
+    asyncio.run(btd6.push._btd6_push_kind("odyssey"))
+    assert seen == {"kind": "odyssey", "ev_id": "ody-new"}
+
+    # 已推送过同一期：不再重发
+    monkeypatch.setattr(btd6.push, "_last_pushed", lambda: {"odyssey": "ody-new"})
+    seen.clear()
+    asyncio.run(btd6.push._btd6_push_kind("odyssey"))
+    assert seen == {}
+
+
+def test_fetch_push_event_unknown_kind():
+    assert asyncio.run(btd6.push._fetch_push_event("bogus", 0, 0)) is None
+
+
+def test_push_check_parse_kind():
+    assert btd6.push._parse_push_kind(".btd6推送检查 远征") == "odyssey"
+    assert btd6.push._parse_push_kind(".btd6推送检查 odyssey") == "odyssey"
+    assert btd6.push._parse_push_kind(".btd6推送检查 BOSS") == "boss"
+    assert btd6.push._parse_push_kind(".btd6推送检查 社季") == "social"
+    assert btd6.push._parse_push_kind(".btd6推送检查 社交赛季") == "social"
+    assert btd6.push._parse_push_kind(".btd6推送检查") == ""
+    assert btd6.push._parse_push_kind(".btd6推送检查 未知") == ""
+
+
+def _owner_ev(text: str):
+    return GroupMessageEvent(plain=text, user_id=10000, group_id=100, message=[])
+
+
+def test_push_check_status_view(monkeypatch, tmp_path):
+    monkeypatch.setattr(btd6.push, "BTD6_PUSH_STATE_FILE", str(tmp_path / "state.json"))
+
+    async def fake_fetch(kind, now, real_now):
+        return {"id": f"{kind}-cur", "name": f"{kind} name"}
+
+    monkeypatch.setattr(btd6.push, "_fetch_push_event", fake_fetch)
+    with pytest.raises(FinishedException):
+        asyncio.run(btd6.push.push_check_cmd.handlers[0](_owner_ev(".btd6推送检查")))
+    text = str(btd6.push.push_check_cmd.finished[-1])
+    assert "用法" in text and "远征" in text and "odyssey-cur" in text
+
+
+def test_push_check_force_push_current(monkeypatch, tmp_path):
+    monkeypatch.setattr(btd6.push, "BTD6_PUSH_STATE_FILE", str(tmp_path / "state.json"))
+
+    async def fake_fetch(kind, now, real_now):
+        return {"id": "ody-new", "name": "Spikey Monkeys"}
+
+    async def fake_single(kind, ev, ev_id, label, groups):
+        assert groups == {100}
+        btd6.push._set_last_pushed(kind, ev_id)
+
+    monkeypatch.setattr(btd6.push, "_fetch_push_event", fake_fetch)
+    monkeypatch.setattr(btd6.push, "_btd6_push_single", fake_single)
+    monkeypatch.setattr(btd6.push, "get_bot", lambda: object())
+    # 成功补推不抛 finish（图已发出，避免刷屏），只标记状态
+    asyncio.run(btd6.push.push_check_cmd.handlers[0](_owner_ev(".btd6推送检查 远征")))
+    assert btd6.push._last_pushed().get("odyssey") == "ody-new"
+
+    # 已推送过：明确告知不再重推
+    with pytest.raises(FinishedException):
+        asyncio.run(btd6.push.push_check_cmd.handlers[0](_owner_ev(".btd6推送检查 远征")))
+    assert "无需重推" in str(btd6.push.push_check_cmd.finished[-1])
+
+
+def test_push_check_rejects_non_owner(monkeypatch):
+    with pytest.raises(FinishedException):
+        asyncio.run(btd6.push.push_check_cmd.handlers[0](_ev(".btd6推送检查")))
+    assert "没有权限" in str(btd6.push.push_check_cmd.finished[-1])
+
+
+async def _run_batch(monkeypatch, tmp_path, entries, groups=(100,)):
+    monkeypatch.setattr(btd6.push, "BTD6_PUSH_STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(btd6.push, "_push_groups", lambda: set(groups))
+    with btd6.push._batch_lock:
+        btd6.push._pending_batch.clear()
+    btd6.push._overview_already_sent.clear()
+    for kind, ev, ev_id, label in entries:
+        btd6.push._pending_batch[kind] = (ev, ev_id, label)
+    await btd6.push._flush_push_batch()
+
+
+def test_push_batch_overview_sent_once_first(monkeypatch, tmp_path):
+    """两类同时刷新：总览目录只发一次，且排在全部详情之前。"""
+    sent = []
+    render_keys = []
+
+    class _Bot:
+        async def send_group_msg(self, group_id=None, message=None, **kw):
+            sent.append(str(message))
+
+    async def fake_render(prefix, html_fn):
+        render_keys.append(prefix)
+        return str(tmp_path / f"{prefix}.png")
+
+    async def fake_overview():
+        return {"now": int(time.time() * 1000), "races": [], "bosses": [], "cts": [],
+                "odysseys": [], "rush": [], "socials": [], "collectables": []}
+
+    async def fake_odyssey():
+        return {"diffs": {d: {"meta": {}, "maps": []} for d, _ in btd6.i18n._ODYSSEY_DIFFS}}
+
+    monkeypatch.setattr(btd6.push, "get_bot", lambda: _Bot())
+    monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
+    monkeypatch.setattr(btd6.cards, "overview_html", lambda data: "<html/>")
+    monkeypatch.setattr(btd6.cards, "odyssey_diff_html", lambda col, d, lab: "<html/>")
+    monkeypatch.setattr(btd6.collect, "collect_overview", fake_overview)
+    monkeypatch.setattr(btd6.collect, "collect_odyssey", fake_odyssey)
+    monkeypatch.setattr(btd6.push, "_inject_odyssey_unified_h", lambda col: None)
+
+    asyncio.run(_run_batch(monkeypatch, tmp_path, [
+        ("race", {"id": "r1", "name": "RaceX"}, "r1", "RaceX"),
+        ("odyssey", {"id": "o1", "name": "OdyX"}, "o1", "OdyX"),
+    ]))
+    assert render_keys.count("btd6ov") == 1, "总览只应渲染一次"
+    assert sent, "应有消息发出"
+    assert "btd6ov.png" in sent[0], "第一条必须是总览目录"
+    assert "活动已刷新" in sent[0] or "已刷新" in sent[0]
+    ody_idxs = [i for i, m in enumerate(sent) if "btd6ody.png" in m]
+    assert ody_idxs and all(i > 0 for i in ody_idxs), "远征详情必须在总览之后"
+    assert btd6.push._last_pushed().get("race") == "r1"
+    assert btd6.push._last_pushed().get("odyssey") == "o1"
+
+
+def test_push_batch_renders_all_before_send(monkeypatch, tmp_path):
+    """全部渲染完成之后才开始发送：渲染与发送阶段不交错。"""
+    phases = []
+
+    class _Bot:
+        async def send_group_msg(self, group_id=None, message=None, **kw):
+            phases.append("send")
+
+    async def fake_render(prefix, html_fn):
+        phases.append(f"render:{prefix}")
+        return str(tmp_path / f"{prefix}.png")
+
+    async def fake_daily(adv):
+        return {"prefix": "每日标准" if not adv else "每日高级", "meta": {}}
+
+    async def fake_coop():
+        return {"prefix": "每日Coop", "meta": {"name": "N"}, "map_img": "", "side_img": "",
+                "scoring_cn": "固定种子", "kind_label": "Co-op 挑战", "stale_note": ""}
+
+    monkeypatch.setattr(btd6.push, "get_bot", lambda: _Bot())
+    monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
+    monkeypatch.setattr(btd6.cards, "rules_html", lambda col: "<html/>")
+    monkeypatch.setattr(btd6.collect, "collect_daily", fake_daily)
+    monkeypatch.setattr(btd6.collect, "collect_daily_coop", fake_coop)
+
+    asyncio.run(_run_batch(monkeypatch, tmp_path, [
+        ("daily", {"id": "d1", "name": "Standard"}, "d1", "Standard"),
+        ("coop", {"id": "c1", "name": "coop - X"}, "c1", "coop - X"),
+    ]))
+    assert "send" in phases
+    first_send = phases.index("send")
+    assert all(p.startswith("render:") for p in phases[:first_send])
+    assert first_send >= 3  # daily×2 + coop×1 全部渲完
+
+
+def test_push_odyssey_overview_before_details(monkeypatch, tmp_path):
+    """远征单类推送：先总览目录，再三张难度分图（修复原先顺序颠倒）。"""
+    monkeypatch.setattr(btd6.push, "BTD6_PUSH_STATE_FILE", str(tmp_path / "state.json"))
+    sent = []
+
+    class _Bot:
+        async def send_group_msg(self, group_id=None, message=None, **kw):
+            sent.append(str(message))
+
+    async def fake_render(prefix, html_fn):
+        return str(tmp_path / f"{prefix}.png")
+
+    async def fake_overview():
+        return {"now": 0, "races": [], "bosses": [], "cts": [], "odysseys": [],
+                "rush": [], "socials": [], "collectables": []}
+
+    async def fake_odyssey():
+        return {"diffs": {d: {"meta": {}, "maps": []} for d, _ in btd6.i18n._ODYSSEY_DIFFS}}
+
+    monkeypatch.setattr(btd6.push, "get_bot", lambda: _Bot())
+    monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
+    monkeypatch.setattr(btd6.cards, "overview_html", lambda data: "<html/>")
+    monkeypatch.setattr(btd6.cards, "odyssey_diff_html", lambda col, d, lab: "<html/>")
+    monkeypatch.setattr(btd6.collect, "collect_overview", fake_overview)
+    monkeypatch.setattr(btd6.collect, "collect_odyssey", fake_odyssey)
+    monkeypatch.setattr(btd6.push, "_inject_odyssey_unified_h", lambda col: None)
+
+    asyncio.run(btd6.push._btd6_push_single(
+        "odyssey", {"id": "o1", "name": "Spikey"}, "o1", "Spikey", {100}))
+    assert sent, "应有消息发出"
+    assert "btd6ov.png" in sent[0], "第一条必须是总览目录"
+    assert any("btd6ody.png" in m for m in sent[1:]), "难度分图应在总览之后"
+
+
+def test_prewarm_coop_card(monkeypatch, tmp_path):
+    """Co-op 卡预热：有数据渲染一张；空态/异常不抛。"""
+
+    async def fake_coop():
+        return {"prefix": "每日Coop", "meta": {"name": "N"}}
+
+    async def fake_empty():
+        return {"empty": "暂无"}
+
+    async def fake_render(prefix, html_fn):
+        return str(tmp_path / "c.png")
+
+    monkeypatch.setattr(btd6.collect, "collect_daily_coop", fake_coop)
+    monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
+    monkeypatch.setattr(btd6.cards, "rules_html", lambda col: "<html/>")
+    assert asyncio.run(btd6.push._prewarm_coop_card()) is True
+
+    monkeypatch.setattr(btd6.collect, "collect_daily_coop", fake_empty)
+    assert asyncio.run(btd6.push._prewarm_coop_card()) is False
+
+    async def boom():
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(btd6.collect, "collect_daily_coop", boom)
+    assert asyncio.run(btd6.push._prewarm_coop_card()) is False
+
+
+def test_push_partial_detail_fail_does_not_mark_kind(monkeypatch, tmp_path):
+    """P1 回归：总览成功但远征详情全失败时，只标记竞速，远征回填待重试。"""
+    monkeypatch.setattr(btd6.push, "BTD6_PUSH_STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(btd6.push, "_push_groups", lambda: {100})
+    btd6.push._overview_already_sent.clear()
+    sent = []
+
+    class _Bot:
+        async def send_group_msg(self, group_id=None, message=None, **kw):
+            s = str(message)
+            sent.append(s)
+            if "btd6ody.png" in s:
+                raise RuntimeError("image send failed")
+
+    async def fake_render(prefix, html_fn):
+        return str(tmp_path / f"{prefix}.png")
+
+    async def fake_overview():
+        return {"now": 0, "races": [], "bosses": [], "cts": [], "odysseys": [],
+                "rush": [], "socials": [], "collectables": []}
+
+    async def fake_odyssey():
+        return {"diffs": {d: {"meta": {}, "maps": []} for d, _ in btd6.i18n._ODYSSEY_DIFFS}}
+
+    monkeypatch.setattr(btd6.push, "get_bot", lambda: _Bot())
+    monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
+    monkeypatch.setattr(btd6.cards, "overview_html", lambda data: "<html/>")
+    monkeypatch.setattr(btd6.cards, "odyssey_diff_html", lambda col, d, lab: "<html/>")
+    monkeypatch.setattr(btd6.collect, "collect_overview", fake_overview)
+    monkeypatch.setattr(btd6.collect, "collect_odyssey", fake_odyssey)
+    monkeypatch.setattr(btd6.push, "_inject_odyssey_unified_h", lambda col: None)
+
+    with btd6.push._batch_lock:
+        btd6.push._pending_batch.clear()
+        btd6.push._pending_batch["race"] = ({"id": "r1", "name": "RaceX"}, "r1", "RaceX")
+        btd6.push._pending_batch["odyssey"] = ({"id": "o1", "name": "OdyX"}, "o1", "OdyX")
+    asyncio.run(btd6.push._flush_push_batch())
+
+    last = btd6.push._last_pushed()
+    assert last.get("race") == "r1"
+    assert last.get("odyssey") is None  # 详情失败不得标记
+    assert "odyssey" in btd6.push._pending_batch  # 回填待重试
+    assert "odyssey" in btd6.push._overview_already_sent  # 重试跳过总览
+
+    # 重试远征：不应再发总览
+    sent.clear()
+    asyncio.run(btd6.push._flush_push_batch())
+    assert any("btd6ody" in s or "远征" in s for s in sent)
+    assert not any("btd6ov.png" in s for s in sent)
+
+
+def test_push_render_failure_puts_back(monkeypatch, tmp_path):
+    """P2 回归：kind 渲染失败必须回填缓冲，不得静默丢弃。"""
+    monkeypatch.setattr(btd6.push, "BTD6_PUSH_STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(btd6.push, "_push_groups", lambda: {100})
+    btd6.push._overview_already_sent.clear()
+
+    class _Bot:
+        async def send_group_msg(self, group_id=None, message=None, **kw):
+            pass
+
+    async def fake_render(prefix, html_fn):
+        if prefix == "btd6coop":
+            raise RuntimeError("render boom")
+        return str(tmp_path / f"{prefix}.png")
+
+    async def fake_coop():
+        return {"prefix": "每日Coop", "meta": {"name": "N"}}
+
+    monkeypatch.setattr(btd6.push, "get_bot", lambda: _Bot())
+    monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
+    monkeypatch.setattr(btd6.cards, "rules_html", lambda col: "<html/>")
+    monkeypatch.setattr(btd6.collect, "collect_daily_coop", fake_coop)
+
+    with btd6.push._batch_lock:
+        btd6.push._pending_batch.clear()
+        btd6.push._pending_batch["coop"] = ({"id": "c1", "name": "coop - N"}, "c1", "coop - N")
+    asyncio.run(btd6.push._flush_push_batch())
+    assert "coop" in btd6.push._pending_batch
+    assert btd6.push._last_pushed().get("coop") is None
+
+
+def test_kind_push_ok_rules():
+    """_kind_push_ok：详情类看 detail_ok，纯总览类看 overview_ok。"""
+    assert btd6.push._kind_push_ok("race", {"overview": "p.png", "details": []},
+                                   {"overview_ok": True, "detail_ok": {}}) is True
+    assert btd6.push._kind_push_ok("race", {"overview": "p.png", "details": []},
+                                   {"overview_ok": False, "detail_ok": {}}) is False
+    assert btd6.push._kind_push_ok("odyssey", {"overview": "p.png", "details": [("t", "d.png")]},
+                                   {"overview_ok": True, "detail_ok": {"odyssey": False}}) is False
+    assert btd6.push._kind_push_ok("odyssey", {"overview": "p.png", "details": [("t", "d.png")]},
+                                   {"overview_ok": False, "detail_ok": {"odyssey": True}}) is True
+
+
+def test_push_social_text_only_and_active_only(monkeypatch, tmp_path):
+    """社季推送：只取进行中的一期；payload 为纯文本（无总览/无图）。"""
+    monkeypatch.setattr(btd6.push, "BTD6_PUSH_STATE_FILE", str(tmp_path / "state.json"))
+    now_ms = int(time.time() * 1000)
+    items = [
+        {"type": "socialseason", "id": "soc-old", "name": "Old Season",
+         "start": now_ms - 30 * DAY, "end": now_ms - DAY},
+        {"type": "socialseason", "id": "soc-cur", "name": "Play With Friends",
+         "start": now_ms - 2 * 60 * 1000, "end": now_ms + 14 * DAY},
+        {"type": "socialseason", "id": "soc-next", "name": "Future",
+         "start": now_ms + DAY, "end": now_ms + 20 * DAY},
+        {"type": "bossRush", "id": "rush1", "name": "Rush",
+         "start": now_ms - DAY, "end": now_ms + DAY},
+    ]
+
+    async def fake_fetch(url):
+        return items
+
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", fake_fetch)
+    ev = asyncio.run(btd6.push._fetch_push_event("social", now_ms, now_ms))
+    assert ev and ev["id"] == "soc-cur"
+
+    sent = []
+
+    class _Bot:
+        async def send_group_msg(self, group_id=None, message=None, **kw):
+            sent.append(str(message))
+
+    def boom_render(*a, **k):
+        raise AssertionError("社季推送不应渲染卡片")
+
+    monkeypatch.setattr(btd6.push, "get_bot", lambda: _Bot())
+    monkeypatch.setattr(btd6.cards, "_render_card", boom_render)
+    asyncio.run(btd6.push._btd6_push_single(
+        "social", ev, "soc-cur", "Play With Friends", {100}))
+    assert sent and "社交赛季已开启：Play With Friends" in sent[0]
+    assert btd6.push._last_pushed().get("social") == "soc-cur"

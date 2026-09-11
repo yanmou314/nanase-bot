@@ -5,6 +5,7 @@
 import asyncio
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from nonebot import get_bot, get_driver, logger
 
@@ -21,6 +22,7 @@ from nonebot.message import run_postprocessor
 
 from common import OWNER
 
+_SH = ZoneInfo("Asia/Shanghai")
 _COOLDOWN = 10 * 60  # 同一插件同一错误 10 分钟内只提醒一次
 _last_notified: dict[str, float] = {}
 _loop: asyncio.AbstractEventLoop | None = None
@@ -80,7 +82,7 @@ def _build_message(plugin: str, exc: Exception, loc: str) -> str:
         f"🔌 插件：{plugin}\n"
         f"❌ 错误：{detail}\n"
         f"📍 位置：{loc}\n"
-        f"🕐 {datetime.now().strftime('%m-%d %H:%M')}\n"
+        f"🕐 {datetime.now(_SH).strftime('%m-%d %H:%M')}\n"
         f"（同一错误 {_COOLDOWN // 60} 分钟内不重复提醒）"
     )
 
@@ -169,7 +171,7 @@ def _build_missed_message(label: str) -> str:
     return (
         f"⏰ 定时任务错过\n"
         f"🔔 任务：{label}\n"
-        f"🕐 {datetime.now().strftime('%m-%d %H:%M')}\n"
+        f"🕐 {datetime.now(_SH).strftime('%m-%d %H:%M')}\n"
         f"（同一任务 {_COOLDOWN // 60} 分钟内不重复提醒）"
     )
 

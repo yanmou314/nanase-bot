@@ -83,6 +83,27 @@ def _quote_worthy(s: str) -> bool:
     return 4 <= len(s) <= 24 and len(set(s)) > 1
 
 
+def _process_messages_batch(texts: list[str]) -> tuple[Counter, Counter, int]:
+    """纯 CPU 批处理：对一批消息做 jieba 分词计数 + 短语提取。
+
+    必须在工作线程执行（asyncio.to_thread），禁止在事件循环内直接调用。
+    返回 (词频 Counter, 短语 Counter, 有效消息数)。
+    """
+    counter: Counter = Counter()
+    phrase_counter: Counter = Counter()
+    normal_message_count = 0
+    for text in texts:
+        if text.startswith(_COMMAND_START):
+            continue
+        normal_message_count += 1
+        _count_into(counter, text)
+        if _quote_worthy(text):
+            p = _phrase_from_sentence(text, counter)
+            if p:
+                phrase_counter[p] += 1
+    return counter, phrase_counter, normal_message_count
+
+
 def _phrase_from_sentence(s: str, counter: Counter, max_len: int = 8) -> str:
     """从句子中按词边界截取一段 ≤max_len 字的短语（词云混排用，不整句上版）。
 
@@ -190,19 +211,28 @@ async def _build_word_image(group_id: int, n: int) -> str | None:
     counter: Counter = Counter()
     phrase_counter: Counter = Counter()
     normal_message_count = 0
+    batch: list[str] = []
+    BATCH_SIZE = 256  # 分批落线程，兼顾内存与 to_thread 开销
+
+    async def _flush_batch() -> None:
+        nonlocal counter, phrase_counter, normal_message_count, batch
+        if not batch:
+            return
+        texts, batch = batch, []
+        # jieba 分词是纯 CPU 重活，必须离开事件循环；批处理后并回全局计数
+        c, pc, n = await asyncio.to_thread(_process_messages_batch, texts)
+        counter.update(c)
+        phrase_counter.update(pc)
+        normal_message_count += n
+
     # 流式逐行消费：活跃大群的全天文本不再一次性载入内存；
     # aclosing 保证循环体异常时也能立即释放游标与池连接
     async with aclosing(iter_rows(sql, args)) as rows:
         async for (text,) in rows:
-            if text.startswith(_COMMAND_START):
-                continue
-            normal_message_count += 1
-            _count_into(counter, text)
-            if _quote_worthy(text):
-                # 不整句上版：按词边界截取 ≤8 字短语参与词云混排
-                p = _phrase_from_sentence(text, counter)
-                if p:
-                    phrase_counter[p] += 1
+            batch.append(text)
+            if len(batch) >= BATCH_SIZE:
+                await _flush_batch()
+    await _flush_batch()
     if not counter:
         return None
     # 被重复 ≥2 次的短语最多取 3 条，与常规词一起渲染
@@ -323,8 +353,32 @@ async def words_status(event: GroupMessageEvent):
     await words_status_cmd.finish("📊 每日词云推送：未开启")
 
 
-@scheduler.scheduled_job("cron", hour=0, minute=2, id="daily_words", timezone="Asia/Shanghai")
+WORDS_PUSH_HOUR = 0
+WORDS_PUSH_MINUTE = 2
+
+
+def _last_push_date() -> str:
+    """读取最近一次每日词云推送日期（YYYY-MM-DD）；从未推送返回空串。"""
+    data = load_json_state(WORDS_STATE, _state_lock)
+    return str(data.get("last_push_date") or "")
+
+
+def _mark_pushed(day: date) -> None:
+    """记录当日词云已推送，用于防重复与启动补发判断。"""
+    def _do() -> None:
+        with _state_lock:
+            data = load_json_state(WORDS_STATE, _state_lock)
+            data["last_push_date"] = day.isoformat()
+            save_json_state(WORDS_STATE, data, _state_lock)
+    _do()
+
+
+@scheduler.scheduled_job(
+    "cron", hour=WORDS_PUSH_HOUR, minute=WORDS_PUSH_MINUTE, id="daily_words", timezone="Asia/Shanghai"
+)
 async def daily_words_job():
+    if _last_push_date() >= _sh_today().isoformat():
+        return  # 今日已推送（如启动补发已执行过），防重复
     groups = _words_groups()
     if not groups:
         return
@@ -336,14 +390,33 @@ async def daily_words_job():
     except Exception:
         _logger.exception("获取 bot 失败")
         return
+    sent = 0
     for gid in groups:
         try:
             path = await _build_word_image(int(gid), 40)
             if not path:
                 continue
             await bot.send_group_msg(group_id=int(gid), message=MessageSegment.image("file://" + path))
+            sent += 1
         except Exception:
             _logger.exception("每日词云推送到群 %s 失败", gid)
+    if sent:
+        _mark_pushed(_sh_today())  # 有群成功送达才记录，全失败保留补发机会
+
+
+# 启动补发：APScheduler 用内存 jobstore，进程重启后错过的当日词云静默丢失；
+# bot 连上后检查「已过推送时刻且今日未推送」则立即补发一次（对齐 news 模式）。
+_register_words_catchup = getattr(get_driver(), "on_bot_connect", get_driver().on_startup)
+
+
+@_register_words_catchup
+async def _daily_words_catchup(bot=None) -> None:
+    now = datetime.now(_SH)
+    if (now.hour, now.minute) < (WORDS_PUSH_HOUR, WORDS_PUSH_MINUTE):
+        return  # 还没到当日推送时刻，交给定时任务
+    if _last_push_date() >= now.date().isoformat():
+        return  # 今日已推送，不重复
+    await daily_words_job()
 
 
 # ---------------- 词频 ----------------
