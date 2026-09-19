@@ -27,7 +27,6 @@ def _reset_relay_state():
         owstats._task_queue.clear()
         owstats._task_current = None
         owstats._task_seq = 0
-        owstats._orphan_image_times.clear()
         owstats._frozen_tasks.clear()
         owstats._claiming_task = None
         owstats._claim_sent_at = 0.0
@@ -94,7 +93,7 @@ def test_query_cooldown_blocks_second_call_within_window():
     assert owstats._check_cooldown("u2") == 0.0  # 不同用户互不影响
 
 
-# ---------------- 两段归集：文本+图片 / 报错中断 / 延迟图片丢弃 ----------------
+# ---------------- 两段归集：文本+图片 / 无对局终态 / 报错中断 ----------------
 
 def _relay_bot():
     class _FakeBot:
@@ -162,7 +161,8 @@ def test_relay_second_text_aborts_as_error():
     assert "查询失败" in str(bot.sent_group[0]["message"])
 
 
-def test_relay_first_image_without_orphan_treated_as_single():
+def test_relay_first_image_treated_as_single():
+    """首条即图片：一律视为本任务单图结果，直接转发。"""
     bot = _relay_bot()
     owstats._task_current = _make_task()
     asyncio.run(_relay(bot, _relay_event(Message([MessageSegment.image("http://x/only.png")]))))
@@ -171,30 +171,41 @@ def test_relay_first_image_without_orphan_treated_as_single():
     assert "only.png" in str(bot.sent_group[0]["message"])
 
 
-def test_relay_first_image_with_orphan_dropped_as_stale():
-    owstats._note_missing_image()  # 模拟上一任务缺图片收尾
+def test_relay_empty_result_text_completes_immediately():
+    """无对局终态文案：立刻转发收尾，不再等第二条，也不当报错。"""
     bot = _relay_bot()
     owstats._task_current = _make_task()
-    asyncio.run(_relay(bot, _relay_event(Message([MessageSegment.image("http://x/old.png")]))))
-    assert owstats._task_current is not None
-    assert not owstats._task_current.get("first_segs")
-    assert bot.sent_group == []
-    # 随后真正的文本+图片仍能正常归集转发
-    asyncio.run(_relay(bot, _relay_event(Message([MessageSegment.text("正文")]))))
-    asyncio.run(_relay(bot, _relay_event(Message([MessageSegment.image("http://x/new.png")]))))
+    text = "你在过去的 24 小时内没有对局记录。"
+    asyncio.run(_relay(bot, _relay_event(Message([MessageSegment.text(text)]))))
     assert owstats._task_current is None
     assert len(bot.sent_group) == 1
-    assert "new.png" in str(bot.sent_group[0]["message"])
+    assert "没有对局记录" in str(bot.sent_group[0]["message"])
+    assert "查询失败" not in str(bot.sent_group[0]["message"])
 
 
-def test_relay_orphan_expires_after_ttl(monkeypatch):
-    owstats._note_missing_image()
-    monkeypatch.setattr(owstats, "_ORPHAN_IMAGE_TTL", -1)  # 立即过期
+def test_relay_empty_result_as_second_message_merges():
+    """第一条正文 + 第二条无对局文案：合并转发，不当报错中断。"""
     bot = _relay_bot()
     owstats._task_current = _make_task()
-    asyncio.run(_relay(bot, _relay_event(Message([MessageSegment.image("http://x/only.png")]))))
-    assert owstats._task_current is None  # 过期后按单图成功处理
+    asyncio.run(_relay(bot, _relay_event(Message([MessageSegment.text("Yanmou#51293 战报")]))))
+    asyncio.run(_relay(bot, _relay_event(
+        Message([MessageSegment.text("你在过去的 24 小时内没有对局记录。")]))))
+    assert owstats._task_current is None
     assert len(bot.sent_group) == 1
+    body = str(bot.sent_group[0]["message"])
+    assert "没有对局记录" in body
+    assert "查询失败" not in body
+
+
+def test_relay_drawing_notice_freezes_task():
+    """绘制超时通知：冻结本任务，继续处理后续查询。"""
+    bot = _relay_bot()
+    owstats._task_current = _make_task()
+    notice = "仍在绘制中，但预计会超过 QQ 官方 5 分钟回复时限。图片准备好后请再次 @机器人领取，缓存 24 小时。"
+    asyncio.run(_relay(bot, _relay_event(Message([MessageSegment.text(notice)]))))
+    assert owstats._task_current is None
+    assert len(owstats._frozen_tasks) == 1
+    assert any("领取" in str(s["message"]) for s in bot.sent_group + bot.sent_private)
 
 
 def test_owstatus_and_reset_owner_only():
@@ -441,13 +452,13 @@ def test_first_image_delivers_to_frozen_and_requeues_current():
     assert owstats._claiming_task is None
 
 
-def test_first_image_without_frozen_keeps_existing_orphan_behavior():
-    owstats._note_missing_image()
+def test_first_image_without_frozen_completes_current_task():
+    """无冻结任务时，首条图片归属当前在途任务并转发。"""
     bot = _relay_bot()
     owstats._task_current = _make_task()
-    asyncio.run(_relay(bot, _relay_event(Message([MessageSegment.image("http://x/old.png")]))))
-    assert owstats._task_current is not None
-    assert bot.sent_group == []
+    asyncio.run(_relay(bot, _relay_event(Message([MessageSegment.image("http://x/ok.png")]))))
+    assert owstats._task_current is None
+    assert any("ok.png" in str(s["message"]) for s in bot.sent_group)
 
 
 def test_claim_timeout_fails_frozen_task():
@@ -542,7 +553,6 @@ def test_late_text_after_timeout_does_not_fill_next_first_segs():
     # 模拟 sweep 超时收尾
     owstats._task_current = _make_task(seq=1)
     owstats._task_current = None
-    owstats._note_missing_image()
     owstats._open_discard_window()
     # 下一任务已在途
     nxt = _make_task(seq=2)

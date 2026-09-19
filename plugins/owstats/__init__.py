@@ -38,6 +38,10 @@ _PROGRESS_RE = re.compile("正在生成|正在查询|正在分析|正在处理|�
 # 对方机器人「绘制将超过 QQ 5 分钟时限，稍后 @ 我领取」的通知
 # 典型文案：@nanase <@...> 仍在绘制中，但预计会超过 QQ 官方 5 分钟回复时限。图片准备好后请再次 @机器人领取，缓存 24 小时。
 _DRAWING_RE = re.compile(r"仍在绘制|超过\s*QQ\s*官方|图片准备好后请再次")
+
+# 查询完成但无内容可画的终态文本：收到即转发收尾，不再等第二条图
+# 典型文案：你在过去的 24 小时内没有对局记录。
+_EMPTY_RESULT_RE = re.compile(r"没有对局记录|暂无对局|没有找到对局|无对局记录|没有比赛记录")
 DRAWING_CLAIM_DELAY = 300  # 通知到达后延迟领取秒数（约 5 分钟）
 DRAWING_CLAIM_TIMEOUT = 180  # 发出领取 @ 后等待图片的上限
 MAX_FROZEN_TASKS = 10  # 冻结任务上限，超出时放弃最旧的并提示用户
@@ -250,38 +254,16 @@ async def submit_relay_task(kind: str, tag: str, text=None, timeout=None):
 relay_listener = on_message(priority=4, block=False)
 
 
-# 对方机器人一条查询最多回两条消息：正常是 文本 + 图片；若第二条不是图片
-# 则为报错信息，直接中断本次查询；若查询发出后第一条就是图片，则只有在
-# 存在未过期的“缺图片收尾”记录时才视为上一任务的延迟回复并丢弃，否则按
-# 本任务的单图结果直接处理。
+# 对方机器人一条查询的回复形态（状态机）：
+#   1) 首条即图片           → 本任务单图结果，直接转发
+#   2) 文本 + 图片          → 正常两段归集
+#   3) 无对局终态文案       → 立刻转发收尾（如「你在过去的 24 小时内没有对局记录。」）
+#   4) 绘制超时通知         → 冻结本任务，先处理后面的查询
+#   5) 进度提示             → 忽略
+#   6) 其他第二条非图文本   → 按报错中断
+# 首条图片一律归属当前在途任务；任务超时后的迟到消息由 discard window 拦截，
+# 不再用「上一任务缺图」标记去丢弃本任务的合法结果。
 SECOND_MSG_WAIT = 30  # 收到第一条文本后等待第二条的宽限秒数
-_ORPHAN_IMAGE_TTL = 300  # 缺图片收尾记录的有效期（秒）：超时后不再误伤后续任务的首条图片
-
-
-_orphan_image_times: list = []  # 缺图片收尾的时间戳（单调时钟），有它才可能是延迟图片
-
-
-def _prune_orphans(now: float) -> None:
-    cutoff = now - _ORPHAN_IMAGE_TTL
-    while _orphan_image_times and _orphan_image_times[0] <= cutoff:
-        _orphan_image_times.pop(0)
-
-
-def _note_missing_image() -> None:
-    """任务收尾时没见过图片：之后一条首条图片可能是它的延迟到达，先记一笔。"""
-    now = time.monotonic()
-    _prune_orphans(now)
-    _orphan_image_times.append(now)
-
-
-def _consume_orphan() -> bool:
-    """有未过期的缺图片记录则消费一条并返回 True（调用方应丢弃首条图片）。"""
-    now = time.monotonic()
-    _prune_orphans(now)
-    if _orphan_image_times:
-        _orphan_image_times.pop(0)
-        return True
-    return False
 
 
 def _msg_has_image(message) -> bool:
@@ -519,7 +501,6 @@ async def _complete_task_single(bot: Bot, task: dict, single_segs: list) -> None
     if _task_current is not task:
         return
     _task_current = None
-    _note_missing_image()
     elapsed = time.monotonic() - task["t0"] if task.get("t0") else 0.0
     fut = task.get("future")
     if fut is not None:
@@ -578,7 +559,6 @@ async def _flush_first_after_wait(task_seq: int) -> None:
     except Exception:
         logger.warning("owstats 单条转发失败：拿不到 Bot 实例，丢弃任务")
         _task_current = None
-        _note_missing_image()
         await _dispatch_next()
         return
     await _complete_task_single(bot, task, first)
@@ -651,12 +631,9 @@ async def _relay_result(bot: Bot, event: MessageEvent, matcher: Matcher):
 
     task = _task_current
     if not task.get("first_segs"):
-        # 还在等第一条：首条即图片时，只有存在未过期的缺图片收尾记录才视为
-        # 上一任务的延迟回复并丢弃；否则按本任务的单图结果直接成功处理。
+        # 首条即图片：一律视为本任务的单图结果（summary/verify 常见），
+        # 不再按上一任务缺图标记丢弃——派发时已清孤儿，超时迟到由隔离窗拦。
         if has_image:
-            if _consume_orphan():
-                logger.info(f"owstats 任务 #{task.get('seq')} 首条即图片，按延迟回复丢弃")
-                return
             logger.info(f"owstats 任务 #{task.get('seq')} 首条即图片，按单图结果处理")
             segs = _strip_self_at(event.message, self_id)
             await _complete_task_success(bot, task, [], segs)
@@ -664,6 +641,11 @@ async def _relay_result(bot: Bot, event: MessageEvent, matcher: Matcher):
         segs = _strip_self_at(event.message, self_id)
         if not segs:
             logger.info("owstats 中继群收到空文本，已忽略")
+            return
+        # 无对局等终态文案：立刻转发收尾，不必再等第二条
+        if _EMPTY_RESULT_RE.search(plain):
+            logger.info(f"owstats 任务 #{task.get('seq')} 收到无对局终态文案，直接转发收尾")
+            await _complete_task_success(bot, task, [], segs)
             return
         task["first_segs"] = segs
         logger.info(f"owstats 任务 #{task.get('seq')} 收到第一条文本，等第二条图片（{SECOND_MSG_WAIT}s）")
@@ -680,6 +662,13 @@ async def _relay_result(bot: Bot, event: MessageEvent, matcher: Matcher):
         notice = _strip_self_at(event.message, self_id)
         logger.info(f"owstats 任务 #{task.get('seq')} 第二条为绘制超时通知，转入冻结")
         await _freeze_task_for_drawing(bot, task, notice)
+        return
+    # 无对局终态文案作为第二条：合并转发，不要当报错
+    if _EMPTY_RESULT_RE.search(plain):
+        first = task.pop("first_segs")
+        segs = _strip_self_at(event.message, self_id)
+        logger.info(f"owstats 任务 #{task.get('seq')} 第二条为无对局终态文案，合并转发")
+        await _complete_task_success(bot, task, first, segs)
         return
     segs = _strip_self_at(event.message, self_id)
     if not segs:
@@ -714,7 +703,6 @@ if scheduler is not None:
             return
         task = _task_current
         _task_current = None
-        _note_missing_image()
         _open_discard_window()  # 迟到回复不得写入下一任务；窗内禁止再派发
         logger.warning(f"owstats 任务 #{task['seq']} 超时")
         fut = task.get("future")
@@ -877,7 +865,6 @@ async def ow_status(event: MessageEvent):
     owner = str(os.getenv("QQBOT_OWNER", "1543758852")).strip()
     if str(event.user_id) != owner:
         await owstatus_cmd.finish(at_prefix(event) + "仅Bot主人可查看队列状态")
-    _prune_orphans(time.monotonic())
     if _task_current is None:
         cur = "当前无在途任务"
     else:
@@ -896,7 +883,7 @@ async def ow_status(event: MessageEvent):
         )
     await owstatus_cmd.finish(
         at_prefix(event)
-        + f"{cur}\n排队 {len(_task_queue)} 个，冻结待领取 {frozen}，领取中 {claim}，疑似延迟图片 {len(_orphan_image_times)} 条")
+        + f"{cur}\n排队 {len(_task_queue)} 个，冻结待领取 {frozen}，领取中 {claim}")
 
 
 @owreset_cmd.handle()
