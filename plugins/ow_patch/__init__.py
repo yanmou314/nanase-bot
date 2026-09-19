@@ -792,6 +792,45 @@ def _diff_new(sections: list[dict], seen: dict) -> list[dict]:
     return news
 
 
+# 官方常见写法：热补丁（在线修正）单独成条，同时改到旧补丁页正文。
+# 插件若把两类都当“新”推，会出现热补丁 + 老补丁连发。
+_HOTFIX_RE = re.compile(r"在线修正|热修复|热补丁|紧急修复|紧急更新|hotfix", re.I)
+
+
+def _is_hotfix(patch: dict) -> bool:
+    """标题 / 首节 h4 / 导语含热修措辞 → 判定为热补丁条目。"""
+    title = patch.get("title") or ""
+    if _HOTFIX_RE.search(title):
+        return True
+    body = patch.get("body_html") or ""
+    m = re.search(r"<h4[^>]*>(.*?)</h4>", body, re.I | re.S)
+    if m:
+        first_h4 = re.sub(r"<[^>]+>", "", m.group(1))
+        if _HOTFIX_RE.search(first_h4):
+            return True
+    lead = re.sub(r"<[^>]+>", " ", body[:600])
+    return bool(_HOTFIX_RE.search(lead))
+
+
+def _select_push_list(fresh: list[dict], seen: dict) -> list[dict]:
+    """同轮多条待推时筛选，避免「热补丁 + 老补丁」连发。
+
+    - 混有热补丁：只推热补丁（旧页哈希变更、更老补丁静默记已读）；
+    - 无热修标记但新 key 与旧页哈希变更同轮出现：只推全新 key；
+    - 其余情况保持原行为，整段 fresh 交给推送方。
+    """
+    if len(fresh) <= 1:
+        return list(fresh)
+    new_keys = [p for p in fresh if seen.get(p["key"]) is None]
+    hash_changed = [p for p in fresh if seen.get(p["key"]) is not None]
+    hotfixes = [p for p in fresh if _is_hotfix(p)]
+    if hotfixes and len(hotfixes) < len(fresh):
+        return hotfixes
+    if new_keys and hash_changed:
+        return new_keys
+    return list(fresh)
+
+
 # ---------------- 推送 ----------------
 
 _push_running = False
@@ -933,8 +972,21 @@ async def _poll_once() -> str:
             for p in fresh:
                 _mark_seen(p)  # 无订阅群：只记已读，避免攒一堆待推
             return "empty"
+        selected = _select_push_list(fresh, seen)
+        selected_keys = {p["key"] for p in selected}
+        if len(selected) != len(fresh):
+            skipped = [p["title"] for p in fresh if p["key"] not in selected_keys]
+            _logger.info(
+                "ow补丁同轮只推 %d/%d 条（筛掉老补丁/非热修）：%s | 跳过：%s",
+                len(selected), len(fresh),
+                "；".join(p["title"] for p in selected) or "-",
+                "；".join(skipped) or "-",
+            )
+            for p in fresh:
+                if p["key"] not in selected_keys:
+                    _mark_seen(p)  # 静默记已读，避免下轮再入选
         ok_all = True
-        for patch in fresh[-3:]:  # 单轮最多推 3 节，防积压一次性刷屏
+        for patch in selected[-3:]:  # 单轮最多推 3 节，防积压一次性刷屏
             if not await _push_patch(bot, groups, patch, _RENDER_ATTEMPTS):
                 ok_all = False
                 continue

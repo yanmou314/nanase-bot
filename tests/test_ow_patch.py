@@ -85,6 +85,67 @@ def test_diff_new_and_hash_change():
     assert [s["key"] for s in ow._diff_new(sections, seen)] == [sections[0]["key"]]
 
 
+def _mk(key, title, date, body="", seen_hash=None):
+    return {
+        "key": key,
+        "title": title,
+        "date": date,
+        "body_html": body,
+        "images": [],
+        "img_kinds": [],
+        "hash": "h-" + key,
+        "source": "https://ow.blizzard.cn/u",
+    }
+
+
+def test_is_hotfix_by_section_and_title():
+    hot = _mk("k1", "《守望先锋》补丁说明——2026年9月18日", "2026-09-18",
+              '<h4>在线修正</h4><p>这是一次在线修正更新。</p>')
+    old = _mk("k2", "《守望先锋》补丁说明——2026年9月9日", "2026-09-09",
+              '<h4>英雄更新</h4><p>护甲调整。</p>')
+    titled = _mk("k3", "《守望先锋》热修复——2026年9月20日", "2026-09-20", "<p>x</p>")
+    assert ow._is_hotfix(hot) is True
+    assert ow._is_hotfix(old) is False
+    assert ow._is_hotfix(titled) is True
+
+
+def test_select_push_list_prefers_hotfix_over_old():
+    hot = _mk("2026-09|hot", "《守望先锋》补丁说明——2026年9月18日", "2026-09-18",
+              '<h4 class="PatchNotes-sectionTitle">在线修正</h4><p>hotfix body</p>')
+    old = _mk("2026-09|old", "《守望先锋》补丁说明——2026年9月9日", "2026-09-09",
+              '<h4 class="PatchNotes-sectionTitle">英雄更新</h4><p>old body</p>')
+    seen = {
+        old["key"]: {"hash": "different", "title": old["title"],
+                     "date": old["date"], "source": old["source"]},
+    }
+    fresh = ow._diff_new([old, hot], seen)
+    assert {p["key"] for p in fresh} == {hot["key"], old["key"]}
+    selected = ow._select_push_list(fresh, seen)
+    assert [p["key"] for p in selected] == [hot["key"]]
+
+
+def test_select_push_list_mixed_new_and_hash_change_without_hotfix_marker():
+    brand = _mk("2026-09|new", "《守望先锋》补丁说明——2026年9月20日", "2026-09-20",
+                '<h4>新内容</h4><p>x</p>')
+    old = _mk("2026-09|old", "《守望先锋》补丁说明——2026年9月9日", "2026-09-09",
+              '<h4>英雄更新</h4><p>changed</p>')
+    seen = {
+        old["key"]: {"hash": "deadbeef", "title": old["title"],
+                     "date": old["date"], "source": old["source"]},
+    }
+    fresh = ow._diff_new([old, brand], seen)
+    selected = ow._select_push_list(fresh, seen)
+    assert [p["key"] for p in selected] == [brand["key"]]
+
+
+def test_select_push_list_single_or_all_new_unchanged():
+    a = _mk("k1", "A——9月1日", "2026-09-01", "<p>x</p>")
+    b = _mk("k2", "B——9月2日", "2026-09-02", "<p>y</p>")
+    assert ow._select_push_list([a], {}) == [a]
+    both = ow._select_push_list([a, b], {})
+    assert {p["key"] for p in both} == {a["key"], b["key"]}
+
+
 def test_target_months_rollover():
     assert ow._target_months(datetime(2026, 9, 9)) == [(2026, 9)]
     assert ow._target_months(datetime(2026, 9, 2)) == [(2026, 9), (2026, 8)]
