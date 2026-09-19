@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timedelta, timezone
 
 from . import assets, i18n, instagen, nkapi, rushgen, util
 
@@ -185,6 +186,64 @@ async def collect_rules(kind: str, variant: str) -> dict:
     }
 
 
+async def collect_boss_dual() -> dict:
+    """Boss 规则合卡：标准+精英并排数据。共享活动实例，并发取两套元数据。"""
+    now = util.bucket_now()
+    bosses = await nkapi.fetch_body(nkapi.URL_BOSSES)
+    ev = util.pick_active(bosses, now) or util.fallback_latest(bosses)
+    if not ev:
+        return {"empty": "当前没有 Boss 活动"}
+    std_url = ev.get("metadataStandard")
+    eli_url = ev.get("metadataElite")
+
+    async def _load(url: str):
+        if not url:
+            return None
+        return await _safe(nkapi.fetch_body(url), "boss_meta")
+
+    std_meta, eli_meta = await asyncio.gather(_load(std_url), _load(eli_url))
+
+    async def _img(url: str, tag: str) -> str:
+        if not url:
+            return ""
+        return await _safe(assets._asset_data_url(url), tag) or ""
+
+    map_url = next(
+        (m.get("mapURL") for m in (std_meta, eli_meta)
+         if isinstance(m, dict) and m.get("mapURL")),
+        "",
+    )
+    side_img, map_img = await asyncio.gather(
+        _img(str(ev.get("bossTypeURL") or ""), "boss_img"),
+        _img(str(map_url or ""), "map_img"),
+    )
+    variants = []
+    for key, meta, scoring_key in (
+        ("standard", std_meta, "normalScoringType"),
+        ("elite", eli_meta, "eliteScoringType"),
+    ):
+        if not isinstance(meta, dict) or not meta:
+            continue
+        scoring_raw = str(ev.get(scoring_key) or "")
+        variants.append({
+            "variant": key,
+            "label": "精英" if key == "elite" else "标准",
+            "meta": meta,
+            "scoring_raw": scoring_raw,
+            "scoring_cn": i18n.SCORING_CN.get(scoring_raw, scoring_raw or "?"),
+        })
+    if not variants:
+        return {"empty": "该活动暂无规则数据"}
+    stale_urls = (nkapi.URL_BOSSES, *(u for u in (std_url, eli_url) if u))
+    return {
+        "ev": ev,
+        "side_img": side_img or "",
+        "map_img": map_img or "",
+        "variants": variants,
+        "stale_note": nkapi._stale_warn(*stale_urls),
+    }
+
+
 # ---------------- 自制地图 ----------------
 
 MAP_FILTERS = {
@@ -225,6 +284,36 @@ def _daily_prefix(label: str, advanced: bool) -> str:
     return f"{kind}·第{issue}期" if issue.isdigit() else kind
 
 
+def _daily_issue_date(now_ms: int) -> str:
+    """游戏内每日挑战显示的日期（id 后缀 YYYYMMDD）。
+
+    以 Asia/Shanghai 日历日为准：游戏内日期就是本地日。
+    不能用「20:00 UTC 切换」——北京时间凌晨 00:00–04:00 会错误退回昨天的期号。
+    """
+    dt = datetime.fromtimestamp(now_ms / 1000, tz=timezone(timedelta(hours=8)))
+    return dt.strftime("%Y%m%d")
+
+
+def _daily_pick(items: list, want: str, now_ms: int) -> dict | None:
+    """每日/高级选期：id 日期后缀等于「游戏内显示日期」的那一期。
+
+    NK 列表 newest-first，且当日挑战可能 createdAt 尚未到点（写在次日凌晨），
+    不能按 createdAt≤now 过滤，否则会选到昨天；与游戏内日期对齐只能看 id 后缀。
+    """
+    target = _daily_issue_date(now_ms)
+    fallback = None
+    for x in items:
+        if not isinstance(x, dict) or not str(x.get("name") or "").startswith(want):
+            continue
+        iid = str(x.get("id") or "")
+        if iid.endswith(target):
+            return x
+        if int(x.get("createdAt") or 0) <= now_ms:
+            if fallback is None or int(x.get("createdAt") or 0) > int(fallback.get("createdAt") or 0):
+                fallback = x
+    return fallback
+
+
 async def _challenge_map_img(meta: dict, tag: str) -> str:
     """挑战类卡片地图图：优先开放 API 的 mapURL（按钮图），缺失/下载失败回退本地素材。"""
     raw_map_url = str(meta.get("mapURL") or "").strip()
@@ -245,7 +334,8 @@ async def collect_daily(advanced: bool) -> dict:
     if not isinstance(items, list):  # 非 list 响应按空数据处理，走既有失败文案
         items = []
     want = "Advanced" if advanced else "Standard"
-    ev = next((x for x in items if str(x.get("name") or "").startswith(want)), None)
+    # 列表 newest-first 且含未来期，不能 next() 取第一条
+    ev = _daily_pick(items, want, int(time.time() * 1000))
     if not ev:
         return {"empty": "暂无每日挑战数据"}
     meta = await nkapi.fetch_body(ev["metadata"])
@@ -271,8 +361,9 @@ def _coop_pick(items: list, now_ms: int) -> dict | None:
 async def collect_daily_coop() -> dict:
     """Co-op 挑战：与每日挑战共用 /btd6/challenges/filter/daily 接口（name 以 "coop - " 开头）。
 
-    NK 不为 coop 提供起止时间与期号，前缀用"每日Coop"（rules_html 按"每日"前缀
-    走每日系渲染：日历徽章 + 全塔总览网格）；展示名取 metadata.name（已无 coop 前缀）。
+    NK 不提供期号与起止时间；前缀用「Co-op 挑战」（不带「每日」——并非每天刷新）。
+    rules_html 仍按每日系版式渲染（日历徽章 + 全塔总览），识别靠 kind_label。
+    展示名取 metadata.name（已无 coop 前缀）。
     """
     items = await nkapi.fetch_body(nkapi.URL_DAILY)
     if not isinstance(items, list):  # 非 list 响应按空数据处理，走既有失败文案
@@ -282,15 +373,31 @@ async def collect_daily_coop() -> dict:
         return {"empty": "暂无 Co-op 挑战数据"}
     meta = await nkapi.fetch_body(ev["metadata"])
     return {
-        "prefix": "每日Coop", "meta": meta,
+        "prefix": "Co-op 挑战", "meta": meta,
         "map_img": await _challenge_map_img(meta, "coop_map"),
         "side_img": "", "scoring_cn": "固定种子", "kind_label": "Co-op 挑战",
         "stale_note": nkapi._stale_warn(nkapi.URL_DAILY, ev.get("metadata") or ""),
     }
 
 
-# 当前远征的完成奖杯数：游戏内活动页显示，开放 API 的 _rewards 未包含，逐期转录
-_ODYSSEY_TROPHY = {"mt7bsc6c": 15}
+# 完成远征的奖杯数：开放 API 的 _rewards 不含 Trophy，按游戏内标准 5/10/15 注入。
+# 特殊期可用 event_id -> {"easy":n,"medium":n,"hard":n} 或标量覆盖全部难度。
+_ODYSSEY_TROPHY_DEFAULT = {"easy": 5, "medium": 10, "hard": 15}
+_ODYSSEY_TROPHY: dict = {
+    "mt7bsc6c": {"easy": 5, "medium": 10, "hard": 15},
+    "mtra21ht": {"easy": 5, "medium": 10, "hard": 15},
+}
+
+
+def _odyssey_trophy_count(event_id: str, diff_key: str) -> int | None:
+    spec = _ODYSSEY_TROPHY.get(str(event_id or ""))
+    if spec is None:
+        default = _ODYSSEY_TROPHY_DEFAULT.get(diff_key)
+        return int(default) if default else None
+    if isinstance(spec, dict):
+        val = spec.get(diff_key)
+        return int(val) if val is not None else None
+    return int(spec)
 
 
 async def collect_odyssey() -> dict:
@@ -305,11 +412,12 @@ async def collect_odyssey() -> dict:
         meta = await _safe(nkapi.fetch_body(url)) if url else None
         if meta is not None:
             # 游戏内活动页的奖励含完成奖杯，开放 API 未返回——按期转录补齐
-            trophy = _ODYSSEY_TROPHY.get(str(ev.get("id") or ""))
+            trophy = _odyssey_trophy_count(str(ev.get("id") or ""), d)
             if trophy:
                 rewards = [r for r in (meta.get("_rewards") or [])
                            if not str(r).startswith("Trophy:")]
-                rewards.append(f"Trophy:{trophy}")
+                # 奖杯放最前，与游戏内活动页一致
+                rewards.insert(0, f"Trophy:{trophy}")
                 # 浅拷贝后再注入：meta 与 nkapi 缓存共享同一对象，原地改写会污染缓存
                 meta = dict(meta)
                 meta["_rewards"] = rewards

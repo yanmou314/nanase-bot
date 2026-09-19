@@ -40,3 +40,12 @@ nkapi(取数层) ─┼─→ assets(素材) ─→ collect(采集) ─→ textf
 - 测试 patch 目标：`btd6.nkapi.*`（fetch_body/_http_get/get_http_client/MAX_JSON_MEM_BYTES）、
   `btd6.assets.*`（ASSET_DIR/GAME_ASSET_DIR/CACHE_DIR）、`btd6.cards.*`（_render_card/render_html_to_png）、
   `btd6.collect.*`（collect_*）、`btd6.push.*`（get_bot/HISTORY_FILE/BTD6_PUSH_STATE_FILE/_prewarm_running/_archive_events）。
+
+## 每日/高级挑战选期口径（勿改）
+
+游戏内每日挑战在 **北京时间每天 16:00** 正式刷新，固定不变。
+
+NK 接口列表会**提前**出现下一期（metadata 可能已可读），且 `createdAt` 与 16:00 正式点经常对不上。选期只认 id 后缀 `YYYYMMDD`（该期 16:00 刷新日的中国日历日）：本地 ≥16:00 用今天，否则用昨天。
+
+实现见 `collect.py` 的 `_daily_issue_date` / `_daily_pick`；推送 cron `hour=16` 与此对齐。改之前先拿游戏内截图核对 map/期号，不要只根据 API 列表判断。
+

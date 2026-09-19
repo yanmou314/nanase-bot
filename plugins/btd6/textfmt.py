@@ -286,6 +286,21 @@ def format_rules(meta: dict, prefix: str) -> str:
     return "\n".join(_rules_lines(meta, prefix))
 
 
+def boss_dual_text(col: dict) -> str:
+    """Boss 标准+精英合卡的文本回退：两套规则串在一起。"""
+    if not col or col.get("empty"):
+        return (col or {}).get("empty") or "暂无 Boss 规则"
+    ev = col.get("ev") or {}
+    lines = [f"Boss「{(ev.get('name') or '').strip()}」标准+精英规则"]
+    for v in col.get("variants") or []:
+        lines.append("")
+        lines.append(format_rules(v.get("meta") or {}, f"Boss·{v.get('label') or ''}"))
+    note = col.get("stale_note") or ""
+    if note:
+        lines.append(note)
+    return "\n".join(lines)
+
+
 def rules_text(col: dict) -> str:
     if col.get("empty"):
         return col["empty"]

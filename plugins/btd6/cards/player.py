@@ -30,7 +30,14 @@ def player_html(col: dict) -> str:
     rank = util._esc(p.get("rank") or "—")
     followers = util._esc(util.fmt_cn_num(p.get("followers")))
     most_used = util._esc(i18n.tower_cn(str(p.get("mostExperiencedMonkey") or "")))
-    head = (f"<div class='panel'>{banner}"
+    lb_badge = ""
+    if col.get("lb_rank"):
+        mode = util._esc(col.get("lb_variant_cn") or "")
+        lb_badge = (
+            f"<div class='panel lb-rank-badge'>排行榜第 {util._esc(col['lb_rank'])} 名"
+            + (f" · {mode}" if mode else "") + "</div>"
+        )
+    head = (lb_badge + f"<div class='panel'>{banner}"
             f"<div class='phead'>{avatar}"
             f"<div class='ptext'><div class='big'>{util._esc(p.get('displayName'))}</div>"
             f"<div class='sub'>等级 {rank}{vr_txt} · 粉丝 {followers}"
@@ -109,15 +116,26 @@ def _profile_shell(body, h):
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
+{common._font_face_css()}
+/* 数字描边：Explorer 同款，不用伪加粗 */
+.pf-topnum, .pf-medal .n, .pf-lvon, .pf-mval, .pf-curnum, .pf-foln {{
+  font-weight: 400 !important; letter-spacing: 0 !important;
+  text-shadow: 1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,
+              1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000;
+}}
 @page {{ size: {PROFILE_CARD_W}px {h}px; margin: 0; background: #6aa9d4; }}
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 body {{ width: {PROFILE_CARD_W}px; height: {h}px; color: #ffffff;
-        font-family: "WenQuanYi Micro Hei", "Noto Sans CJK SC", sans-serif;
+        font-family: 'Luckiest Guy', 'ZCOOL QingKe HuangYou', 'WenQuanYi Micro Hei', 'Noto Sans CJK SC', sans-serif;
         background: linear-gradient(180deg, #8ec9e8 0%, #6aa9d4 55%, #4f93c4 100%); }}
 .pf-page {{ padding: 22px 24px; }}
 .pf-panel {{ background: #1e3a5c; border-radius: 14px; padding: 16px 20px;
              border: 1px solid #16304f;
              box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 2px 0 rgba(10,30,55,.35); }}
+.lb-rank-badge {{ color: #fff; background: linear-gradient(180deg,#2f8fce 0%,#1a5f96 100%);
+  border: 2px solid #082f4f; border-radius: 10px; margin-bottom: 8px; padding: 8px 14px;
+  font-size: 18px; font-weight: 900; text-align: center;
+  text-shadow: 0 2px 0 #062a44; }}
 .pf-title {{ color: #ffffff; font-size: 27px; line-height: 34px; font-weight: 900;
              text-align: center; letter-spacing: 2px; margin-bottom: 10px;
              text-shadow: 0 2px 0 #0d2138, 0 3px 4px rgba(0,0,0,.35); }}
@@ -127,6 +145,7 @@ body {{ width: {PROFILE_CARD_W}px; height: {h}px; color: #ffffff;
 .pf-avcell {{ display: table-cell; width: 128px; vertical-align: middle; text-align: center; }}
 .pf-avcell img {{ width: 112px; height: 112px; border-radius: 22px; border: 3px solid #ffd964;
                   background: #16304f; }}
+.pf-hstrip-av .pf-av-fallback {{ width:78px; height:78px; line-height:74px; font-size:32px; }}
 .pf-av-fallback {{ width: 112px; height: 112px; margin: 0 auto; border-radius: 22px;
                    background: #16304f; color: #ffd964; font-size: 44px; line-height: 106px;
                    font-weight: 900; text-align: center; border: 3px solid #ffd964; }}
@@ -151,9 +170,9 @@ body {{ width: {PROFILE_CARD_W}px; height: {h}px; color: #ffffff;
 .pf-barfill.vet {{ background: linear-gradient(180deg, #a64dff 0%, #6a2bd9 60%, #4a1da3 100%); }}
 .pf-barfill.lv {{ background: linear-gradient(180deg, #46c8f1 0%, #129ed0 60%, #087eaf 100%); }}
 .pf-cols {{ display: table; width: 100%; margin-top: 14px; table-layout: fixed; }}
-.pf-col {{ display: table-cell; vertical-align: top; }}
-.pf-col.left {{ width: 404px; padding-right: 7px; }}
-.pf-col.right {{ padding-left: 7px; }}
+.pf-col {{ display: table-cell; vertical-align: top; width: 50%; }}
+.pf-col.left {{ width: 48%; padding-right: 8px; }}
+.pf-col.right {{ width: 50%; padding-left: 8px; }}
 .pf-qrow {{ display: table; width: 100%; padding: 5px 0; table-layout: fixed; }}
 .pf-qicon {{ display: table-cell; width: 54px; vertical-align: middle; text-align: center; }}
 .pf-qicon img {{ width: 44px; height: 44px; }}
@@ -170,24 +189,51 @@ body {{ width: {PROFILE_CARD_W}px; height: {h}px; color: #ffffff;
 .pf-curcell img {{ width: 50px; height: 50px; vertical-align: middle; }}
 .pf-curnum {{ display: inline-block; vertical-align: middle; font-size: 28px; font-weight: 900;
               margin-left: 8px; text-shadow: 0 2px 0 #0d2138; }}
-.pf-medals {{ text-align: center; padding-top: 10px; }}
-.pf-medal {{ display: inline-block; width: 76px; margin: 4px 1px; vertical-align: top; }}
-.pf-medal img {{ display: block; width: 46px; height: 46px; margin: 0 auto; }}
-.pf-medal .n {{ color: #ffffff; font-size: 17px; line-height: 22px; font-weight: 900;
-                text-shadow: 0 1px 0 #0d2138; }}
+/* 奖章每行 5 枚 */
+/* 奖章：缩小，一行 6 枚；数字压在图标右下角 */
+.pf-medals {{ text-align: left; padding-top: 6px; padding-left: 2px; line-height: 0; }}
+.pf-medal {{ display: inline-block; position: relative; width: 56px; height: 58px;
+             margin: 1px 2px 4px 0; vertical-align: top; }}
+.pf-medal img {{ display: block; width: 54px; height: 54px; margin: 0; }}
+/* 奖章数字：Explorer .medal-text — Luckiest Guy 24px + 粗描边，叠在图标右下略靠中 */
+.pf-medal .n {{ position: absolute; right: 2px; bottom: 2px; z-index: 5;
+                color: #ffffff; font-size: 26px; line-height: 26px; font-weight: 400;
+                font-family: 'Luckiest Guy', Arial, sans-serif;
+                text-shadow:2px 0 0 #000,-2px 0 0 #000,0 2px 0 #000,0 -2px 0 #000,1.5px 1.5px 0 #000,-1.5px 1.5px 0 #000,1.5px -1.5px 0 #000,-1.5px -1.5px 0 #000,1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000,2px 1px 0 #000,2px -1px 0 #000,-2px 1px 0 #000,-2px -1px 0 #000,0 3px 0 #000; }}
 .pf-name{{text-transform:uppercase;}}
+/* 顶部横幅条：背景=玩家 banner，一排 头像|名字|等级|老兵|粉丝 */
+.pf-hstrip {{ position:relative; display:table; width:100%; height:104px; margin:0 0 12px;
+             table-layout:fixed; border-radius:12px; overflow:hidden;
+             background:#16304f center/cover no-repeat;
+             border:2px solid #082f4f; box-shadow:0 2px 0 rgba(10,30,55,.35); }}
+.pf-hstrip-av {{ display:table-cell; width:96px; vertical-align:middle; text-align:center;
+                background:rgba(8,24,44,.35); }}
+.pf-hstrip-av img {{ width:78px; height:78px; border-radius:12px; border:3px solid #ffd964;
+                    background:#16304f; }}
+.pf-hstrip-name {{ display:table-cell; vertical-align:middle; padding:0 10px 0 6px;
+                  color:#ffffff; font-size:22px; font-weight:400; letter-spacing:1px;
+                  text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000;
+                  background:rgba(8,24,44,.28); word-break:break-all; }}
+.pf-hstrip-lvl {{ display:table-cell; width:72px; vertical-align:middle; text-align:center;
+                 background:rgba(8,24,44,.22); }}
+.pf-hstrip-fol {{ display:table-cell; width:150px; vertical-align:middle; text-align:center;
+                 background:rgba(8,24,44,.35); padding:0 8px; }}
+.pf-vetstar {{ }}
 .pf-htab {{display:table; width:100%; margin-top:14px; table-layout:fixed;}}
-.pf-hav {{display:table-cell; width:132px; vertical-align:middle; text-align:center;}}
+.pf-hav {{display:table-cell; width:118px; vertical-align:middle; text-align:center;}}
 .pf-hav img {{width:112px; height:112px; border-radius:22px; border:3px solid #ffd964; background:#16304f;}}
-.pf-hmid {{display:table-cell; vertical-align:top; padding:0 8px;}}
+.pf-hmid {{display:table-cell; vertical-align:top; padding:0 0 0 2px;}}
 .pf-hright {{display:table-cell; width:300px; vertical-align:top;}}
 .pf-fol {{text-align:right; color:#9fb6d4; font-size:16px; line-height:20px; font-weight:700; letter-spacing:2px;}}
 .pf-foln {{text-align:right; color:#ffffff; font-size:24px; line-height:28px; font-weight:900;
           text-shadow:0 2px 0 #0d2138;}}
-.pf-lvrow {{display:table; width:100%; margin-top:8px; table-layout:fixed;}}
-.pf-lvstar {{display:table-cell; width:64px; vertical-align:middle; text-align:center; height:64px; background-repeat:no-repeat; background-position:center; background-size:contain;}}
+.pf-lvrow {{display:table; width:100%; margin-top:2px; table-layout:fixed;}}
+.pf-lvstar {{display:table-cell; width:68px; vertical-align:middle; text-align:center; height:68px; background-repeat:no-repeat; background-position:center; background-size:contain; position:relative;}}
 .pf-lvstar img {{width:52px; height:52px;}}
-.pf-lvon {{color:#ffffff; font-size:25px; line-height:64px; font-weight:900; text-align:center; text-shadow:1px 0 0 #0d2138, -1px 0 0 #0d2138, 0 1px 0 #0d2138, 0 -1px 0 #0d2138, 0 2px 3px rgba(0,0,0,.5);}}
+.pf-lvon {{color:#ffffff; font-size:32px; line-height:68px; font-weight:400; text-align:center;
+            text-shadow:2px 0 0 #0d2138, -2px 0 0 #0d2138, 0 2px 0 #0d2138, 0 -2px 0 #0d2138,
+                        1px 1px 0 #0d2138, -1px 1px 0 #0d2138, 1px -1px 0 #0d2138, -1px -1px 0 #0d2138,
+                        0 3px 4px rgba(0,0,0,.55);}}
 .pf-lvbar {{display:table-cell; vertical-align:middle; padding-left:6px;}}
 .pf-ribbon {{margin:12px 6px 8px; padding:5px 10px; text-align:center; border-radius:10px;
             background:linear-gradient(180deg,#8a6a1f 0%,#5c4512 60%,#3a2c0a 100%);
@@ -198,15 +244,25 @@ body {{ width: {PROFILE_CARD_W}px; height: {h}px; color: #ffffff;
               border-color:#9a6ff0;}}
 .pf-showall {{text-align:right; color:#9fb6d4; font-size:15px; line-height:20px; font-weight:700;
              padding-right:8px;}}
-.pf-topgrid {{text-align:center; padding-bottom:4px;}}
-.pf-topcell {{display:inline-block; width:118px; margin:4px 3px; vertical-align:top; text-align:center;
+/* TOP 区：Explorer 同款，每行 3 枚、左对齐 */
+.pf-topgrid {{text-align:left; padding:2px 0 6px; line-height:0;}}
+.pf-topcell {{display:inline-block; width:32%; height:128px; margin:2px 1% 2px 0;
+             vertical-align:top; text-align:center;
              background-repeat:no-repeat; background-position:center top; background-size:contain;
-             padding:6px 0 4px;}}
-.pf-topimg {{height:88px;}}
-.pf-topnum {{color:#ffffff; font-size:22px; line-height:26px; font-weight:900;
-            text-shadow:0 2px 0 #0d2138;}}
-.pf-col.left {{width:440px;}}
-.pf-medal {{width:76px; margin:4px 1px;}}
+             line-height:20px;}}
+.pf-topimg {{display:block; height:108px; max-width:120px; margin:4px auto 0; object-fit:contain;}}
+.pf-topnum {{color:#ffffff; font-size:20px; line-height:24px; font-weight:400;
+            text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,
+                        1px 1px 0 #000,-1px -1px 0 #000;}}
+/* 猴塔/模范/技能数量：压在图标右下角（参考 Explorer 奖章） */
+/* 英雄/猴塔数字：方框正好右下角 */
+.pf-topbadge {{ position:absolute; right:2px; bottom:2px; z-index:6;
+              color:#ffffff; font-size:26px; line-height:26px; font-weight:400;
+              font-family: 'Luckiest Guy', Arial, sans-serif;
+              text-shadow:2px 0 0 #000,-2px 0 0 #000,0 2px 0 #000,0 -2px 0 #000,1.5px 1.5px 0 #000,-1.5px 1.5px 0 #000,1.5px -1.5px 0 #000,-1.5px -1.5px 0 #000,1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000,2px 1px 0 #000,2px -1px 0 #000,-2px 1px 0 #000,-2px -1px 0 #000,0 3px 0 #000; }}
+.pf-topcell.has-frame {{ position:relative; }}
+.pf-topcell.has-frame .pf-topimg {{ margin-bottom:0; }}
+.pf-col.left {{ width: 49%; }}
 </style></head><body><div class="pf-page">{body}</div></body></html>"""
 
 
@@ -240,6 +296,8 @@ def player_oak_html(col):
     p = col["p"]
     sv = col.get("save") or {}
     public = p
+    # 排行榜点名等精简档案：只留等级图标，去掉经验条/无数据货币/SHOW ALL
+    compact = bool(col.get("lb_rank") or col.get("compact_profile"))
 
     parts = []
     # ---- 头部（横排：头像 | 名字+等级 | 粉丝+老兵） ----
@@ -251,46 +309,59 @@ def player_oak_html(col):
         bn = col.get("banner") or ""
     if bn and not _img_wide_enough(bn, 400):
         bn = ""
-    banner_div = ""
     av_html = (f"<img src='{util._esc(av)}'/>") if av else "<div class='pf-av-fallback'>?</div>"
-    lvl, lv_xp, lv_goal = _collect.profile_rank_info(sv)
-    vet, vet_xp, vet_goal = _collect.profile_veteran_info(sv)
+    # 无 OAK 存档时（排行榜点名 / 公开档案）用公开 rank 字段
+    if sv and (sv.get("xp") is not None or sv.get("veteranXp") is not None):
+        lvl, lv_xp, lv_goal = _collect.profile_rank_info(sv)
+        vet, vet_xp, vet_goal = _collect.profile_veteran_info(sv)
+        has_vet_xp = int(sv.get("veteranXp") or 0) > 0
+    else:
+        try:
+            lvl = int(public.get("rank") or 1)
+        except (TypeError, ValueError):
+            lvl = 1
+        lv_xp, lv_goal = None, None  # 无存档不画经验条
+        try:
+            vet = int(public.get("veteranRank") or 0)
+        except (TypeError, ValueError):
+            vet = 0
+        vet_xp, vet_goal = 0, 20000000
+        has_vet_xp = vet > 0
     _lvl_bg = _assets._site_asset_data_url("UI/LvlHolder.webp")
     _lvl_style = (f" style='background-image:url(&quot;{util._esc(_lvl_bg)}&quot;);'") if _lvl_bg else ""
     lvl_cell = f"<div class='pf-lvstar'{_lvl_style}><div class='pf-lvon'>{lvl}</div></div>"
-    if lv_xp is None:
-        lv_bar = ("<div class='pf-bar'><div class='pf-barfill lv' style='width:100%;'>"
-                  "Max Level</div></div>")
-    else:
-        pct = max(2, min(100, round(lv_xp * 100 / max(1, lv_goal))))
-        lv_bar = f"<div class='pf-bar'><div class='pf-barfill lv' style='width:{pct}%;'>{lv_xp:,}/{lv_goal:,}</div></div>"
     _vet_bg = _assets._site_asset_data_url("UI/LvlHolderVeteran.webp")
     _vet_style = (f" style='background-image:url(&quot;{util._esc(_vet_bg)}&quot;);'") if _vet_bg else ""
-    vet_row = ""
-    if int(sv.get("veteranXp") or 0) > 0:
-        pct = max(2, min(100, round(vet_xp * 100 / max(1, vet_goal))))
-        vet_row = (
-            "<div class='pf-lvrow'><div class='pf-lvstar'" + _vet_style + ">"
-            f"<div class='pf-lvon'>{vet}</div></div>"
-            + "<div class='pf-lvbar'><div class='pf-bar'>"
-              f"<div class='pf-barfill vet' style='width:{pct}%;'>{vet_xp:,}/{vet_goal:,}</div>"
-              "</div></div></div>")
+    # 老兵星：有等级就显示（公开 rank 有 veteranRank）
+    vet_cell = ""
+    if has_vet_xp or vet:
+        vet_cell = f"<div class='pf-lvstar pf-vetstar'{_vet_style}><div class='pf-lvon'>{vet}</div></div>"
+    bn_style = f" style='background-image:url(&quot;{util._esc(bn)}&quot;);'" if bn else ""
+    # 一排：头像 | 名字 | 等级 | 老兵 | 粉丝（参考 Explorer 玩家条）
     head = (
-        "<div class='pf-panel'>" + banner_div
-        + "<div class='pf-htab'><div class='pf-hav'>" + av_html + "</div>"
-        + "<div class='pf-hmid'>"
-        + "<div class='pf-name'>" + util._esc(str(p.get("displayName") or "").upper()) + "</div>"
-        + "<div class='pf-lvrow'>" + lvl_cell
-        + "<div class='pf-lvbar'>" + lv_bar + "</div></div>"
-        + "</div>"
-        + "<div class='pf-hright'>"
-        + "<div class='pf-fol'>FOLLOWERS</div>"
-        + "<div class='pf-foln'>" + util._esc(util.fmt_cn_num(p.get("followers"))) + "</div>"
-        + vet_row + "</div></div></div>")
+        f"<div class='pf-hstrip'{bn_style}>"
+        f"<div class='pf-hstrip-av'>{av_html}</div>"
+        f"<div class='pf-hstrip-name'>{util._esc(str(p.get('displayName') or '').upper())}</div>"
+        f"<div class='pf-hstrip-lvl'>{lvl_cell}</div>"
+        f"<div class='pf-hstrip-lvl'>{vet_cell}</div>"
+        f"<div class='pf-hstrip-fol'>"
+        f"<div class='pf-fol'>粉丝</div>"
+        f"<div class='pf-foln'>{util._esc(util.fmt_cn_num(p.get('followers')))}</div>"
+        f"</div></div>"
+    )
+    head_h = 110
+    if col.get("lb_rank"):
+        mode = util._esc(col.get("lb_variant_cn") or "")
+        parts.append("<div class='pf-panel' style='background:linear-gradient(180deg,#2f8fce,#1a5f96);"
+                     "border:2px solid #082f4f;text-align:center;padding:10px 12px;"
+                     "color:#ffffff;font-size:18px;font-weight:900;"
+                     "text-shadow:0 2px 0 #062a44;'>"
+                     f"排行榜第 {util._esc(col['lb_rank'])} 名"
+                     + (f" · {mode}" if mode else "") + "</div>")
+        head_h += 52
     parts.append(head)
-    head_h = 36 + 150 + 24 + 76 * (1 if int(sv.get("veteranXp") or 0) > 0 else 0)
 
-    # ---- 左列 QUICK STATS ----
+    # ---- 左列 快捷统计 ----
     quick = _collect.profile_quick_stats(sv, public)
     qrows = []
     for icon, text in quick:
@@ -299,7 +370,7 @@ def player_oak_html(col):
         qrows.append(
             "<div class='pf-qrow'><div class='pf-qicon'>" + img + "</div>"
             + "<div class='pf-qtxt'>" + util._esc(text) + "</div></div>")
-    left = ("<div class='pf-panel'><div class='pf-title'>QUICK STATS</div>"
+    left = ("<div class='pf-panel'><div class='pf-title'>快捷统计</div>"
             + "".join(qrows) + "</div>")
     left_h = 70 + len(qrows) * 54
 
@@ -313,13 +384,18 @@ def player_oak_html(col):
         return ("<div class='pf-curcell'>" + img
                 + "<span class='pf-curnum' style='color:" + color + ";'>" + num + "</span></div>")
 
-    cur = ("<div class='pf-panel' style='margin-top:14px;'>"
-           "<div class='pf-title'>CURRENCY &amp; MEDALS</div>"
-           "<div class='pf-cur'>"
-           + _cur(mm, "$" + _pf_num(sv.get("monkeyMoney")), "#bfff3c")
-           + _cur(kn, _pf_num(sv.get("knowledgePoints")), "#d48aff")
-           + _cur(tr, _pf_num(sv.get("trophies")), "#ffc93c")
-           + "</div>")
+    cur = ""
+    if compact and not sv:
+        cur = ("<div class='pf-panel' style='margin-top:14px;'>"
+               "<div class='pf-title'>奖章</div>")
+    else:
+        cur = ("<div class='pf-panel' style='margin-top:14px;'>"
+               "<div class='pf-title'>货币与奖章</div>"
+               "<div class='pf-cur'>"
+               + _cur(mm, ("$" + _pf_num(sv.get("monkeyMoney"))), "#bfff3c")
+               + _cur(kn, _pf_num(sv.get("knowledgePoints")), "#d48aff")
+               + _cur(tr, _pf_num(sv.get("trophies")), "#ffc93c")
+               + "</div>")
     medals = _collect.profile_medals(public)
     med_cells = []
     for icon, n in medals:
@@ -330,7 +406,7 @@ def player_oak_html(col):
     cur += "<div class='pf-medals'>" + "".join(med_cells) + "</div></div>"
     left += cur
     med_rows = max(1, -(-len(med_cells) // 5))
-    left_h += 80 + 100 + 64 + med_rows * 84
+    left_h += (64 + med_rows * 84) if (compact and not sv) else (80 + 100 + 64 + med_rows * 84)
 
     # ---- 左列 TOP 区 ----
     tops = _collect.profile_tops(public)
@@ -338,15 +414,22 @@ def player_oak_html(col):
     def _topcell(bg, img, num):
         style = (f" style='background-image:url(&quot;{util._esc(bg)}&quot;);'") if bg else ""
         pic = (f"<img class='pf-topimg' src='{util._esc(img)}'/>") if img else ""
-        return ("<div class='pf-topcell'" + style + ">" + pic
-                + "<div class='pf-topnum'>" + f"{num:,}" + "</div></div>")
+        # 有容器底时数字放框内左上角角标（Explorer towerTopLeft）；英雄无容器则放图下
+        # 数字一律压在图标右下角（与奖章一致）
+        return (f"<div class='pf-topcell has-frame'" + style + ">" + pic
+                + f"<div class='pf-topbadge'>{num:,}</div></div>")
 
     def _topsec(title, cells, purple=False):
-        return ("<div class='pf-panel' style='margin-top:14px;'>"
-                "<div class='pf-ribbon{}'><span>{}</span></div>"
-                "<div class='pf-showall'>SHOW ALL</div>"
-                "<div class='pf-topgrid'>".format(" p" if purple else "", title)
-                + "".join(cells) + "</div></div>")
+        # 注意：format 必须作用在完整字符串上；中途 + show 会让 .format 只吃到最后一段
+        show = "" if compact else "<div class='pf-showall'>SHOW ALL</div>"
+        cls = " p" if purple else ""
+        return (
+            f"<div class='pf-panel' style='margin-top:14px;padding-left:10px;padding-right:10px;'>"
+            f"<div class='pf-ribbon{cls}'><span>{util._esc(title)}</span></div>"
+            f"{show}"
+            f"<div class='pf-topgrid'>"
+            + "".join(cells) + "</div></div>"
+        )
 
     def _tower_bg():
         return _assets._site_asset_data_url("UI/InstaTowersContainer.webp")
@@ -358,7 +441,9 @@ def player_oak_html(col):
             u = _assets._game_asset_data_url(f"000-{n}.webp")
         return u
 
-    hcells = [(_topcell("", _assets._site_asset_data_url(f"Portrait/{h}Portrait.webp"), n))
+    # 英雄也带外框（Explorer 同款金色容器），避免只有立绘显得“框不见了”
+    _hero_bg = _assets._site_asset_data_url("UI/InstaTowersContainerGold.webp")
+    hcells = [(_topcell(_hero_bg, _assets._site_asset_data_url(f"Portrait/{h}Portrait.webp"), n))
               for h, n in tops["heroes"][:3]]
     tcells = [(_topcell(_tower_bg(), _tower_img(t), n)) for t, n in tops["towers"][:3]
               if _tower_img(t)]
@@ -370,13 +455,13 @@ def player_oak_html(col):
     yb = _assets._site_asset_data_url("UI/YellowBtn.webp")
     acells = [(_topcell(yb, _assets._site_asset_data_url(f"AbilityIcon/{ic}.webp"), n))
               for _name, ic, n in tops["abilities"][:3]]
-    left += _topsec("TOP HEROES", hcells)
-    left += _topsec("TOP TOWERS", tcells)
-    left += _topsec("TOP PARAGONS", pcells, purple=True)
-    left += _topsec("TOP ABILITIES", acells)
-    left_h += 4 * (110 + 150)
+    left += _topsec("热门英雄", hcells)
+    left += _topsec("热门猴塔", tcells)
+    left += _topsec("热门模范", pcells, purple=True)
+    left += _topsec("热门技能", acells)
+    left_h += 4 * 260
 
-    # ---- 右列 MAIN GAME STATS ----
+    # ---- 右列 主要游戏数据 ----
     gp = public.get("gameplay") or {}
     bp = public.get("bloonsPopped") or {}
     st = public.get("stats") or {}
@@ -437,28 +522,51 @@ def player_oak_html(col):
         return ("<div class='pf-mrow'><div class='pf-mlab'>" + util._esc(k) + "</div>"
                 + "<div class='pf-mval'>" + v + "</div></div>")
 
-    right = ("<div class='pf-panel'><div class='pf-title'>MAIN GAME STATS</div>"
+    right = ("<div class='pf-panel'><div class='pf-title'>主要游戏数据</div>"
              + "".join(_mrow(k, v) for k, v in main_rows) + "</div>"
              + "<div class='pf-panel' style='margin-top:14px;'>"
-               "<div class='pf-title'>API Exclusive Stats</div>"
+               "<div class='pf-title'>API 专属数据</div>"
              + "".join(_mrow(k, v) for k, v in api_rows) + "</div>")
     right_h = 70 + len(main_rows) * 34 + 14 + 64 + len(api_rows) * 34
     rogue = _collect.profile_rogue(sv)
     if rogue:
         right += ("<div class='pf-panel' style='margin-top:14px;'>"
-                  "<div class='pf-title'>ROGUE LEGENDS STATS</div>"
+                  "<div class='pf-title'>Rogue Legends 数据</div>"
                   + "".join(_mrow(k, _pf_num(v)) for k, v in rogue) + "</div>")
         right_h += 14 + 64 + len(rogue) * 34
     frontier = _collect.profile_frontier(sv)
     if frontier:
         right += ("<div class='pf-panel' style='margin-top:14px;'>"
-                  "<div class='pf-title'>FRONTIER LEGENDS STATS</div>"
+                  "<div class='pf-title'>Frontier Legends 数据</div>"
                   "<div class='pf-sub' style='text-align:center;'>数据为全存档累计</div>"
                   + "".join(_mrow(k, _pf_num(v)) for k, v in frontier) + "</div>")
         right_h += 14 + 64 + 30 + len(frontier) * 34
-    parts.append(
-        "<div class='pf-cols'><div class='pf-col left'>" + left + "</div>"
-        "<div class='pf-col right'>" + right + "</div></div>")
+    # 左右栏底边对齐：把高度差摊到较矮一侧各面板的 padding-bottom
+    # 左右底边对齐：高度差摊到较矮栏各面板；差很小时也补 6px 防止视觉错位
+    def _pad_side(html: str, first_title: str, need: int) -> str:
+        n = max(1, html.count("pf-panel"))
+        extra = max(4, min(28, int(need / n)))
+        html = html.replace(
+            f"<div class='pf-panel'><div class='pf-title'>{first_title}</div>",
+            f"<div class='pf-panel' style='padding-bottom:{extra}px;'><div class='pf-title'>{first_title}</div>",
+            1,
+        )
+        html = html.replace(
+            "style='margin-top:14px;'",
+            f"style='margin-top:14px;padding-bottom:{extra}px;'",
+        )
+        return html
 
-    total_h = 44 + head_h + max(left_h, right_h) + 18 + 30
+    if left_h >= right_h:
+        right = _pad_side(right, "主要游戏数据", left_h - right_h)
+    else:
+        left = _pad_side(left, "快捷统计", right_h - left_h)
+    col_h = max(left_h, right_h)
+    parts.append(
+        "<div class='pf-cols'>"
+        f"<div class='pf-col left' style='min-height:{col_h}px;'>{left}</div>"
+        f"<div class='pf-col right' style='min-height:{col_h}px;'>{right}</div>"
+        "</div>")
+
+    total_h = 44 + head_h + max(left_h, right_h) + 80 + 360
     return _profile_shell("".join(parts), total_h)
