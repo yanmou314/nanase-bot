@@ -349,6 +349,306 @@ def mod_body_est(modifier_html: str) -> int:
     n = modifier_html.count("race-mod-item")
     return 18 + max(1, -(-n // 2)) * 34 if n else 40
 
+def _fmt_range_full(ev: dict) -> str:
+    """活动起止时间（到秒，上海时区），与「BOSS情报」参考图一致。"""
+    from datetime import datetime
+
+    from ..util import _SH
+    s = datetime.fromtimestamp(int(ev.get("start") or 0) / 1000, tz=_SH)
+    e = datetime.fromtimestamp(int(ev.get("end") or 0) / 1000, tz=_SH)
+    return (
+        f"{s.year}/{s.month:02d}/{s.day:02d} {s.hour:02d}:{s.minute:02d}:{s.second:02d}"
+        f" ~ "
+        f"{e.year}/{e.month:02d}/{e.day:02d} {e.hour:02d}:{e.minute:02d}:{e.second:02d}"
+    )
+
+
+def _boss_dual_rule_chips(meta: dict) -> str:
+    """规则调节 chips：限制塔数 / 限制模范 / MOAB速度 / BOSS速度 / BOSS血量。"""
+    max_towers = int(meta.get("maxTowers") or 0)
+    towers_cap = "无限制" if max_towers >= 9999 or max_towers <= 0 else f"{max_towers:,}"
+    paragon_limit = int(meta.get("maxParagons") or 0)
+    mods = meta.get("_bloonModifiers") or {}
+
+    def chip(icon: str, fallback: str, label: str, value: str) -> str:
+        img_html = common._race_ui_img(icon, fallback, "bdual-rule-icon")
+        return (
+            f"<div class='bdual-rule-chip'>{img_html}{util._esc(label)} "
+            f"<b>{util._esc(value)}</b></div>"
+        )
+
+    chips = [
+        chip("monkey-cap.png", "🐒", "限制塔数", towers_cap),
+        chip("paragon.png", "◉", "限制模范", str(paragon_limit)),
+    ]
+    moab_spd = mods.get("moabSpeedMultiplier")
+    boss_spd = mods.get("bossSpeedMultiplier")
+    boss_hp = (mods.get("healthMultipliers") or {}).get("boss")
+
+    def fmt_mult(v) -> str | None:
+        try:
+            n = float(v)
+        except (TypeError, ValueError):
+            return None
+        if abs(n - 1.0) < 1e-9:
+            return None
+        return f"x{n:g}"
+
+    v = fmt_mult(moab_spd)
+    if v:
+        chips.append(chip("FasterMoabIcon.png", "🚀", "MOAB速度", v))
+    v = fmt_mult(boss_spd)
+    if v:
+        chips.append(chip("FasterBossIcon.png", "⚡", "BOSS速度", v))
+    v = fmt_mult(boss_hp)
+    if v:
+        chips.append(chip("BossBoostIcon.png", "♥", "BOSS血量", v))
+    # 自定义回合等额外规则不进 chips，仍由网格与兼容文本覆盖
+    return "<div class='bdual-rule-chips'>" + "".join(chips) + "</div>"
+
+
+def _difficulty_ui_icon(diff_raw: str) -> str:
+    """难度 → 地图难度按钮图标（Beginner/Intermediate/Advanced/Expert）。"""
+    key = str(diff_raw or "").strip().lower()
+    mapping = {
+        "beginner": "MapBeginnerBtn.png",
+        "intermediate": "MapIntermediateBtn.png",
+        "advanced": "MapAdvancedBtn.png",
+        "expert": "MapExpertBtn.png",
+        "easy": "MapBeginnerBtn.png",
+        "medium": "MapIntermediateBtn.png",
+        "hard": "MapAdvancedBtn.png",
+    }
+    return mapping.get(key, "")
+
+
+def _boss_dual_meta_chips(variant_col: dict) -> str:
+    meta = variant_col["meta"]
+    diff_raw = str(meta.get("difficulty") or "")
+    diff = i18n.cn(diff_raw, i18n.DIFFICULTY_CN)
+    mode = i18n.cn(meta.get("mode"), i18n.MODE_CN)
+    scoring = variant_col.get("scoring_cn") or ""
+    start_r = int(meta.get("startRound") or 0)
+    end_r = int(meta.get("endRound") or 0)
+    cash = int(meta.get("startingCash") or 0)
+    lives = int(meta.get("lives") or 0)
+
+    def chip(icon: str, fallback: str, label: str, value: str) -> str:
+        icon_html = common._race_ui_img(icon, fallback, "bdual-chip-icon") if icon else ""
+        return (
+            f"<span class='bdual-chip'>{icon_html}"
+            f"{util._esc(label)} <b>{util._esc(value)}</b></span>"
+        )
+
+    diff_icon = _difficulty_ui_icon(diff_raw)
+    row1 = (
+        "<div class='bdual-chip-row'>"
+        + chip(diff_icon, "★", "难度", diff or "?")
+        + chip("RaceIcon.png", "🏁", "模式", mode or "?")
+        + (chip("fastest-time.png", "⏱", "排位", scoring) if scoring else "")
+        + chip("start-round.png", "▶", "回合", f"{start_r}–{end_r}")
+        + "</div>"
+    )
+    row2 = (
+        "<div class='bdual-chip-row'>"
+        + chip("cash.png", "🪙", "资金", f"{cash:,}")
+        + chip("heart.png", "❤", "生命", f"{lives:,}")
+        + "</div>"
+    )
+    return row1 + row2
+
+
+def _boss_dual_monkey_grid(meta: dict, cols: int = 5) -> str:
+    """可用猴子网格：固定 cols 列表格，强制从左到右、从上到下。"""
+    towers = meta.get("_towers")
+    cells: list[str] = []
+    if _heroes_all_available(towers):
+        cells.append(_all_heroes_tile())
+        towers = [
+            t for t in towers or []
+            if not (isinstance(t, dict) and bool(t.get("isHero"))
+                    and str(t.get("tower") or "").strip() != "ChosenPrimaryHero")
+        ]
+    cells.extend(_race_monkey_cell(tower) for tower in _race_visible_towers(towers))
+    if not cells:
+        return "<div class='bdual-mk-grid'><div class='race-mk-fallback'>无</div></div>"
+    rows_html = []
+    for start in range(0, len(cells), cols):
+        chunk = cells[start:start + cols]
+        # 不足一行补空单元，保证表格边框对齐
+        while len(chunk) < cols:
+            chunk.append("<td class='bdual-mk-empty'></td>")
+        tds = []
+        for cell in chunk:
+            # _race_monkey_cell 返回的是 wrap div；塞进 td 时保留结构
+            tds.append(f"<td class='bdual-mk-cell'>{cell}</td>")
+        rows_html.append("<tr>" + "".join(tds) + "</tr>")
+    return "<table class='bdual-mk-grid'>" + "".join(rows_html) + "</table>"
+
+
+def _boss_dual_tile_count(meta: dict, cols: int = 5) -> int:
+    """网格行数：只数塔，不拼 HTML（高度估算避免二次生成大图 data URL）。"""
+    towers = meta.get("_towers")
+    if _heroes_all_available(towers):
+        rest = [
+            t for t in towers or []
+            if not (isinstance(t, dict) and bool(t.get("isHero"))
+                    and str(t.get("tower") or "").strip() != "ChosenPrimaryHero")
+        ]
+        n = 1 + len(_race_visible_towers(rest))
+    else:
+        n = len(_race_visible_towers(towers))
+    return max(1, -(-max(n, 1) // cols))
+
+
+def _boss_dual_rule_chip_count(meta: dict) -> int:
+    """规则 chip 数量：与 _boss_dual_rule_chips 同口径，不拼 HTML。"""
+    mods = meta.get("_bloonModifiers") or {}
+    n = 2  # 限制塔数 / 限制模范
+
+    def changed(v) -> bool:
+        try:
+            return abs(float(v) - 1.0) >= 1e-9
+        except (TypeError, ValueError):
+            return False
+
+    if changed(mods.get("moabSpeedMultiplier")):
+        n += 1
+    if changed(mods.get("bossSpeedMultiplier")):
+        n += 1
+    if changed((mods.get("healthMultipliers") or {}).get("boss")):
+        n += 1
+    return n
+
+
+def _boss_dual_panel_h(v: dict) -> int:
+    meta_v = v.get("meta") or {}
+    grid_rows = _boss_dual_tile_count(meta_v)
+    chips = _boss_dual_rule_chip_count(meta_v)
+    # head + meta 两行 + 规则标题/chips（按每行约 3 个估换行）+ 可用猴子标题 + 网格
+    chip_rows = max(1, -(-chips // 3))
+    return 42 + 78 + 36 + 34 + chip_rows * 36 + 8 + grid_rows * 120 + 8
+
+
+def _boss_dual_panel(variant_col: dict) -> str:
+    variant = variant_col["variant"]
+    label = variant_col["label"]
+    meta = variant_col["meta"]
+    head_cls = "elite" if variant == "elite" else "standard"
+    grid_html = _boss_dual_monkey_grid(meta)
+    extras = []
+    if _custom_round_sets(meta):
+        extras.append("自定义回合")
+    bans = [label_b for key, label_b in i18n.FLAG_LABELS if meta.get(key)]
+    if bans:
+        extras.append("禁用：" + "、".join(bans))
+    extras_html = (
+        f"<div class='bdual-extras'>{util._esc('；'.join(extras))}</div>" if extras else ""
+    )
+    return (
+        "<div class='bdual-panel'>"
+        f"<div class='bdual-panel-head {head_cls}'>{util._esc(label)}模式</div>"
+        "<div class='bdual-panel-body'>"
+        f"{_boss_dual_meta_chips(variant_col)}"
+        "<div class='bdual-sec-label'>规则调节</div>"
+        f"{_boss_dual_rule_chips(meta)}"
+        f"{extras_html}"
+        "<div class='bdual-sec-label'>可用猴子</div>"
+        f"{grid_html}"
+        "</div></div>"
+    )
+
+
+def boss_dual_html(col: dict) -> str:
+    """Boss 标准+精英并排合卡：共享标题/横幅/地图条，左右双栏规则。"""
+    if col.get("empty"):
+        body = f"<div class='bdual-empty'>{util._esc(col['empty'])}</div>"
+        return common._boss_dual_shell(body, 320)
+
+    ev = col.get("ev") or {}
+    variants = col.get("variants") or []
+    primary = next(
+        (v for v in variants if v.get("variant") == "standard"),
+        variants[0] if variants else {},
+    )
+    meta = primary.get("meta") or {}
+    boss_cn_name = i18n.boss_cn(ev.get("bossType") or "")
+    raw_name = (ev.get("name") or meta.get("name") or "").strip()
+    title = f"BOSS情报 - {raw_name or boss_cn_name or 'Boss'}"
+    short_id = str(ev.get("id") or "")
+    if "_" in short_id:
+        short_id = short_id.split("_", 1)[1]
+    time_range = _fmt_range_full(ev)
+    subtitle = f"ID: {util._esc(short_id)} | {util._esc(time_range)}" if short_id else util._esc(time_range)
+
+    side_img = col.get("side_img") or ""
+    banner_inner = (
+        f"<img src='{util._esc(side_img)}' alt='{util._esc(boss_cn_name)}'/>"
+        if side_img
+        else f"<div class='bdual-banner-fallback'>{util._esc(boss_cn_name or 'BOSS')}</div>"
+    )
+    banner = (
+        "<div class='bdual-banner'>"
+        f"{banner_inner}"
+        "</div>"
+    )
+
+    map_cn_name = i18n.map_cn(str(meta.get("map") or "").strip())
+    map_en = str(meta.get("map") or "").strip()
+    map_title = f"{map_cn_name} ({map_en})" if map_en and map_cn_name != map_en else (map_cn_name or map_en or "?")
+    map_img = col.get("map_img") or ""
+    map_thumb = (
+        f"<img src='{util._esc(map_img)}' alt='{util._esc(map_title)}'/>"
+        if map_img
+        else "<div class='bdual-map-thumb-fallback'>🗺</div>"
+    )
+    n_std = int(ev.get("totalScores_standard") or 0)
+    n_elite = int(ev.get("totalScores_elite") or 0)
+    mapbar = (
+        "<div class='bdual-mapbar'>"
+        f"<div class='bdual-map-thumb'>{map_thumb}</div>"
+        "<div class='bdual-map-copy'>"
+        f"<div class='bdual-map-name'>{util._esc(map_title)}</div>"
+        f"<div class='bdual-map-time'>{util._esc(time_range)}</div>"
+        "</div>"
+        "<div class='bdual-map-counts'>"
+        f"<span class='bdual-count-pill'>标准参与 {n_std:,}</span>"
+        f"<span class='bdual-count-pill'>精英参与 {n_elite:,}</span>"
+        "</div></div>"
+    )
+
+    std_html = ""
+    eli_html = ""
+    for v in variants:
+        panel = _boss_dual_panel(v)
+        if v.get("variant") == "standard":
+            std_html = f"<div class='bdual-col std'>{panel}</div>"
+        else:
+            eli_html = f"<div class='bdual-col eli'>{panel}</div>"
+    if not std_html:
+        std_html = "<div class='bdual-col std'><div class='bdual-empty'>暂无标准规则</div></div>"
+    if not eli_html:
+        eli_html = "<div class='bdual-col eli'><div class='bdual-empty'>暂无精英规则</div></div>"
+
+    body = (
+        "<div class='bdual-titlebar'>"
+        f"<div class='bdual-title'>{util._esc(title)}</div>"
+        f"<div class='bdual-subtitle'>{subtitle}</div>"
+        "</div>"
+        f"{banner}{mapbar}"
+        f"<div class='bdual-cols'>{std_html}{eli_html}</div>"
+    )
+    stale_note = col.get("stale_note") or ""
+    if stale_note:
+        body += f"<div class='bdual-note'>{util._esc(stale_note)}</div>"
+
+    # 画布高度：轻量计数，避免为估高二次生成猴子网格 HTML
+    extras_h = 22  # 可能的自定义回合/禁用行
+    col_h = max((_boss_dual_panel_h(v) + extras_h for v in variants), default=420)
+    frame_h = 10 + 62 + 8 + 268 + 8 + 104 + 8 + col_h + 8
+    return common._boss_dual_shell(body, frame_h)
+
+
 def rules_html(col: dict) -> str:
     if col.get("empty"):
         body = ("<div class='race-topbar'></div>"
@@ -360,7 +660,11 @@ def rules_html(col: dict) -> str:
     mode = i18n.cn(meta.get("mode"), i18n.MODE_CN)
     scoring = col.get("scoring_cn") or ""
     prefix = col.get("prefix") or ""
-    is_daily = prefix.startswith("每日")
+    kind_label = str(col.get("kind_label") or "")
+    is_coop = kind_label.startswith("Co-op") or prefix.startswith("Co-op")
+    # 每日/Co-op 共用每日系版式（日历徽章 + 全塔网格）；Co-op 不以「每日」作前缀
+    is_daily = prefix.startswith("每日") or is_coop
+    # 与每日一致：期号/类型放在标题下方副标题，不挤进大标题
     subtitle_parts = [prefix, diff, mode, scoring]
     subtitle = " - ".join(part for part in subtitle_parts if part)
     side_img = col.get("side_img") or ""
@@ -407,7 +711,14 @@ def rules_html(col: dict) -> str:
     stat_left = "".join(left_stats)
     stat_right = "".join(right_stats)
     emblem = _race_emblem(ev, side_img, "📅" if is_daily else "🏆", is_daily=is_daily)
-    title = _race_title(name, ev, side_img)
+    # 每日/Co-op 大标题用中文地图名（与游戏内一致）；类型/期号/作者在副标题
+    map_cn_name = i18n.map_cn(str(meta.get("map") or "").strip())
+    if is_coop or prefix.startswith("每日"):
+        title = map_cn_name or ("协作挑战" if is_coop else "每日挑战")
+        if name and name not in subtitle:
+            subtitle = f"{subtitle} · {name}" if subtitle else name
+    else:
+        title = _race_title(name, ev, side_img)
     time_line = _race_time_line(ev)
     time_html = f"<div class='race-time'>{util._esc(time_line)}</div>" if time_line else ""
     body = ("<div class='race-topbar'><div class='race-head'>"
@@ -416,7 +727,7 @@ def rules_html(col: dict) -> str:
             f"<div class='race-subtitle'>{util._esc(subtitle)}</div>"
             f"{time_html}</div>"
             "</div></div>")
-    map_alt = i18n.map_cn(str(meta.get("map") or "").strip()) or "map"
+    map_alt = map_cn_name or "map"
     map_img_html = (f"<img src='{util._esc(map_img)}' alt='{util._esc(map_alt)}'/>" if map_img
                     else "<div class='race-map-empty'>🗺</div>")
     if is_daily or str(meta.get('id') or '').startswith('rot'):

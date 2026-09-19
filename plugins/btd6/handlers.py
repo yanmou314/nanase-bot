@@ -29,28 +29,39 @@ TEAM_WORDS = {"team", "战队", "团队"}
 
 def parse_kind(tokens: list[str]) -> str | None:
     for t in tokens:
-        k = t.lower()
-        if k in RUSH_WORDS:
-            return "rush"
-        if k in RACE_WORDS:
-            return "race"
-        if k in BOSS_WORDS:
-            return "boss"
-        if k in CT_WORDS:
-            return "ct"
+        k = re.sub(r"\d+$", "", t.lower())
+        for words, kind in (
+            (RUSH_WORDS, "rush"), (RACE_WORDS, "race"),
+            (BOSS_WORDS, "boss"), (CT_WORDS, "ct"),
+        ):
+            if k in words:
+                return kind
+            # 支持 boss精英3 / 精英boss 连写
+            if any(k.startswith(w) or k.endswith(w) for w in words):
+                return kind
     return None
+
+
+def _split_variant_digit(token: str) -> tuple[str, str]:
+    """把「精英3 / 普通5 / elite3」拆成 (词条, 数字)。"""
+    m = re.fullmatch(r"([A-Za-z\u4e00-\u9fff]+)(\d+)", token.strip())
+    if m:
+        return m.group(1).lower(), m.group(2)
+    return token.lower(), ""
 
 
 def parse_variant(tokens: list[str], default: str) -> str:
     for t in tokens:
-        k = t.lower()
-        if k in ELITE_WORDS:
+        word, _num = _split_variant_digit(t)
+        low = t.lower()
+        # 精英3 / boss精英3：子串包含即可
+        if any(w in low for w in ELITE_WORDS):
             return "elite"
-        if k in STANDARD_WORDS:
+        if any(w in low for w in STANDARD_WORDS):
             return "standard"
-        if k in TEAM_WORDS:
+        if any(w in low for w in TEAM_WORDS):
             return "team"
-        if k in PLAYER_WORDS:
+        if any(w in low for w in PLAYER_WORDS):
             return "player"
     return default
 
@@ -90,11 +101,13 @@ def parse_lb_rank(tokens: list[str]) -> int | None:
             continue
         if re.fullmatch(r"[pP]\d+", t):
             continue
-        if t.isdigit():
+        word, num = _split_variant_digit(t)
+        raw = num if num else t
+        if raw.isdigit():
             if i > 0 and tokens[i - 1].lower() == "p":
                 continue  # P 后的数字已作为页码
             try:
-                n = int(t)
+                n = int(raw)
                 if 1 <= n <= nkapi.LB_MAX_RANK:
                     return n
             except ValueError:
@@ -110,7 +123,7 @@ events_cmd = on_command("btd6活动", priority=5, block=True)
 ct_cmd = on_command("btd6ct", priority=5, block=True)
 rush_cmd = on_command("btd6rush", priority=5, block=True)
 collect_cmd = on_command("btd6收集", priority=5, block=True)
-lb_cmd = on_command("btd6排行", priority=5, block=True)
+lb_cmd = on_command("btd6排行", priority=4, block=True)
 rules_cmd = on_command("btd6竞速", priority=5, block=True)
 boss_cmd = on_command("btd6boss", priority=5, block=True)
 maps_cmd = on_command("btd6地图", priority=5, block=True)
@@ -261,7 +274,7 @@ async def handle_leaderboard(event: MessageEvent):
     if rank is not None:
         rank = max(1, min(rank, nkapi.LB_MAX_RANK))
         has_variant_word = any(
-            t.lower() in ELITE_WORDS or t.lower() in STANDARD_WORDS or t.lower() in PLAYER_WORDS or t.lower() in TEAM_WORDS
+            any(w in t.lower() for w in ELITE_WORDS | STANDARD_WORDS | PLAYER_WORDS | TEAM_WORDS)
             for t in tokens
         )
         # Boss/CT 未显式指定子榜时，双榜各取一名玩家一起返回
@@ -280,10 +293,16 @@ async def handle_leaderboard(event: MessageEvent):
                     col = await collect.collect_player(pid)
                     if col.get("empty"):
                         continue
+                    vcn = "精英模式" if variant == "elite" else (
+                        "标准模式" if variant == "standard" else (
+                            "战队榜" if variant == "team" else "个人榜"))
+                    col = dict(col)
+                    col["lb_rank"] = rank
+                    col["lb_variant_cn"] = vcn
                     cards.append((
                         f"btd6pl_rank_{variant}",
-                        lambda c=col: cards_mod.player_html(c),
-                        lambda c=col, v=variant: f"第 {rank} 名（{v}）· " + textfmt.player_text(c),
+                        lambda c=col: cards_mod.player_oak_html(c),
+                        lambda c=col, v=vcn: f"第 {rank} 名（{v}）· " + textfmt.player_text(c),
                     ))
                 except Exception:
                     _logger.exception("BTD6 排名玩家获取失败 kind=%s variant=%s rank=%s", kind, variant, rank)
@@ -310,6 +329,13 @@ async def handle_leaderboard(event: MessageEvent):
             col = await collect.collect_player(pid)
             if col.get("empty"):
                 await lb_cmd.finish(col["empty"])
+            vcn = "精英模式" if variant == "elite" else (
+                "标准模式" if variant == "standard" else (
+                    "战队榜" if variant == "team" else (
+                        "个人榜" if variant == "player" else str(variant or ""))))
+            col = dict(col)
+            col["lb_rank"] = rank
+            col["lb_variant_cn"] = vcn
         except Exception as e:
             # 已 finish 的异常直接抛出
             from nonebot.exception import FinishedException
@@ -318,7 +344,7 @@ async def handle_leaderboard(event: MessageEvent):
             nkapi._release_cooldown(event, "leaderboard")
             _logger.exception("BTD6 排名玩家获取失败 kind=%s variant=%s rank=%s", kind, variant, rank)
             await lb_cmd.finish("⚠️ 获取该名次玩家信息失败，请稍后再试")
-        await cards_mod._send_card(lb_cmd, "btd6pl_rank", lambda: cards_mod.player_html(col), lambda: f"第 {rank} 名 · " + textfmt.player_text(col))
+        await cards_mod._send_card(lb_cmd, "btd6pl_rank", lambda: cards_mod.player_oak_html(col), lambda: f"第 {rank} 名 · " + textfmt.player_text(col))
         return
 
     # 分页查询：P2 / P 2 / p2
@@ -394,29 +420,27 @@ async def handle_leaderboard(event: MessageEvent):
 
 
 async def _boss_rule_cards(cmd, event) -> None:
-    """Boss 规则：标准+精英双卡一起发（供 .btd6boss 使用）。"""
-    cards = []
-    for variant in ("standard", "elite"):
-        try:
-            c = await collect.collect_rules("boss", variant)
-            if not c.get("empty"):
-                cards.append((
-                    f"btd6rule_{variant}",
-                    lambda c=c: cards_mod.rules_html(c),
-                    lambda c=c: textfmt.rules_text(c),
-                ))
-        except Exception:
-            _logger.exception("BTD6 规则获取失败 kind=boss variant=%s", variant)
-    if not cards:
-        # 双版本全部失败：回滚冷却，允许用户立即重试
+    """Boss 规则：标准+精英并排合卡（供 .btd6boss 使用）。"""
+    try:
+        c = await collect.collect_boss_dual()
+    except Exception:
         nkapi._release_cooldown(event, "rules")
+        _logger.exception("BTD6 Boss 规则获取失败")
         await cmd.finish("⚠️ 获取 BTD6 规则失败，请稍后再试")
-    await cards_mod._finish_multi_cards(cmd, cards)
+        return
+    if not c or c.get("empty"):
+        nkapi._release_cooldown(event, "rules")
+        await cmd.finish((c or {}).get("empty") or "⚠️ 获取 BTD6 规则失败，请稍后再试")
+    await cards_mod._send_card(
+        cmd, "btd6rule_dual",
+        lambda: cards_mod.boss_dual_html(c),
+        lambda: textfmt.boss_dual_text(c),
+    )
 
 
 @boss_cmd.handle()
 async def handle_boss(event: MessageEvent):
-    """Boss 规则：标准+精英双卡。"""
+    """Boss 规则：标准+精英并排合卡。"""
     await nkapi._enforce_cooldown(boss_cmd, event, "rules")
     await _boss_rule_cards(boss_cmd, event)
 
@@ -486,31 +510,16 @@ async def handle_odyssey(event: MessageEvent):
         await odyssey_cmd.finish("⚠️ 获取 BTD6 远征信息失败，请稍后再试")
     if col.get("empty"):
         await odyssey_cmd.finish(col["empty"])
-    # 统一三图尺寸：QQ 预览按最大边等比缩放，像素高度不同会导致显示宽度视觉不一；取三难度最大高度作为统一画布高度
+    # 一张合卡：三难度 + 可用单位 + 岛屿规则
     try:
-        _unified_h = max(cards_mod._odyssey_card_height((col["diffs"].get(_d) or {}).get("meta"),
-                                              len((col["diffs"].get(_d) or {}).get("maps") or []))
-                         for _d, _lab in i18n._ODYSSEY_DIFFS)
-        for _d, _ in i18n._ODYSSEY_DIFFS:
-            if _d in col["diffs"]:
-                col["diffs"][_d]["_unified_h"] = _unified_h
+        t0 = time.monotonic()
+        path = await cards_mod._render_card("btd6ody", lambda: cards_mod.odyssey_html(col))
+        path = await asyncio.to_thread(cards_mod.trim_odyssey_png, path)
+        _logger.info("BTD6 远征合卡渲染 %.2fs -> %s", time.monotonic() - t0, path)
     except Exception:
-        _logger.debug("BTD6 远征统一高度计算失败，使用各自高度", exc_info=True)
-    # 流式渲染：渲染一张立刻发送一张，避免三张全部渲染完才首图可见；单张 weasyprint 渲染约 1-3s，三张串行合计 3-9s，流式可让首图 1-3s 内到达。
-    for idx, (d, lab) in enumerate(i18n._ODYSSEY_DIFFS):
-        try:
-            t0 = time.monotonic()
-            path = await cards_mod._render_card("btd6ody", lambda d=d, lab=lab: cards_mod.odyssey_diff_html(col, d, lab))
-            _logger.info("BTD6 远征 %s 渲染 %.2fs -> %s", lab, time.monotonic() - t0, path)
-        except Exception:
-            _logger.warning("BTD6 远征卡片渲染失败，回退文本消息", exc_info=True)
-            # 只回退当前及之后难度的文本：已发出的图片不重复发一遍全文
-            remaining = [k for k, _ in i18n._ODYSSEY_DIFFS[idx:]]
-            await odyssey_cmd.finish(MessageSegment.text(textfmt.odyssey_text(col, only=remaining)))
-        if idx < len(i18n._ODYSSEY_DIFFS) - 1:
-            await odyssey_cmd.send(MessageSegment.image(Path(path).as_uri()))
-        else:
-            await odyssey_cmd.finish(MessageSegment.image(Path(path).as_uri()))
+        _logger.warning("BTD6 远征卡片渲染失败，回退文本消息", exc_info=True)
+        await odyssey_cmd.finish(MessageSegment.text(textfmt.odyssey_text(col)))
+    await odyssey_cmd.finish(MessageSegment.image(Path(path).as_uri()))
 
 
 @player_cmd.handle()
@@ -537,7 +546,7 @@ async def handle_player(event: MessageEvent):
         nkapi._release_cooldown(event, "player")
         _logger.exception("BTD6 玩家档案获取失败")
         await player_cmd.finish("⚠️ 获取 BTD6 玩家档案失败，请稍后再试")
-    await cards_mod._send_card(player_cmd, "btd6pl", lambda: cards_mod.player_html(col), lambda: textfmt.player_text(col))
+    await cards_mod._send_card(player_cmd, "btd6pl", lambda: cards_mod.player_oak_html(col), lambda: textfmt.player_text(col))
 
 
 @push_on_cmd.handle()

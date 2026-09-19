@@ -56,7 +56,7 @@ HELP_TEXT = """🐒 BTD6 情报站（气球塔防6）
 .btd6历史 [竞速|boss|领土|远征|每日] [数量] — 本地归档的历史活动（API 只保留近几期）
 .btd6预热 — 手动预热全部活动（仅主人）
 数据源：Ninja Kiwi 官方开放数据接口"""
-LB_USAGE = "用法：.btd6排行 竞赛|boss|领土|冲刺 [P页码|排名]\n例：.btd6排行 竞赛 — 前50\n.btd6排行 竞赛 P2 — 第2页\n.btd6排行 竞赛 7 — 第7名玩家档案\nboss 自动返回标准+精英双榜，领土 自动返回个人+战队双榜，冲刺暂无榜单"
+LB_USAGE = "用法：.btd6排行 竞赛|boss|领土 [P页码|排名] [标准|普通|精英]\n例：.btd6排行 boss — 前25\n.btd6排行 boss精英 — 精英前25\n.btd6排行 boss 3 — 第3名（标准+精英各一张玩家卡）\n.btd6排行 boss精英 3 / .btd6排行 boss精英3 — 仅精英第3名玩家档案\n.btd6排行 竞赛 7 — 竞赛第7名玩家档案"
 
 
 # ---------------- 常用名词翻译（全插件唯一规范表：大写驼峰主键，查找时归一化） ----------------
@@ -79,12 +79,47 @@ DIFFICULTY_CN = {
 MODE_CN = {
     "Standard": "标准", "Reverse": "反向", "Apopalypse": "天启",
     "Half Cash": "半价", "Double HP": "双倍血量", "CHIMPS": "CHIMPS",
+    "DoubleMoabHealth": "双倍MOAB血量", "AlternateBloonsRounds": "ABR交替回合",
+    "Only": "仅限", "MagicMonkeysOnly": "仅魔法猴", "DoubleCash": "双倍现金",
 }
 MAP_CN = {
-    "TownCentre": "城镇中心", "Scrapyard": "废品场", "TreeStump": "树桩",
-    "Logs": "原木", "InTheLoop": "循环圈", "Cubism": "立体主义",
-    "Resort": "度假胜地", "FourCircles": "四圆环", "ParkPath": "公园小径",
-    "AdorasTemple": "阿朵拉神殿", "Ravine": "峡谷", "DarkCastle": "黑暗城堡",
+    # Beginner（译名对齐 B 站气球塔防6 WIKI；Frozen Over 游戏内为「冰封三尺」）
+    "Tutorial": "教程", "MonkeyMeadow": "猴子草甸",
+    "InTheLoop": "循环", "SkullTweak": "骷髅改",
+    "ThreeMinesAround": "三圈矿道", "SpaPits": "水疗温泉",
+    "Tinkerton": "工匠坊",
+    "TreeStump": "树桩", "TownCentre": "镇中心", "MiddleOfTheRoad": "道路中间",
+    "OneTwoTree": "一二杉", "Scrapyard": "废料场", "TheCabin": "小木屋",
+    "Resort": "度假胜地", "Skates": "滑冰", "LotusIsland": "莲花岛",
+    "CandyFalls": "糖果瀑布", "WinterPark": "冬季公园", "Carved": "鬼脸南瓜",
+    "ParkPath": "公园路径", "AlpineRun": "高山竞速", "FrozenOver": "冰封三尺",
+    "Cubism": "立体主义", "FourCircles": "四圈跑道", "Hedge": "树篱",
+    "Logs": "原木", "EndOfTheRoad": "道路尽头",
+    # Intermediate
+    "LostCrevasse": "失落冰隙", "LuminousCove": "夜光海湾", "AncientPortal": "古代传送门",
+    "SulfurSprings": "硫磺泉", "WaterPark": "水上乐园", "Polyphemus": "独眼巨人",
+    "CoveredGarden": "隐蔽的花园", "Quarry": "采石场", "QuietStreet": "静谧街道",
+    "BloonariusPrime": "布隆纳留斯精英", "Balance": "平衡", "Encrypted": "已加密",
+    "Bazaar": "集市", "AdorasTemple": "阿多拉神庙", "SpringSpring": "春意盎然",
+    "KartsNDarts": "飞镖卡丁车", "MoonLanding": "登月", "Haunted": "鬼屋",
+    "Downstream": "顺流而下", "FiringRange": "靶场", "Cracked": "龟裂之地",
+    "Streambed": "河床", "Chutes": "滑槽", "Rake": "耙",
+    "SpiceIslands": "香料群岛",
+    # Advanced
+    "Ascent": "攀升", "MushroomGrotto": "蘑菇洞窟", "PartyParade": "派对游行",
+    "SunsetGulch": "日落峡谷", "EnchantedGlade": "魔法林地", "LastResort": "破釜沉舟",
+    "CastleRevenge": "城堡复仇", "DarkPath": "黑暗之径", "Erosion": "侵蚀",
+    "MidnightMansion": "午夜豪宅", "SunkenColumns": "凹陷的柱子", "XFactor": "X因子",
+    "Mesa": "桌子山", "Geared": "齿轮传动", "Spillway": "泄洪道", "Cargo": "货运",
+    "PatsPond": "帕特的池塘", "Peninsula": "半岛", "HighFinance": "高级金融",
+    "AnotherBrick": "另一块砖", "OffTheCoast": "海岸", "Cornfield": "玉米地",
+    "Underground": "地下",
+    # Expert
+    "TrickyTracks": "棘手的轨道", "GlacialTrail": "冰河之径", "DarkDungeons": "黑暗地下城",
+    "Sanctuary": "避难所", "Ravine": "峡谷", "FloodedValley": "水淹山谷",
+    "Infernal": "炼狱", "BloodyPuddles": "血腥水坑", "Workshop": "工坊",
+    "Quad": "方院", "DarkCastle": "黑暗城堡", "MuddyPuddles": "泥泞的水坑",
+    "#ouch": "哇是个#",
 }
 SCORING_CN = {"GameTime": "最快用时", "LeastCash": "最少现金", "LeastTiers": "最少升级"}
 

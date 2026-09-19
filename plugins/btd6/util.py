@@ -129,6 +129,78 @@ def _classify_overview_events(
     return ongoing, upcoming, ended
 
 
+def fmt_lb_score(scoring: str | None, entry: dict) -> str:
+    """按计分类型从排行榜条目取成绩（与游戏一致）。
+
+    Boss 榜顶层 score 只是「Boss Tier」层数，真正成绩在 scoreParts
+    （Game Time / Least Cash / Boss Tier）。竞赛顶层 score 即用时。
+    """
+    st = str(scoring or "")
+    entry = entry if isinstance(entry, dict) else {}
+    parts = entry.get("scoreParts") or []
+
+    def part(*names: str):
+        for p in parts:
+            if not isinstance(p, dict):
+                continue
+            if str(p.get("name") or "") in names:
+                return p.get("score")
+        return None
+
+    # Boss 榜（有 Boss Tier）字段命名与直觉相反（与 API Explorer 一致）：
+    # - "Least Cash"：通关用时（毫秒），GameTime 计分时展示的就是这个
+    # - "Game Time"：相对活动 start 的提交偏移，用来算 Time Submitted
+    # - "Boss Tier"：层数
+    is_boss = part("Boss Tier") is not None or any(
+        isinstance(p, dict) and str(p.get("name") or "") == "Boss Tier" for p in parts
+    )
+    if is_boss:
+        if st == "GameTime":
+            # 只能取 "Least Cash"（实为用时）；不能回退到 Boss Tier（层数 5）
+            return fmt_score("GameTime", part("Least Cash"))
+        if st == "LeastCash":
+            return fmt_score("LeastCash", part("Least Cash") if part("Least Cash") is not None else entry.get("score"))
+        if st == "LeastTiers":
+            return fmt_score("LeastTiers", part("Boss Tier", "Tier") or entry.get("score"))
+        return fmt_score(st, entry.get("score"))
+    # 竞赛等：顶层 score / scoreParts 的 Game Time 即用时
+    if st == "GameTime":
+        v = part("Game Time")
+        if v is None:
+            v = entry.get("score")
+        return fmt_score("GameTime", v)
+    if st == "LeastCash":
+        v = part("Least Cash")
+        if v is None:
+            v = entry.get("score")
+        return fmt_score("LeastCash", v)
+    if st == "LeastTiers":
+        v = part("Boss Tier")
+        if v is None:
+            v = entry.get("score")
+        return fmt_score("LeastTiers", v)
+    return fmt_score(st, entry.get("score"))
+
+
+def fmt_relative_time(ms: int | None, now_ms: int | None = None) -> str:
+    """相对时间：19 hours ago / 2 days ago（Explorer 同口径英文短文案）。"""
+    if not ms:
+        return ""
+    now = now_ms if now_ms is not None else int(__import__("time").time() * 1000)
+    delta = max(0, now - int(ms))
+    sec = delta // 1000
+    if sec < 60:
+        return "JUST NOW"
+    if sec < 3600:
+        m = sec // 60
+        return f"{m} MINUTE{'S' if m != 1 else ''} AGO"
+    if sec < 86400:
+        h = sec // 3600
+        return f"{h} HOUR{'S' if h != 1 else ''} AGO"
+    d = sec // 86400
+    return f"{d} DAY{'S' if d != 1 else ''} AGO"
+
+
 def fmt_score(scoring: str | None, score) -> str:
     """按计分类型格式化分数：竞赛毫秒用时→分:秒.毫秒，最少现金→$，其余千分位。"""
     st = str(scoring or "")
@@ -137,9 +209,17 @@ def fmt_score(scoring: str | None, score) -> str:
     except (TypeError, ValueError):
         return str(score)
     if st == "GameTime":
-        sec = n / 1000.0
-        m = int(sec // 60)
-        return f"{m}:{sec - m * 60:06.3f}"
+        # 与 API Explorer formatScoreTime 一致：≥1 小时显示 HH:MM:SS.cc，
+        # 否则 MM:SS.cc。避免 Boss 总用时被拼成 2459:02 这种四位数分钟。
+        ms = int(n)
+        total_sec = ms // 1000
+        cs = (ms % 1000) // 10
+        hours = total_sec // 3600
+        minutes = (total_sec % 3600) // 60
+        seconds = total_sec % 60
+        if hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{cs:02d}"
+        return f"{minutes:02d}:{seconds:02d}.{cs:02d}"
     if st == "LeastCash":
         return f"${int(n):,}"
     if st == "LeastTiers":

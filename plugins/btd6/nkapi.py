@@ -47,7 +47,7 @@ URL_CT_EVENT_DATA = "https://storage.googleapis.com/btd6-ct-map/events/{}"
 
 DEFAULT_ROWS = 10  # 排行榜/地图列表默认条数
 MAX_ROWS = 100     # 条数上限（竞赛每页50、Boss/CT每页25，自动分页拉取至请求数）
-LB_DEFAULT_ROWS = 50  # 排行榜默认前50
+LB_DEFAULT_ROWS = 25  # 排行榜默认前25（一页最多 25 人）
 LB_PAGE_SIZES = {"race": 50, "boss": 25, "ct": 25}  # 各类型每页人数（与NK API分页对齐）
 LB_MAX_PAGE = 20      # 最大页码
 LB_MAX_RANK = 1000    # 最大排名查询

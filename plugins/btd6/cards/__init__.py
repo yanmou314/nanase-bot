@@ -21,10 +21,12 @@ from .. import assets
 from .common import (  # noqa: F401
     CARD_W,
     ODYSSEY_CARD_W,
+    BOSS_DUAL_CARD_W,
     RACE_CARD_W,
     _TOWER_CAT_COLORS,
     _bg_cache,
     _bg_data_url,
+    _boss_dual_shell,
     _list_shell,
     _odyssey_shell,
     _race_modifier_html,
@@ -71,6 +73,8 @@ from .odyssey import (  # noqa: F401
     _odyssey_tower_lookup,
     _odyssey_upgrade_caps,
     odyssey_diff_html,
+    odyssey_html,
+    trim_odyssey_png,
 )
 
 from .overview import (  # noqa: F401
@@ -103,6 +107,12 @@ from .rules import (  # noqa: F401
     _round_detail_desc_html,
     _rules_compat_html,
     _stat,
+    _boss_dual_meta_chips,
+    _boss_dual_monkey_grid,
+    _boss_dual_panel,
+    _boss_dual_rule_chips,
+    _fmt_range_full,
+    boss_dual_html,
     rules_html,
 )
 
@@ -275,6 +285,8 @@ __all__ = [
     'maps_html',
     'odyssey',
     'odyssey_diff_html',
+    'odyssey_html',
+    'trim_odyssey_png',
     'overview',
     'overview_html',
     'player_html',

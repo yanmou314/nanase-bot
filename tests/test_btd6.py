@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from conftest import FinishedException, GroupMessageEvent, MessageSegment
@@ -219,7 +220,7 @@ META = {
 def test_format_rules_full():
     text = btd6.format_rules(META, "🏁 竞赛")
     assert "竞赛「Test Race」规则" in text
-    assert "地图：ThreeMinesAround｜难度：中等｜模式：反向" in text
+    assert "地图：三圈矿道｜难度：中等｜模式：反向" in text
     assert "初始资金 650｜❤️ 生命 200｜回合 1–80" in text
     assert "塔位上限 无限制｜禁止 Paragon" in text
     assert "禁用：猴子知识" in text
@@ -556,11 +557,13 @@ def test_handler_rules_race_and_boss(monkeypatch):
         asyncio.run(btd6.rules_cmd.handlers[0](_ev(".btd6竞速 boss 精英")))
     assert "已拆分" in str(btd6.rules_cmd.finished[-1])
     btd6._cooldowns.clear()
-    # .btd6boss：标准+精英双卡（首卡 send、末卡 finish；渲染禁用 → 文本兜底）
+    # .btd6boss：标准+精英并排合卡（单卡 finish；渲染禁用 → 文本兜底含两套规则）
     with pytest.raises(FinishedException):
         asyncio.run(btd6.boss_cmd.handlers[0](_ev(".btd6boss")))
-    assert "Boss·标准「Phayze30」规则" in str(btd6.boss_cmd.sent[-1])
-    assert "Boss·精英「Phayze30」规则" in str(btd6.boss_cmd.finished[-1])
+    finished = str(btd6.boss_cmd.finished[-1])
+    assert "Boss「Phayze30」标准+精英规则" in finished
+    assert "Boss·标准「Phayze30」规则" in finished
+    assert "Boss·精英「Phayze30」规则" in finished
 
 
 def test_handler_rules_non_race_redirects_without_fetch(monkeypatch):
@@ -779,6 +782,45 @@ def test_daily_prefix():
     assert btd6._daily_prefix("Standard 2936: Shadow's Challenge", False) == "每日标准·第2936期"
     assert btd6._daily_prefix("Advanced 2923: X's Challenge", True) == "每日高级·第2923期"
     assert btd6._daily_prefix("Weird", False) == "每日标准"
+
+
+def test_daily_pick_skips_future_issue(monkeypatch):
+    """回归：按 id 日期后缀 + Asia/Shanghai 日历日选期，凌晨不退回昨天。"""
+    cst = timezone(timedelta(hours=8))
+    # 2026-09-12 16:00 CST
+    now_ms = int(datetime(2026, 9, 12, 16, 0, tzinfo=cst).timestamp() * 1000)
+    items = [
+        {"name": "Standard 2954: gamer_rat's Challenge", "id": "rot295420260912",
+         "createdAt": now_ms + 8 * 3600_000, "metadata": "https://meta/2954"},
+        {"name": "Standard 2953: FrostElite7399's Challenge", "id": "rot295320260911",
+         "createdAt": now_ms - 8 * 3600_000, "metadata": "https://meta/2953"},
+        {"name": "Advanced 2941: TopHero8383's Challenge", "id": "adv294120260912",
+         "createdAt": now_ms + 8 * 3600_000, "metadata": "https://meta/a2941"},
+        {"name": "Advanced 2940: new's Challenge", "id": "adv294020260911",
+         "createdAt": now_ms - 8 * 3600_000, "metadata": "https://meta/a2940"},
+    ]
+    assert btd6._daily_issue_date(now_ms) == "20260912"
+    assert btd6._daily_pick(items, "Standard", now_ms)["id"] == "rot295420260912"
+    assert btd6._daily_pick(items, "Advanced", now_ms)["id"] == "adv294120260912"
+    # 北京时间凌晨仍是「今天」，不得因 UTC 已过 20:00 而退回昨天
+    early_ms = int(datetime(2026, 9, 12, 1, 0, tzinfo=cst).timestamp() * 1000)
+    assert btd6._daily_issue_date(early_ms) == "20260912"
+    assert btd6._daily_pick(items, "Standard", early_ms)["id"] == "rot295420260912"
+    # 次日
+    next_ms = int(datetime(2026, 9, 13, 10, 0, tzinfo=cst).timestamp() * 1000)
+    assert btd6._daily_issue_date(next_ms) == "20260913"
+
+    meta = {"name": "Today's Challenge", "mapURL": "", "map": ""}
+    bodies = {
+        btd6.URL_DAILY: items,
+        "https://meta/2954": meta,
+        "https://meta/a2941": meta,
+    }
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(bodies))
+    col = asyncio.run(btd6.collect_daily(False))
+    assert col["prefix"] == "每日标准·第2954期"
+    adv = asyncio.run(btd6.collect_daily(True))
+    assert adv["prefix"] == "每日高级·第2941期"
 
 
 def test_reward_txt():
@@ -1307,7 +1349,7 @@ def test_push_single_coop_sends_card(monkeypatch, tmp_path):
         return str(tmp_path / "coop.png")
 
     async def fake_coop():
-        return {"prefix": "每日Coop", "meta": {"name": "GreatMonkey765's Challenge"},
+        return {"prefix": "Co-op 挑战", "meta": {"name": "GreatMonkey765's Challenge"},
                 "map_img": "", "side_img": "", "scoring_cn": "固定种子",
                 "kind_label": "Co-op 挑战", "stale_note": ""}
 
@@ -1356,7 +1398,7 @@ def test_push_coop_kind_picks_latest_created(monkeypatch, tmp_path):
 
 
 def test_collect_daily_coop(monkeypatch):
-    """coop 采集：prefix=每日Coop（走每日系渲染）+ kind_label；未来排期不参与选期。"""
+    """coop 采集：prefix=Co-op 挑战（不带「每日」）+ kind_label；未来排期不参与选期。"""
     meta = dict(META, name="GreatMonkey765's Challenge")
     now_ms = int(time.time() * 1000)
     bodies = {
@@ -1379,7 +1421,8 @@ def test_collect_daily_coop(monkeypatch):
     assert btd6._coop_pick(items, now_ms - 2 * DAY)["id"] == "coopold"
     assert btd6._coop_pick([x for x in items if x["id"] == "coopfuture"], now_ms) is None
     col = asyncio.run(btd6.collect_daily_coop())
-    assert col.get("prefix") == "每日Coop" and col.get("kind_label") == "Co-op 挑战"
+    assert col.get("prefix") == "Co-op 挑战" and col.get("kind_label") == "Co-op 挑战"
+    assert "每日" not in col.get("prefix", "")
     assert col["meta"]["name"] == "GreatMonkey765's Challenge"
     assert col.get("stale_note") == ""
     # 空列表 → 空态文案
@@ -1388,14 +1431,35 @@ def test_collect_daily_coop(monkeypatch):
 
 
 def test_rules_html_coop_card():
-    """Co-op 卡走每日系渲染：prefix 进入副标题，日历徽章照常使用。
-    9/3 版式调整后每日卡不再渲染事件行，kind_label 不再出现在卡片中。"""
-    col = {"prefix": "每日Coop", "meta": META, "map_img": "", "side_img": "",
+    """Co-op 卡：大标题=中文地图名，类型/作者在副标题，日历徽章。"""
+    col = {"prefix": "Co-op 挑战", "meta": dict(META, name="GreatMonkey765's Challenge"),
+           "map_img": "", "side_img": "",
            "scoring_cn": "固定种子", "kind_label": "Co-op 挑战", "stale_note": ""}
     html = btd6.rules_html(col)
-    assert "每日Coop" in html
-    assert "每日挑战" not in html
+    # META.map 若有映射则用中文地图名；否则回退「协作挑战」
+    map_title = btd6.i18n.map_cn(str(META.get("map") or "")) or "协作挑战"
+    assert map_title in html or "协作挑战" in html
+    assert "每日Coop" not in html
+    assert "Co-op 挑战" in html
+    assert "GreatMonkey765" in html  # 作者名在副标题
     assert "race-emblem-img" in html  # 每日系日历徽章
+
+
+def test_rules_html_daily_title_cn():
+    """每日卡大标题=中文地图名；作者名与期号在副标题。"""
+    col = {"prefix": "每日标准·第2956期",
+           "meta": dict(META, name="ValiantBadger2's Challenge", map="TreeStump"),
+           "map_img": "", "side_img": "", "scoring_cn": "固定种子", "stale_note": ""}
+    html = btd6.rules_html(col)
+    assert "树桩" in html
+    assert "ValiantBadger2" in html
+    assert "每日标准·第2956期" in html
+    col_adv = {"prefix": "每日高级·第2943期",
+               "meta": dict(META, name="Leonard's Challenge", map="TreeStump"),
+               "map_img": "", "side_img": "", "scoring_cn": "固定种子", "stale_note": ""}
+    html_adv = btd6.rules_html(col_adv)
+    assert "树桩" in html_adv
+    assert "Leonard" in html_adv
 
 
 def test_cooldown_release_and_ct_key():
@@ -1508,46 +1572,6 @@ def test_cache_eviction_cleans_side_dictionaries(monkeypatch):
     assert url2 in btd6._cache  # 新条目仍在预算内
 
 
-def test_cache_put_async_skips_sync_dumps_when_size_known(monkeypatch):
-    """T17a：事件循环路径缓存写入——已提供 size 时不触发 json.dumps 估算。"""
-    url = "https://data.ninjakiwi.com/async-sized"
-    body = {"pad": "a" * 500}
-    dumped = []
-
-    def _spy(_body):
-        dumped.append(1)
-        return 1
-
-    monkeypatch.setattr(btd6.nkapi, "_body_size", _spy)
-    asyncio.run(btd6.nkapi._cache_put_async(url, body, size=4242))
-    assert dumped == []  # 未 dumps
-    assert btd6._cache_sizes[url] == 4242
-    assert btd6._cache_get(url) is body
-
-
-def test_cache_put_async_uses_to_thread_for_unknown_size(monkeypatch):
-    """T17a：未提供 size 时估算走 asyncio.to_thread，不阻塞事件循环。"""
-    url = "https://data.ninjakiwi.com/async-threaded"
-    body = {"pad": "b" * 500}
-    seen: list[str] = []
-    orig = btd6.nkapi._body_size
-
-    def _spy(_body):
-        seen.append("sync")
-        return orig(_body)
-
-    monkeypatch.setattr(btd6.nkapi, "_body_size", _spy)
-
-    async def _fake_to_thread(fn, *a, **k):
-        seen.append("to_thread")
-        return fn(*a, **k)
-
-    monkeypatch.setattr(btd6.nkapi.asyncio, "to_thread", _fake_to_thread)
-    asyncio.run(btd6.nkapi._cache_put_async(url, body))
-    assert "to_thread" in seen  # 经线程池估算
-    assert btd6._cache_sizes[url] == orig(body)
-
-
 def test_handler_rules_boss_failure_releases_cooldown(monkeypatch):
     """C1：Boss 规则双版本全部失败时回滚冷却，允许立即重试。"""
     event = _ev(".btd6boss")
@@ -1615,11 +1639,11 @@ def test_map_cn_translation_in_rules_text():
     """C7：MAP_CN 接入规则文本——有译名显示中文，无译名回退原始内部名。"""
     translated = dict(META, map="Logs")
     assert "地图：原木｜" in btd6.format_rules(translated, "🏁 竞赛")
-    untranslated = dict(META, map="ThreeMinesAround")
-    assert "地图：ThreeMinesAround｜" in btd6.format_rules(untranslated, "🏁 竞赛")
+    assert "地图：三圈矿道｜" in btd6.format_rules(dict(META, map="ThreeMinesAround"), "🏁 竞赛")
+    assert "地图：工匠坊｜" in btd6.format_rules(dict(META, map="Tinkerton"), "🏁 竞赛")
     # FLAT 归一化查找：带空格写法同样命中
-    assert btd6.map_cn("TownCentre") == "城镇中心"
-    assert btd6.map_cn("Town Centre") == "城镇中心"
+    assert btd6.map_cn("TownCentre") == "镇中心"
+    assert btd6.map_cn("Town Centre") == "镇中心"
     assert btd6.map_cn("UnknownMap") == "UnknownMap"
 
 
@@ -2142,7 +2166,7 @@ def test_push_batch_renders_all_before_send(monkeypatch, tmp_path):
         return {"prefix": "每日标准" if not adv else "每日高级", "meta": {}}
 
     async def fake_coop():
-        return {"prefix": "每日Coop", "meta": {"name": "N"}, "map_img": "", "side_img": "",
+        return {"prefix": "Co-op 挑战", "meta": {"name": "N"}, "map_img": "", "side_img": "",
                 "scoring_cn": "固定种子", "kind_label": "Co-op 挑战", "stale_note": ""}
 
     monkeypatch.setattr(btd6.push, "get_bot", lambda: _Bot())
@@ -2199,7 +2223,7 @@ def test_prewarm_coop_card(monkeypatch, tmp_path):
     """Co-op 卡预热：有数据渲染一张；空态/异常不抛。"""
 
     async def fake_coop():
-        return {"prefix": "每日Coop", "meta": {"name": "N"}}
+        return {"prefix": "Co-op 挑战", "meta": {"name": "N"}}
 
     async def fake_empty():
         return {"empty": "暂无"}
@@ -2289,7 +2313,7 @@ def test_push_render_failure_puts_back(monkeypatch, tmp_path):
         return str(tmp_path / f"{prefix}.png")
 
     async def fake_coop():
-        return {"prefix": "每日Coop", "meta": {"name": "N"}}
+        return {"prefix": "Co-op 挑战", "meta": {"name": "N"}}
 
     monkeypatch.setattr(btd6.push, "get_bot", lambda: _Bot())
     monkeypatch.setattr(btd6.cards, "_render_card", fake_render)

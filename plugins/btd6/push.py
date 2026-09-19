@@ -123,7 +123,7 @@ async def _prewarm_once() -> None:
                         _inject_odyssey_unified_h(ody_col)
                     except Exception:
                         _logger.debug("BTD6 预热远征统一高度计算失败，使用各自高度", exc_info=True)
-                    jobs.append(cards._render_card("btd6ody", lambda: cards.odyssey_diff_html(ody_col, "easy", "简单")))
+                    jobs.append(cards._render_card("btd6ody", lambda: cards.odyssey_html(ody_col)))
             except Exception:
                 _logger.warning("BTD6 预热远征卡渲染失败", exc_info=True)
         if util._pick_section(data.get("collectables") or [], now):
@@ -203,7 +203,7 @@ async def _lb_prewarm_jobs(data: dict, *, ongoing_only: bool = False) -> list:
 async def _prewarm_daily_cards() -> int:
     """渲染标准+高级每日卡各一张，返回成功张数。
 
-    每日挑战 08:00（Asia/Shanghai）重置，新一天首查原本必然冷渲染
+    每日挑战 00:20（Asia/Shanghai，NK 实测 16:20 UTC）切换，新一期首查原本必然冷渲染
     （跨境取数 + 地图大图 + 每张卡约 40 个塔立绘的重渲染，10 秒级）。
     卡片按内容哈希缓存：内容不变时重复预热近零成本，因此挂进每小时 :10
     的任务即可在重置后最迟 10 分钟自动暖好，用户查询命中缓存。
@@ -261,7 +261,7 @@ async def btd6_prewarm_job():
                          timezone="Asia/Shanghai")
 async def btd6_prewarm_lb_hourly_job():
     """每小时 :10 错峰预热：进行中活动的榜单卡（race/boss/ct 各一张，无则跳过）
-    + 标准/高级每日卡 + Co-op 卡（08:00 每日重置后最迟 10 分钟暖好，内容不变时近零成本）。
+    + 标准/高级每日卡 + Co-op 卡（00:20 每日切换后最迟约 50 分钟暖好，内容不变时近零成本）。
 
     榜单卡含"剩余 X天X小时"相对时间（时间粒度按 15 分钟桶取整），04:00 预热的卡只对
     邻近时段有效；每小时错峰重渲才能让"首查秒回"持续生效。数据全部来自既有缓存/
@@ -306,6 +306,11 @@ async def _btd6_warm_on_connect(bot=None) -> None:
         _logger.info("BTD6 帮助菜单已预渲染到本地")
     except Exception:
         _logger.warning("BTD6 帮助菜单预渲染失败", exc_info=True)
+    # 连接后补检 CT：错过 06:00 窗口且未标记时立即入队（窗口外仅未推过的进行中活动）
+    try:
+        await _btd6_push_kind("ct")
+    except Exception:
+        _logger.warning("BTD6 连接后 CT 补检失败", exc_info=True)
 
 
 # ---------------- 活动刷新推送（群自动播报） ----------------
@@ -399,7 +404,9 @@ async def _fetch_push_event(kind: str, now: int, real_now: int):
         return util.pick_active(social_list, now)
     if kind == "daily":
         items = await collect._safe(nkapi.fetch_body(nkapi.URL_DAILY)) or []
-        return next((x for x in items if str(x.get("name") or "").startswith("Standard")), None)
+        # 与 collect_daily 同口径：按 16:00 CST 刷新日选期（不看 createdAt）
+        return collect._daily_pick(items if isinstance(items, list) else [],
+                                   "Standard", real_now)
     if kind == "coop":
         # Co-op 挑战与每日挑战同一列表（name 以 coop 开头）；未来排期的条目
         # 元数据未开放，只取 createdAt ≤ 当前的最新一期
@@ -440,8 +447,13 @@ async def _btd6_push_kind(kind: str) -> None:
             # social 刷新点不固定，只取进行中活动，同样按 id 去重，不套 12 分钟窗口
             pass
         elif not start or not (0 <= real_now - start < window_ms):
-            # 非窗口期内且非首次配置则跳过；首次配置 30 分钟内补发
-            if last.get(kind) or not start or not (0 <= real_now - start < 30 * 60 * 1000):
+            # 非窗口期：已推过同 id 直接跳过；未推过且进行中/首次 30 分钟内补发
+            #（覆盖错过刷新点、bot 当时离线或渲染失败后未标记的情况）
+            if last.get(kind):
+                return
+            in_first = bool(start) and 0 <= real_now - start < 30 * 60 * 1000
+            ongoing = util._state_of(ev, real_now) == "on"
+            if not (in_first or ongoing):
                 return
         await _enqueue_push(kind, ev, ev_id, label)
     except Exception:
@@ -543,13 +555,18 @@ async def _render_kind_payload(kind: str, ev: dict, label: str,
                 else f"🎮 BTD6 {_kind_display_name(kind, '')} 已刷新"
             details: list[tuple[str, str | None]] = []
             if kind == "boss":
-                for variant, vlab in (("standard", "标准"), ("elite", "精英")):
-                    col = await collect._safe(collect.collect_rules("boss", variant))
-                    if not col or col.get("empty"):
-                        continue
+                col = await collect._safe(collect.collect_boss_dual())
+                if col and not col.get("empty"):
                     p2 = await cards._render_card(
-                        f"btd6rule_{variant}", lambda c=col: cards.rules_html(c))
-                    vt = f"Boss·{vlab}规则：{label}" if label else f"Boss·{vlab}规则"
+                        "btd6rule_dual", lambda c=col: cards.boss_dual_html(c))
+                    vt = f"Boss规则：{label}" if label else "Boss规则"
+                    details.append((vt, p2))
+            if kind == "ct":
+                col = await collect._safe(collect.collect_ct())
+                if col and not col.get("empty"):
+                    p2 = await cards._render_card(
+                        "btd6ct", lambda c=col: cards.ctmap_html(c))
+                    vt = f"争夺领土地图：{label}" if label else "争夺领土地图"
                     details.append((vt, p2))
             return {"overview": path, "announce": text, "label": label, "details": details}
         if kind == "odyssey":
@@ -566,18 +583,11 @@ async def _render_kind_payload(kind: str, ev: dict, label: str,
                 # 无有效远征数据：不能只靠总览把本期标成已推
                 return None
             try:
-                _inject_odyssey_unified_h(col)
+                p = await cards._render_card("btd6ody", lambda: cards.odyssey_html(col))
+                p = await asyncio.to_thread(cards.trim_odyssey_png, p)
+                details = [("远征", p)]
             except Exception:
-                _logger.debug("BTD6 推送远征统一高度计算失败，使用各自高度", exc_info=True)
-            details = []
-            for d, lab in i18n._ODYSSEY_DIFFS:
-                try:
-                    p = await cards._render_card(
-                        "btd6ody", lambda d=d, lab=lab: cards.odyssey_diff_html(col, d, lab))
-                    details.append((f"远征·{lab}", p))
-                except Exception:
-                    _logger.warning("BTD6 远征 %s 渲染失败", lab, exc_info=True)
-            if not details:
+                _logger.warning("BTD6 远征合卡渲染失败", exc_info=True)
                 return None
             return {"overview": path, "announce": text, "label": label, "details": details}
         if kind == "daily":
@@ -830,6 +840,9 @@ async def btd6_push_ct_w0(): await _btd6_push_kind("ct")
 async def btd6_push_ct_w5(): await _btd6_push_kind("ct")
 @scheduler.scheduled_job("cron", hour=8, minute=10, id="btd6_push_ct_w10", timezone="Asia/Shanghai")
 async def btd6_push_ct_w10(): await _btd6_push_kind("ct")
+# CT 兜底：每小时 :12 采样。窗口外仅在「未推过该 id 且进行中」时入队，成功后由 last_pushed 去重。
+@scheduler.scheduled_job("cron", minute=12, second=0, id="btd6_push_ct_hourly", timezone="Asia/Shanghai")
+async def btd6_push_ct_hourly(): await _btd6_push_kind("ct")
 # 远征 周三10:00 持续144h
 @scheduler.scheduled_job("cron", hour=10, minute=0, second=40, id="btd6_push_ody_0", timezone="Asia/Shanghai")
 async def btd6_push_ody_0(): await _btd6_push_kind("odyssey")
@@ -847,7 +860,7 @@ async def btd6_push_rush_5(): await _btd6_push_kind("rush")
 @scheduler.scheduled_job("cron", hour=6, minute=10, second=20, id="btd6_push_rush_10", timezone="Asia/Shanghai")
 async def btd6_push_rush_10(): await _btd6_push_kind("rush")
 
-# 每日 16:00 持续24h（按用户指定，普通+高级双版本）
+# 每日 16:00（北京时间，与游戏内正式刷新点一致；普通+高级双版本）。勿改：见 collect.py 每日选期模块注释
 @scheduler.scheduled_job("cron", hour=16, minute=0, id="btd6_push_daily_0", timezone="Asia/Shanghai")
 async def btd6_push_daily_0(): await _btd6_push_kind("daily")
 @scheduler.scheduled_job("cron", hour=16, minute=5, id="btd6_push_daily_5", timezone="Asia/Shanghai")
