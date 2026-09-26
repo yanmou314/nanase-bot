@@ -10,7 +10,7 @@ from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, Message
 from nonebot.matcher import Matcher
 from nonebot.params import CommandArg
 
-from common import at_prefix, is_owner, parse_tag, save_json_state
+from common import RELAY_BOT_QQ, RELAY_GROUP_ID, at_prefix, is_owner, parse_tag, save_json_state
 
 try:
     from nonebot_plugin_apscheduler import scheduler
@@ -21,8 +21,6 @@ BIND_FILE = os.path.join(os.path.dirname(__file__), "bindings.json")
 _LOCK = threading.RLock()
 
 # ---- 任务中继模式：本机不再直调 overstats API ----
-RELAY_GROUP_ID = 864213945
-RELAY_BOT_QQ = 3889045090
 TASK_TIMEOUT = 180
 TASK_MAX_PENDING = 20
 TASK_CMD_TEXT = {
@@ -194,7 +192,7 @@ async def _dispatch_next() -> None:
             _task_current = None
             _task_queue.insert(0, task)
             logger.warning("owstats 任务派发失败", exc_info=True)
-            if str(task.get("group_id")) == "864213945":
+            if str(task.get("group_id")) == str(RELAY_GROUP_ID):
                 return
             try:
                 if task.get("group_id"):
@@ -221,7 +219,7 @@ async def _enqueue_task(kind: str, tag: str, group_id, user_id: str, matcher, ev
                         "group_id": group_id, "user_id": user_id, "t0": 0.0})
     waiting = len(_task_queue) - 1 + (1 if _task_current is not None else 0)
     label = _task_kind_label(kind)
-    if str(getattr(event, "group_id", None)) != "864213945":
+    if str(getattr(event, "group_id", None)) != str(RELAY_GROUP_ID):
         if _in_discard_window():
             remain = int(max(0, _discarded_until - time.monotonic()))
             await matcher.send(at_prefix(event) + MessageSegment.text(
@@ -268,6 +266,18 @@ relay_listener = on_message(priority=4, block=False)
 # 首条图片一律归属当前在途任务；任务超时后的迟到消息由 discard window 拦截，
 # 不再用「上一任务缺图」标记去丢弃本任务的合法结果。
 SECOND_MSG_WAIT = 30  # 收到第一条文本后等待第二条的宽限秒数
+
+
+def _msg_reply_id(message) -> str | None:
+    """取消息里 [CQ:reply] 引用的消息 id；无引用返回 None。
+
+    对方机器人回复时若带引用，可据此把图片/文本精确归属到某条下发任务，
+    替代“冻结任务优先”的启发式猜测（防止把 B 的结果发给 A）。
+    """
+    for _seg in message:
+        if _seg.type == "reply":
+            return str((_seg.data or {}).get("id") or "") or None
+    return None
 
 
 def _msg_has_image(message) -> bool:
@@ -350,7 +360,7 @@ async def _freeze_task_for_drawing(bot: Bot, task: dict, notice_segs: list | Non
         fut = stale.get("future")
         if fut is not None and not fut.done():
             fut.set_result((None, False))
-        elif str(stale.get("group_id")) != "864213945":
+        elif str(stale.get("group_id")) != str(RELAY_GROUP_ID):
             try:
                 await _send_to_requester(
                     bot, stale,
@@ -365,7 +375,7 @@ async def _freeze_task_for_drawing(bot: Bot, task: dict, notice_segs: list | Non
     )
     fut = task.get("future")
     # 有 future 的调用方（如 bnet_verify）继续挂起，等领取图片后再 resolve
-    if fut is None and str(task.get("group_id")) != "864213945":
+    if fut is None and str(task.get("group_id")) != str(RELAY_GROUP_ID):
         body = (
             "对方查询机器人已在绘制，但预计会超过 QQ 5 分钟回复时限。\n"
             f"图片缓存 24 小时，约 {DRAWING_CLAIM_DELAY // 60} 分钟后我会自动 @ 对方领取并转发给你；\n"
@@ -408,6 +418,9 @@ async def _send_claim_at(bot: Bot | None = None) -> bool:
     except Exception:
         logger.warning("owstats 发送领取 @ 失败", exc_info=True)
         return False
+    if not _frozen_tasks:
+        # await 发送期间列表可能被 .ow重置 清空：领取无从谈起
+        return False
     _claiming_task = _frozen_tasks.pop(0)
     _claim_sent_at = time.monotonic()
     # 领取期间在途旧回复不得冒充领取图/首条：开隔离窗（仅放行 claiming 的图片）
@@ -433,7 +446,7 @@ async def _deliver_frozen_image(bot: Bot, image_segs: list) -> bool:
     fut = task.get("future")
     if fut is not None and not fut.done():
         fut.set_result((list(image_segs), True))
-    elif str(task.get("group_id")) != "864213945":
+    elif str(task.get("group_id")) != str(RELAY_GROUP_ID):
         body = Message(list(image_segs)) + MessageSegment.text(f"\n绘制完成，用时 {elapsed:.1f}s")
         await _send_to_requester(bot, task, body)
     else:
@@ -459,7 +472,7 @@ async def _fail_claim_or_stale() -> None:
     fut = task.get("future")
     if fut is not None and not fut.done():
         fut.set_result((None, False))
-    elif str(task.get("group_id")) != "864213945":
+    elif str(task.get("group_id")) != str(RELAY_GROUP_ID):
         try:
             bot = get_bot()
             await _send_to_requester(
@@ -486,7 +499,7 @@ async def _complete_task_success(bot: Bot, task: dict, first_segs: list, second_
             fut.set_result((list(first_segs) + list(second_segs), True))
         await _dispatch_next()
         return
-    if str(task.get("group_id")) == "864213945":
+    if str(task.get("group_id")) == str(RELAY_GROUP_ID):
         logger.info("owstats 结果已在中继群内可见，跳过转回")
         await _dispatch_next()
         return
@@ -512,7 +525,7 @@ async def _complete_task_single(bot: Bot, task: dict, single_segs: list) -> None
             fut.set_result((list(single_segs), False))
         await _dispatch_next()
         return
-    if str(task.get("group_id")) == "864213945":
+    if str(task.get("group_id")) == str(RELAY_GROUP_ID):
         logger.info("owstats 结果已在中继群内可见，跳过转回")
         await _dispatch_next()
         return
@@ -537,7 +550,7 @@ async def _abort_task_error(bot: Bot, task: dict, error_segs: list) -> None:
             fut.set_result((list(error_segs or []), False))
         await _dispatch_next()
         return
-    if str(task.get("group_id")) == "864213945":
+    if str(task.get("group_id")) == str(RELAY_GROUP_ID):
         logger.info("owstats 报错已在中继群内可见，跳过转回")
         await _dispatch_next()
         return
@@ -574,7 +587,8 @@ async def _relay_result(bot: Bot, event: MessageEvent, matcher: Matcher):
 
     额外分支：
     - 「仍在绘制中，超过 QQ 5 分钟」→ 冻结任务，先去处理其他用户；
-    - 首条即图片且存在冻结/领取中任务 → 交给冻结用户，在途查询重新入队。
+    - 首条即图片且存在冻结/领取中任务 → 默认交给冻结用户，在途查询重新入队；
+      但图片若带 reply 引用，按引用精确归属，不再猜测。
     命中中继机器人消息时 matcher.block=True，避免落到 auto_chat 等后续 matcher。
     """
     global _task_current
@@ -588,6 +602,7 @@ async def _relay_result(bot: Bot, event: MessageEvent, matcher: Matcher):
     except Exception:
         pass
     has_image = _msg_has_image(event.message)
+    reply_id = _msg_reply_id(event.message)
     plain = event.message.extract_plain_text()
     try:
         self_id = str(bot.self_id)
@@ -607,17 +622,31 @@ async def _relay_result(bot: Bot, event: MessageEvent, matcher: Matcher):
     #    直接贴在了新查询 @ 后面（查询指令被覆盖），也算冻结用户的；
     # 3) 在途已收到第一条文本后的第二条图 → 仍是本任务的，不得抢走。
     if has_image and _claiming_task is not None:
-        if _task_current is not None:
-            _task_current.pop("first_segs", None)
-        segs = _strip_self_at(event.message, self_id)
-        if segs and await _deliver_frozen_image(bot, segs):
-            return
+        cur = _task_current
+        if reply_id and cur and str(reply_id) == str(cur.get("task_msg_id") or ""):
+            pass  # 引用归属：图片明确属于在途任务，不是领取结果，落到下方处理
+        else:
+            if _task_current is not None:
+                _task_current.pop("first_segs", None)
+            segs = _strip_self_at(event.message, self_id)
+            if segs and await _deliver_frozen_image(bot, segs):
+                return
     elif has_image and _frozen_tasks and (
         _task_current is None or not _task_current.get("first_segs")
     ):
-        segs = _strip_self_at(event.message, self_id)
-        if segs and await _deliver_frozen_image(bot, segs):
-            return
+        # 归属关联（替代“冻结优先”猜测，防把 B 的图发给 A）：
+        # - 引用在途任务下发消息 → 属于在途任务，不判给冻结用户；
+        # - 引用冻结任务下发消息 → 明确判给冻结用户；
+        # - 无引用信息 → 沿用原启发式（对方可能把缓存图贴在新查询后）。
+        cur = _task_current
+        quoted_current = bool(reply_id and cur and str(reply_id) == str(cur.get("task_msg_id") or ""))
+        quoted_frozen = bool(reply_id) and any(
+            str(reply_id) == str(ft.get("task_msg_id") or "") for ft in _frozen_tasks
+        )
+        if not quoted_current and (quoted_frozen or not reply_id):
+            segs = _strip_self_at(event.message, self_id)
+            if segs and await _deliver_frozen_image(bot, segs):
+                return
 
     if _task_current is None:
         logger.info("owstats 中继群收到非任务结果，已忽略")
@@ -714,7 +743,7 @@ if scheduler is not None:
             if not fut.done():
                 fut.set_result((None, False))
             return
-        if str(task.get("group_id")) == "864213945":
+        if str(task.get("group_id")) == str(RELAY_GROUP_ID):
             return
         try:
             bot = get_bot()

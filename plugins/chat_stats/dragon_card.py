@@ -6,9 +6,8 @@ import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from nonebot import get_driver
 
-from common import RENDER_SEM, close_http_clients, get_http_client, gradient_background, render_html_to_png
+from common import RENDER_SEM, RENDER_TOTAL_TIMEOUT, get_http_client, gradient_background, render_html_to_png
 
 _logger = logging.getLogger(__name__)
 
@@ -16,11 +15,6 @@ CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 _SH = ZoneInfo("Asia/Shanghai")  # 与数据统计口径保持同一时区，避免海外部署时标题日期错一天
 
 ACCENT = "#D9A94E"
-
-
-@get_driver().on_shutdown
-async def _close_avatar_http() -> None:
-    await close_http_clients()
 
 
 async def _fetch_avatar(user_id: int) -> bytes | None:
@@ -120,6 +114,8 @@ body {{ width: 900px; height: 800px; font-family: "Noto Sans CJK SC", sans-serif
 async def build_card_async(rows: list) -> str:
     results = await asyncio.gather(*(_fetch_avatar(uid) for uid, _, _ in rows))
     avatars = {uid: data for (uid, _, _), data in zip(rows, results, strict=False) if data}
-    # weasyprint 渲染经全局渲染信号量串行化，避免小机器上并发渲染打爆内存
+    # weasyprint 渲染经全局渲染信号量串行化，避免小机器上并发渲染打爆内存；
+    # wait_for 看门狗保证挂死渲染会释放 RENDER_SEM，不致永久占住全站唯一渲染槽
     async with RENDER_SEM:
-        return await asyncio.to_thread(_render, rows, avatars)
+        return await asyncio.wait_for(
+            asyncio.to_thread(_render, rows, avatars), timeout=RENDER_TOTAL_TIMEOUT)

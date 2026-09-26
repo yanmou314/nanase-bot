@@ -366,21 +366,33 @@ def test_member_name_binding_beats_group_card():
     assert name == "绑定名#9"
 
 
+def _clear_common_name_cache():
+    """_member_name 现走 common.get_member_name 的共享 TTL 缓存：测试间必须清空。"""
+    import common
+    for attr in dir(common):
+        if attr.startswith("_member_name") and isinstance(getattr(common, attr), dict):
+            getattr(common, attr).clear()
+
+
 def test_member_name_card_then_nickname():
+    _clear_common_name_cache()
     name = asyncio.run(plugin._member_name(
         FakeBot(members={"111": {"card": "", "nickname": "纯昵称"}}), "888", "111"))
     assert name == "纯昵称"
+    _clear_common_name_cache()  # 同 (群,号) 第二次调用：清缓存才能取到新名片
     name = asyncio.run(plugin._member_name(
         FakeBot(members={"111": {"card": "群名片", "nickname": "昵称"}}), "888", "111"))
     assert name == "群名片"
 
 
 def test_member_name_falls_back_to_uid_on_api_failure():
+    _clear_common_name_cache()
     name = asyncio.run(plugin._member_name(FakeBot(fail=True), "888", "111"))
     assert name == "111"
 
 
 def test_member_name_missing_owstats_uses_group_card(monkeypatch):
+    _clear_common_name_cache()
     monkeypatch.setitem(sys.modules, "plugins.owstats", None)  # import → ImportError
     name = asyncio.run(plugin._member_name(
         FakeBot(members={"111": {"card": "卡片名", "nickname": "昵称"}}), "888", "111"))

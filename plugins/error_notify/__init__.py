@@ -3,6 +3,7 @@
 同类错误有 10 分钟冷却，防止连环报错刷屏。
 """
 import asyncio
+import logging
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -197,3 +198,40 @@ def _on_job_missed(event) -> None:
 
 scheduler.add_listener(_on_job_error, EVENT_JOB_ERROR)
 scheduler.add_listener(_on_job_missed, EVENT_JOB_MISSED)
+
+
+# ---------------- ERROR+ 日志兜底告警 ----------------
+# 插件把异常 catch 后仅 logger.exception 落 ERROR 日志的场景（如 chat_stats 每日
+# 清理失败），run_postprocessor / APScheduler 监听器都收不到——2026-09 审查发现
+# 此类失败最长静默数周无人知。此处对 ERROR+ 日志限频私聊通知主人。
+# 框架自身日志（nonebot/uvicorn/websockets 等）不计：适配器抖动属常态噪音。
+_LOG_ALERT_IGNORED = ("nonebot", "apscheduler", "websockets", "uvicorn", "fastapi", "asyncio")
+
+
+class _LogAlertHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if record.levelno < logging.ERROR:
+                return
+            if record.name.startswith(_LOG_ALERT_IGNORED):
+                return
+            if _loop is None or _loop.is_closed():
+                return  # 事件循环未就绪（启动早期）：不预占冷却，就绪后自然重报
+            key = f"log|{record.name}|{record.getMessage()[:100]}"
+            if not _should_notify(key, time.time()):
+                return
+            text = (
+                "⚠️ 日志告警（被插件捕获、未向上抛的异常）\n"
+                f"🔌 来源：{record.name}\n"
+                f"❌ 内容：{record.getMessage()[:300]}\n"
+                f"🕐 {datetime.now(_SH).strftime('%m-%d %H:%M')}\n"
+                f"（同来源 {_COOLDOWN // 60} 分钟内不重复提醒；详情见 journalctl）"
+            )
+            asyncio.run_coroutine_threadsafe(_send_notice(text), _loop).add_done_callback(
+                lambda fut, key=key: _log_notice_result(fut, key)
+            )
+        except Exception:
+            pass  # 告警兜底自身绝不抛
+
+
+logging.getLogger().addHandler(_LogAlertHandler(level=logging.ERROR))

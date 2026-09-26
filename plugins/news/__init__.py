@@ -15,7 +15,6 @@ from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageEvent, Me
 from nonebot_plugin_apscheduler import scheduler
 
 from common import (
-    close_http_clients,
     get_http_client,
     is_owner,
     load_json_state,
@@ -38,13 +37,8 @@ _PUSH_HOUR, _PUSH_MINUTE = 7, 0
 
 
 def _get_http_client() -> httpx.AsyncClient:
-    # 统一走 common 的按超时缓存单例，由 owstats 注册的 on_shutdown 统一关闭
+    # 统一走 common 的按超时缓存单例，由 common 导入时注册的 on_shutdown 统一关闭
     return get_http_client(20)
-
-
-@get_driver().on_shutdown
-async def _close_shared_http_clients() -> None:
-    await close_http_clients()
 
 
 news_on_cmd = on_command("新闻开启", priority=5, block=True)
@@ -129,6 +123,10 @@ def _mark_pushed(day: date) -> None:
         state = _load_state()
         state["last_push_date"] = day.isoformat()
         _save_state(state)
+
+
+async def _mark_pushed_async(day: date) -> None:
+    await asyncio.to_thread(_mark_pushed, day)
 
 
 def _join_str(value) -> str:
@@ -508,7 +506,7 @@ async def _send_daily() -> bool:
             else:
                 sent += 1
         if sent:
-            _mark_pushed(_sh_today())  # 有群成功送达才记录，全失败保留补发机会
+            await _mark_pushed_async(_sh_today())  # 有群成功送达才记录，全失败保留补发机会
         else:
             _schedule_push_retry(today)  # 全群失败：10 分钟后重试一次
         return bool(sent)
@@ -589,8 +587,15 @@ async def news_key(event: MessageEvent):
             "用法：.新闻key <智谱APIkey>\n"
             "免费获取：open.bigmodel.cn 注册 → 右上角「API Keys」创建"
         )
+    if (os.getenv("GLM_API_KEY") or "").strip():
+        # _load_ai_cfg 中 env 恒优先于文件配置：此时落盘也读不到，明确拒绝避免“假保存”
+        await news_key_cmd.finish(
+            "⚠️ 当前已通过环境变量 GLM_API_KEY 配置晨报 AI，.新闻key 不会生效。\n"
+            "如需改用文件配置，请先移除服务器 .env 中的 GLM_API_KEY 并重启。")
     _save_ai_cfg(key)
-    await news_key_cmd.finish("✅ 晨报 AI key 已保存，之后早安问候将由 GLM-Flash 生成")
+    await news_key_cmd.finish(
+        "✅ 晨报 AI key 已保存，之后早安问候将由 GLM-Flash 生成\n"
+        "（提示：本条消息原文会进入系统日志，介意请改用 .env 的 GLM_API_KEY 配置）")
 
 
 @news_status_cmd.handle()

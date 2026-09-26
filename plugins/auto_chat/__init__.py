@@ -19,17 +19,13 @@ from nonebot.adapters.onebot.v11 import (
 )
 from nonebot.rule import to_me
 
-from common import close_http_clients, get_http_client
+from common import RELAY_GROUP_ID, get_http_client, load_json_state, save_json_state
 
 # OW 任务中继群：本插件保持静默，避免吃掉查询机器人消息 / 产生 AI 噪音
-RELAY_GROUP_ID = 864213945
 
 chat_matcher = on_message(rule=to_me(), priority=5, block=True)
 
 
-@get_driver().on_shutdown
-async def _close_shared_http_clients() -> None:
-    await close_http_clients()
 _COMMAND_START = tuple(s for s in get_driver().config.command_start if s)
 poke_matcher = on_notice(priority=5, block=False)
 
@@ -100,7 +96,7 @@ POKE_REPLIES = [
 
 
 def _get_http_client() -> httpx.AsyncClient:
-    # 统一走 common 的按超时缓存单例，由 owstats 注册的 on_shutdown 统一关闭
+    # 统一走 common 的按超时缓存单例，由 common 导入时注册的 on_shutdown 统一关闭
     return get_http_client(30)
 
 
@@ -141,7 +137,10 @@ _RETRY_DELAY = 1.0  # 重试基础间隔秒数，指数退避：1s / 2s
 # 每日调用总量熔断（按上海时区日期重置）：防止被刷接口产生高额账单。
 # 环境变量 QQBOT_AI_DAILY_LIMIT 可调，设为 <=0 关闭限制。
 _DAILY_LIMIT = int(os.getenv("QQBOT_AI_DAILY_LIMIT", "500") or "500")
+_USAGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "usage.json")
 _daily_usage = {"date": "", "count": 0}
+# 重启/崩溃不再重置计费熔断（此前纯内存，重启即清零，削弱防刷上限）
+_daily_usage.update(load_json_state(_USAGE_FILE))
 _SH_TZ = ZoneInfo("Asia/Shanghai")
 
 
@@ -158,6 +157,11 @@ def _check_daily_budget() -> None:
             f"auto_chat 今日 AI 调用已达上限 {_DAILY_LIMIT} 次，为控制费用已暂停到明日"
         )
     _daily_usage["count"] += 1
+    try:
+        asyncio.get_running_loop().create_task(
+            asyncio.to_thread(save_json_state, _USAGE_FILE, dict(_daily_usage)))
+    except RuntimeError:
+        pass  # 无事件循环：放弃本次落盘，下次调用再写
 
 
 # 每用户每日上限：全局单桶熔断只有 500 次，几个小号轮流在各群 @bot 几分钟就能刷光，
@@ -255,9 +259,7 @@ def _sender_name(event: MessageEvent) -> str:
     nick = (getattr(sender, "nickname", "") or "").strip() if sender else ""
     name = (card or nick) or str(event.user_id)
     # 剥离结构字符，防止昵称伪造「」:：换行等注入多说话人协议
-    return "".join(ch for ch in name[:20] if ch not in "」」:：\n\r\t")
-    # 名字只占一行：名片里的换行/连续空白压成单个空格，避免破坏「名字: 内容」结构
-    return re.sub(r"\s+", " ", name)[:20]
+    return "".join(ch for ch in name[:20] if ch not in "「」:：\n\r\t")
 
 
 async def _sender_name_by_id(bot: Bot, uid: int, gid: int) -> str:

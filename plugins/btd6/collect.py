@@ -137,7 +137,7 @@ async def collect_leaderboard(kind: str, variant: str, rows: int) -> dict:
 
     top = list(entries or [])[:rows]
     rows_out = [
-        (i, str(e.get("displayName") or "?").strip(), util.fmt_score(scoring, e.get("score")))
+        (i, str(e.get("displayName") or "?").strip(), util.fmt_lb_score(scoring, e))
         for i, e in enumerate(top, 1)
     ]
     return {
@@ -294,32 +294,37 @@ def _daily_prefix(label: str, advanced: bool) -> str:
 
 
 def _daily_issue_date(now_ms: int) -> str:
-    """游戏内每日挑战显示的日期（id 后缀 YYYYMMDD）。
+    """NK id 后缀的「发行日」口径（YYYYMMDD），以 Asia/Shanghai 日历日为准。
 
-    以 Asia/Shanghai 日历日为准：游戏内日期就是本地日。
-    不能用「20:00 UTC 切换」——北京时间凌晨 00:00–04:00 会错误退回昨天的期号。
+    注意：后缀日 ≠ 玩家当前可玩的一期（当日缀条目发行在当晚、次日凌晨生效），
+    选期逻辑见 _daily_pick——这里只提供后缀匹配的目标日期。
     """
     dt = datetime.fromtimestamp(now_ms / 1000, tz=timezone(timedelta(hours=8)))
     return dt.strftime("%Y%m%d")
 
 
 def _daily_pick(items: list, want: str, now_ms: int) -> dict | None:
-    """每日/高级选期：id 日期后缀等于「游戏内显示日期」的那一期。
+    """每日/高级选期：取「当前正在进行」的一期。
 
-    NK 列表 newest-first，且当日挑战可能 createdAt 尚未到点（写在次日凌晨），
-    不能按 createdAt≤now 过滤，否则会选到昨天；与游戏内日期对齐只能看 id 后缀。
+    NK 列表 newest-first。实测口径（2026-09-26 生产 plays 佐证：白天当日缀条目
+    仅 3 plays、昨日缀 38,807）：id 日期后缀是「发行日」——当日缀条目在发行日
+    当晚 ~23:31 才写入列表、次日凌晨 ~00:20 生效，白天进行中的一期永远是后缀为
+    昨天的条目。因此 createdAt 未到（含 id 后缀命中）的条目必须跳过，否则全天
+    都在预告今晚才上线的一期（2026-09-26 16:00 推送事故）；fallback 取最新一个
+    已生效条目，覆盖后缀缺号与凌晨切换前的窗口。
     """
     target = _daily_issue_date(now_ms)
     fallback = None
     for x in items:
         if not isinstance(x, dict) or not str(x.get("name") or "").startswith(want):
             continue
+        if _int0(x.get("createdAt")) > now_ms:
+            continue
         iid = str(x.get("id") or "")
         if iid.endswith(target):
             return x
-        if _int0(x.get("createdAt")) <= now_ms:
-            if fallback is None or _int0(x.get("createdAt")) > _int0(fallback.get("createdAt")):
-                fallback = x
+        if fallback is None or _int0(x.get("createdAt")) > _int0(fallback.get("createdAt")):
+            fallback = x
     return fallback
 
 
@@ -338,13 +343,13 @@ async def _challenge_map_img(meta: dict, tag: str) -> str:
     return map_img or ""
 
 
-async def collect_daily(advanced: bool) -> dict:
+async def collect_daily(advanced: bool, now_ms: int | None = None) -> dict:
     items = await nkapi.fetch_body(nkapi.URL_DAILY)
     if not isinstance(items, list):  # 非 list 响应按空数据处理，走既有失败文案
         items = []
     want = "Advanced" if advanced else "Standard"
     # 列表 newest-first 且含未来期，不能 next() 取第一条
-    ev = _daily_pick(items, want, int(time.time() * 1000))
+    ev = _daily_pick(items, want, now_ms if now_ms is not None else int(time.time() * 1000))
     if not ev:
         return {"empty": "暂无每日挑战数据"}
     meta_url = ev.get("metadata")
@@ -992,7 +997,7 @@ async def collect_leaderboard_page(kind: str, variant: str, page: int) -> dict:
         return {"empty": f"第{page}页暂无数据（排行榜可能不足 {(page-1)*size+1} 人）"}
     start_rank = (page - 1) * size + 1
     rows_out = [
-        (start_rank + i, str(e.get("displayName") or "?").strip(), util.fmt_score(scoring, e.get("score")))
+        (start_rank + i, str(e.get("displayName") or "?").strip(), util.fmt_lb_score(scoring, e))
         for i, e in enumerate(entries)
     ]
     return {
@@ -1080,6 +1085,8 @@ async def collect_rush() -> dict:
     """
     now = util.bucket_now()
     events = await nkapi.fetch_body(nkapi.URL_EVENTS)
+    if not isinstance(events, list):  # 非 list 响应（畸形/错误信封）按空处理，走既有失败文案
+        events = []
     rush_list = [e for e in events if isinstance(e, dict) and e.get("type") == "bossRush"]
     ev = util.pick_active(rush_list, now) or util.pick_next(rush_list, now) or util.fallback_latest(rush_list)
     if not ev:
@@ -1134,6 +1141,8 @@ async def collect_collectevent(now_ms: int | None = None) -> dict:
     """
     now = now_ms if now_ms is not None else util.bucket_now()
     events = await nkapi.fetch_body(nkapi.URL_EVENTS)
+    if not isinstance(events, list):  # 非 list 响应（畸形/错误信封）按空处理，走既有失败文案
+        events = []
     cands = [e for e in events if isinstance(e, dict) and e.get("type") == "collectableEvent"]
     ev = util.pick_active(cands, now) or util.pick_next(cands, now) or util.fallback_latest(cands)
     if not ev:

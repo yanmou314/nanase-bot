@@ -14,6 +14,7 @@ from nonebot_plugin_apscheduler import scheduler
 
 from common import (
     RENDER_SEM,
+    RENDER_TOTAL_TIMEOUT,
     get_member_name,
     gradient_background,
     is_owner,
@@ -307,9 +308,10 @@ body {{ width: {w}px; height: {h}px; font-family: "Noto Sans CJK SC", sans-serif
 async def _run_daily() -> str:
     day = _prev_day()
     data = await _build_stats(day)
-    # weasyprint 渲染经全局渲染信号量串行化，避免小机器上并发渲染打爆内存
+    # weasyprint 渲染经全局渲染信号量串行化；wait_for 看门狗防挂死占住渲染槽
     async with RENDER_SEM:
-        return await asyncio.to_thread(_render, _day_label(day), data)
+        return await asyncio.wait_for(
+            asyncio.to_thread(_render, _day_label(day), data), timeout=RENDER_TOTAL_TIMEOUT)
 
 
 
@@ -335,7 +337,23 @@ async def _mark_reported_async(day: date) -> None:
     await asyncio.to_thread(_mark_reported, day)
 
 
+_daily_push_running = False  # cron(00:05) 与重连 catchup 并发时防双推
+
+
 async def _run_and_push_daily() -> None:
+    global _daily_push_running
+    if _daily_push_running:
+        return
+    if _last_report_date() >= datetime.now(_SH).date().isoformat():
+        return  # 当日已出报：catchup 与定时任务互相顶替时不再重复推
+    _daily_push_running = True
+    try:
+        await _run_and_push_daily_inner()
+    finally:
+        _daily_push_running = False
+
+
+async def _run_and_push_daily_inner() -> None:
     """生成并推送前一日指令统计日报；成功生成后记录 last_report_date。"""
     groups = _target_groups()
     if not groups:

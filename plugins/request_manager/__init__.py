@@ -625,6 +625,9 @@ async def owner_decision(bot: Bot, event: MessageEvent):
 @private_matcher.handle()
 async def forward_private(bot: Bot, event: MessageEvent):
     # 每用户 5 分钟内最多转发 3 条，超出折叠为统计，防止私聊刷屏 Owner
+    # 先过滤身份/类型再记账：否则每个群消息发送者都会写入 _pm_throttle 且永不清理
+    if is_owner(event) or event.message_type != "private":
+        return
     uid = str(event.user_id)
     now = time.time()
     rec = _pm_throttle.setdefault(uid, {"window": now, "n": 0})
@@ -633,8 +636,6 @@ async def forward_private(bot: Bot, event: MessageEvent):
         rec["n"] = 0
     rec["n"] += 1
     if rec["n"] > 3:
-        return
-    if is_owner(event) or event.message_type != "private":
         return
     text = event.get_plaintext().strip() or "（非文字消息）"
     name = str(event.user_id)

@@ -21,7 +21,7 @@ import re
 import threading
 import time
 
-from nonebot import get_bot, get_driver, logger, on_command, on_request
+from nonebot import get_driver, logger, on_command, on_request
 from nonebot.adapters.onebot.v11 import Bot, GroupRequestEvent, Message, MessageSegment
 from nonebot.params import CommandArg
 
@@ -93,11 +93,15 @@ def _load_verify_state() -> dict:
     return {}
 
 
+_VERIFY_LOCK = threading.RLock()  # 串行化 verify_state.json 落盘：并发保存会互踩同一 tmp 文件
+
+
 async def _save_verify_state() -> None:
     try:
         await save_json_state_async(
             _VERIFY_FILE,
             {"pending": dict(_verify_pending), "active": dict(_verify_active)},
+            _VERIFY_LOCK,
         )
     except Exception:
         logger.warning("[bnet_verify] 验证状态落盘失败", exc_info=True)
@@ -122,12 +126,15 @@ _STARTED_AT = time.time()  # 进程启动时刻：区分重启前遗留的在途
 _restore_verify_state()
 
 
-@get_driver().on_startup
-async def _report_interrupted_verifies() -> None:
-    """重启导致中断的在途验证：延迟通知主人去客户端查看（记录仍保留，可 .同意）。"""
+@get_driver().on_bot_connect
+async def _report_interrupted_verifies(bot: Bot) -> None:
+    """重启导致中断的在途验证：连接建立后通知主人去客户端查看（记录仍保留，可 .同意）。
+
+    必须挂 on_bot_connect：on_startup 阶段没有任何 Bot 连接，get_bot() 必抛异常，
+    通知永远发不出（且此前内联 sleep(60) 会卡住整个启动流程）。
+    """
     if not _verify_active:
         return
-    await asyncio.sleep(60)
     # 只算重启前遗留的（ts 早于本次启动）：启动后新发起且仍在途的不算中断
     interrupted = {qq: rec for qq, rec in _verify_active.items()
                    if isinstance(rec, dict) and float(rec.get("ts") or 0) < _STARTED_AT}
@@ -137,7 +144,6 @@ async def _report_interrupted_verifies() -> None:
     for qq, rec in interrupted.items():
         lines.append(f"群{rec.get('group_id')} QQ{qq}（{rec.get('tag')}）")
     try:
-        bot = get_bot()
         await bot.send_private_msg(
             user_id=int(OWNER),
             message=MessageSegment.text(

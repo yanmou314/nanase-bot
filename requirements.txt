@@ -10,3 +10,5 @@ cnlunar==0.2.4
 python-dotenv>=1.0,<2
 tzdata>=2024.1
 jieba==0.42.1
+wordcloud==1.9.6
+numpy==2.5.2

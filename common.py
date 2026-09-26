@@ -135,18 +135,13 @@ def save_image(data: bytes, content_type: str, prefix: str, cache_dir: str) -> s
     return path
 
 
-async def save_image_async(data: bytes, content_type: str, prefix: str, cache_dir: str) -> str:
-    """save_image 的异步封装（to_thread），事件循环内请使用本函数。"""
-    return await asyncio.to_thread(save_image, data, content_type, prefix, cache_dir)
-
-
 def parse_tag(arg: str) -> str:
     """解析战网/游戏标签：名字#数字。拒绝空白与控制符，防止注入下游指令通道。"""
     tag = arg.replace("-", "#").strip()
     # 拒绝空白与控制字符，避免 foo#123\t/cmd 这类注入
     if any(ch.isspace() or ord(ch) < 32 for ch in tag):
         return ""
-    tag = tag.replace(" ", "")
+    # 此处已无空格可控（isspace 分支先行返回），无需再 replace
     return tag if "#" in tag else ""
 
 
@@ -187,8 +182,11 @@ def _cleanup_cache_throttled(cache_dir: str, max_age: int) -> None:
     cleanup_cache(cache_dir, max_age=max_age)
 
 
-def run_in_thread(func, *args, **kwargs):
-    return asyncio.to_thread(func, *args, **kwargs)
+# ---------------- 业务共享常量 ----------------
+# OW 任务中继群与查询机器人 QQ：owstats/auto_chat/ow_patch/repeater/random_chat 多处使用。
+# 换中继群只需改这里（此前字面量散落 6 处文件）。
+RELAY_GROUP_ID = 864213945
+RELAY_BOT_QQ = 3889045090
 
 
 # ---------------- JSON 状态文件读写（统一模式：RLock + tmp + fsync + os.replace） ----------------
@@ -245,21 +243,49 @@ def save_json_state(path: str, data: dict, lock=None) -> None:
         if os.path.dirname(path):
             os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
         # 权限沿用目标文件现状（防止手工收紧到 600 的密钥类文件在重写后掉回 644）；
-        # 新建文件一律 600——状态文件普遍含 QQ 号/群号，部分还含 API key 或数据库 DSN
+        # 新建一律 600，历史松权限（644 等）趁机收紧——状态文件普遍含 QQ 号/群号，
+        # 部分还含 API key 或数据库 DSN。os.open 直接按目标权限建 tmp，消除
+        # 「先按 umask 权限落盘、写完才 chmod」的世界可读窗口。
         try:
             mode = os.stat(path).st_mode & 0o777
         except OSError:
             mode = 0o600
+        if mode & 0o077:
+            mode = 0o600
+        fd = None
         try:
-            os.chmod(tmp, mode)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                fd = None  # 所有权移交 fdopen
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                os.chmod(tmp, mode)
+            except OSError:
+                pass
+            os.replace(tmp, path)
+        except BaseException:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            try:
+                os.remove(tmp)  # 异常路径清理残留 tmp，不留半截文件
+            except OSError:
+                pass
+            raise
+        # 目录 fsync：掉电/崩溃后确保 rename 本身已落盘，状态不回退到旧版本
+        try:
+            dirfd = os.open(os.path.dirname(path) or ".", getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(dirfd)
+            finally:
+                os.close(dirfd)
         except OSError:
             pass
-        os.replace(tmp, path)
 
 
 async def save_json_state_async(path: str, data: dict, lock=None) -> None:

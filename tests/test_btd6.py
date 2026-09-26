@@ -787,42 +787,51 @@ def test_daily_prefix():
 
 
 def test_daily_pick_skips_future_issue(monkeypatch):
-    """回归：按 id 日期后缀 + Asia/Shanghai 日历日选期，凌晨不退回昨天。"""
+    """回归：选「正在进行」的一期。NK 的 id 日期后缀是发行日：当日缀条目当晚
+    ~23:31 写入、次日凌晨才生效，createdAt 未到的必须跳过（2026-09-26 16:00
+    推送曾把当晚才上线的下一期当作当日推送，白天进行中的永远是昨日缀条目）。"""
     cst = timezone(timedelta(hours=8))
-    # 2026-09-12 16:00 CST
-    now_ms = int(datetime(2026, 9, 12, 16, 0, tzinfo=cst).timestamp() * 1000)
     items = [
         {"name": "Standard 2954: gamer_rat's Challenge", "id": "rot295420260912",
-         "createdAt": now_ms + 8 * 3600_000, "metadata": "https://meta/2954"},
+         "createdAt": int(datetime(2026, 9, 12, 23, 31, tzinfo=cst).timestamp() * 1000),
+         "metadata": "https://meta/2954"},
         {"name": "Standard 2953: FrostElite7399's Challenge", "id": "rot295320260911",
-         "createdAt": now_ms - 8 * 3600_000, "metadata": "https://meta/2953"},
+         "createdAt": int(datetime(2026, 9, 11, 23, 31, tzinfo=cst).timestamp() * 1000),
+         "metadata": "https://meta/2953"},
         {"name": "Advanced 2941: TopHero8383's Challenge", "id": "adv294120260912",
-         "createdAt": now_ms + 8 * 3600_000, "metadata": "https://meta/a2941"},
+         "createdAt": int(datetime(2026, 9, 12, 23, 31, tzinfo=cst).timestamp() * 1000),
+         "metadata": "https://meta/a2941"},
         {"name": "Advanced 2940: new's Challenge", "id": "adv294020260911",
-         "createdAt": now_ms - 8 * 3600_000, "metadata": "https://meta/a2940"},
+         "createdAt": int(datetime(2026, 9, 11, 23, 31, tzinfo=cst).timestamp() * 1000),
+         "metadata": "https://meta/a2940"},
     ]
+    # 09-12 16:00 CST：今日缀 2954 尚未生效 → 选进行中的 2953（玩家正在玩的）
+    now_ms = int(datetime(2026, 9, 12, 16, 0, tzinfo=cst).timestamp() * 1000)
     assert btd6._daily_issue_date(now_ms) == "20260912"
-    assert btd6._daily_pick(items, "Standard", now_ms)["id"] == "rot295420260912"
-    assert btd6._daily_pick(items, "Advanced", now_ms)["id"] == "adv294120260912"
-    # 北京时间凌晨仍是「今天」，不得因 UTC 已过 20:00 而退回昨天
+    assert btd6._daily_pick(items, "Standard", now_ms)["id"] == "rot295320260911"
+    assert btd6._daily_pick(items, "Advanced", now_ms)["id"] == "adv294020260911"
+    # 09-12 01:00 CST：00:20 切换后进行的仍是 2953（后缀 0911），不得跳到未生效的 2954
     early_ms = int(datetime(2026, 9, 12, 1, 0, tzinfo=cst).timestamp() * 1000)
-    assert btd6._daily_issue_date(early_ms) == "20260912"
-    assert btd6._daily_pick(items, "Standard", early_ms)["id"] == "rot295420260912"
-    # 次日
+    assert btd6._daily_pick(items, "Standard", early_ms)["id"] == "rot295320260911"
+    # 09-12 23:45 CST：2954 已写入（createdAt 23:31 已过）→ 后缀命中即视为新一期
+    eve_ms = int(datetime(2026, 9, 12, 23, 45, tzinfo=cst).timestamp() * 1000)
+    assert btd6._daily_pick(items, "Standard", eve_ms)["id"] == "rot295420260912"
+    # 09-13 白天：后缀无 0913 条目 → fallback 取最新已生效的 2954
     next_ms = int(datetime(2026, 9, 13, 10, 0, tzinfo=cst).timestamp() * 1000)
     assert btd6._daily_issue_date(next_ms) == "20260913"
+    assert btd6._daily_pick(items, "Standard", next_ms)["id"] == "rot295420260912"
 
     meta = {"name": "Today's Challenge", "mapURL": "", "map": ""}
     bodies = {
         btd6.URL_DAILY: items,
-        "https://meta/2954": meta,
-        "https://meta/a2941": meta,
+        "https://meta/2953": meta,
+        "https://meta/a2940": meta,
     }
     monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(bodies))
-    col = asyncio.run(btd6.collect_daily(False))
-    assert col["prefix"] == "每日标准·第2954期"
-    adv = asyncio.run(btd6.collect_daily(True))
-    assert adv["prefix"] == "每日高级·第2941期"
+    col = asyncio.run(btd6.collect_daily(False, now_ms))
+    assert col["prefix"] == "每日标准·第2953期"
+    adv = asyncio.run(btd6.collect_daily(True, now_ms))
+    assert adv["prefix"] == "每日高级·第2940期"
 
 
 def test_reward_txt():
@@ -2220,6 +2229,8 @@ async def _run_batch(monkeypatch, tmp_path, entries, groups=(100,)):
     with btd6.push._batch_lock:
         btd6.push._pending_batch.clear()
     btd6.push._overview_already_sent.clear()
+    btd6.push._batch_retries.clear()
+    btd6.push._detail_delivered.clear()
     for kind, ev, ev_id, label in entries:
         btd6.push._pending_batch[kind] = (ev, ev_id, label)
     await btd6.push._flush_push_batch()
@@ -2494,3 +2505,56 @@ def test_push_social_text_only_and_active_only(monkeypatch, tmp_path):
         "social", ev, "soc-cur", "Play With Friends", {100}))
     assert sent and "社交赛季已开启：Play With Friends" in sent[0]
     assert btd6.push._last_pushed().get("social") == "soc-cur"
+
+
+def test_send_push_batch_skips_delivered_groups(monkeypatch, tmp_path):
+    """回归：重试轮按 delivered 记账只补发失败群——坏群不再让健康群重复收推送。"""
+    sent = []
+
+    class _Bot:
+        async def send_group_msg(self, group_id=None, message=None, **kw):
+            sent.append(group_id)
+
+    monkeypatch.setattr(btd6.push, "get_bot", lambda: _Bot())
+    payload = {"overview": None, "announce": "", "label": "OdyX", "details": [("远征已刷新", None)]}
+    result = asyncio.run(btd6.push._send_push_batch(
+        [("odyssey", "ody-1", payload)], {100, 200}, {"odyssey:0": {100}}))
+    assert sent == [200]
+    assert result["detail_all"]["odyssey"] is True
+
+
+def test_flush_retry_requeues_then_gives_up(monkeypatch, tmp_path):
+    """回归：未完整送达先回填重试（计预算），超过 _PUSH_RETRY_MAX 后放弃不再回填。"""
+    monkeypatch.setattr(btd6.push, "BTD6_PUSH_STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(btd6.push, "_push_groups", lambda: {100})
+
+    async def fake_render(kind, ev, label, overview_path=None):
+        return {"overview": None, "announce": "", "label": label, "details": [("t", None)]}
+
+    async def fake_send(payloads, groups, delivered=None):
+        return {"overview_ok": False,
+                "detail_ok": {k: False for k, _i, _p in payloads},
+                "overview_all": False,
+                "detail_all": {k: False for k, _i, _p in payloads}}
+
+    monkeypatch.setattr(btd6.push, "get_bot", lambda: object())
+    monkeypatch.setattr(btd6.push, "_render_kind_payload", fake_render)
+    monkeypatch.setattr(btd6.push, "_send_push_batch", fake_send)
+    monkeypatch.setattr(btd6.push, "_PUSH_BATCH_DELAY_S", 0.0)
+    with btd6.push._batch_lock:
+        btd6.push._pending_batch.clear()
+    btd6.push._batch_retries.clear()
+    btd6.push._pending_batch["odyssey"] = ({"id": "ody-x", "name": "S"}, "ody-x", "S")
+
+    asyncio.run(btd6.push._flush_push_batch())
+    assert btd6.push._pending_batch.get("odyssey") is not None  # 预算内：回填重试
+    assert btd6.push._batch_retries[("odyssey", "ody-x")] == 1
+
+    asyncio.run(btd6.push._flush_push_batch())
+    assert btd6.push._batch_retries[("odyssey", "ody-x")] == 2
+
+    btd6.push._batch_retries[("odyssey", "ody-x")] = btd6.push._PUSH_RETRY_MAX
+    asyncio.run(btd6.push._flush_push_batch())
+    assert "odyssey" not in btd6.push._pending_batch  # 超上限：放弃
+    assert btd6.push._last_pushed().get("odyssey") != "ody-x"  # 未误标成功
+    btd6.push._batch_retries.pop(("odyssey", "ody-x"), None)
