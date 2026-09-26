@@ -786,52 +786,62 @@ def test_daily_prefix():
     assert btd6._daily_prefix("Weird", False) == "每日标准"
 
 
-def test_daily_pick_skips_future_issue(monkeypatch):
-    """回归：选「正在进行」的一期。NK 的 id 日期后缀是发行日：当日缀条目当晚
-    ~23:31 写入、次日凌晨才生效，createdAt 未到的必须跳过（2026-09-26 16:00
-    推送曾把当晚才上线的下一期当作当日推送，白天进行中的永远是昨日缀条目）。"""
+def test_daily_pick_window_boundary(monkeypatch):
+    """回归：每日窗口 = 发行日 16:00 → 次日 16:00（用户实测口径）。
+
+    id 后缀 = 窗口起始日；选期目标 = (now − 16h) 的日期——
+    now ≥ 16:00 命中今日缀（新期刚开），now < 16:00 命中昨日缀（进行中）。
+    createdAt 字段是滚动占位值，与窗口无关， fixture 里刻意全部置同值证明不依赖它。
+    """
     cst = timezone(timedelta(hours=8))
     items = [
+        {"name": "Standard 2955: next's Challenge", "id": "rot295520260913",
+         "createdAt": 1790000000000, "metadata": "https://meta/2955"},
         {"name": "Standard 2954: gamer_rat's Challenge", "id": "rot295420260912",
-         "createdAt": int(datetime(2026, 9, 12, 23, 31, tzinfo=cst).timestamp() * 1000),
-         "metadata": "https://meta/2954"},
+         "createdAt": 1790000000000, "metadata": "https://meta/2954"},
         {"name": "Standard 2953: FrostElite7399's Challenge", "id": "rot295320260911",
-         "createdAt": int(datetime(2026, 9, 11, 23, 31, tzinfo=cst).timestamp() * 1000),
-         "metadata": "https://meta/2953"},
+         "createdAt": 1790000000000, "metadata": "https://meta/2953"},
         {"name": "Advanced 2941: TopHero8383's Challenge", "id": "adv294120260912",
-         "createdAt": int(datetime(2026, 9, 12, 23, 31, tzinfo=cst).timestamp() * 1000),
-         "metadata": "https://meta/a2941"},
+         "createdAt": 1790000000000, "metadata": "https://meta/a2941"},
         {"name": "Advanced 2940: new's Challenge", "id": "adv294020260911",
-         "createdAt": int(datetime(2026, 9, 11, 23, 31, tzinfo=cst).timestamp() * 1000),
-         "metadata": "https://meta/a2940"},
+         "createdAt": 1790000000000, "metadata": "https://meta/a2940"},
     ]
-    # 09-12 16:00 CST：今日缀 2954 尚未生效 → 选进行中的 2953（玩家正在玩的）
+    # 09-12 16:00：窗口切换瞬间 → 命中今日缀 2954（新期刚开）
     now_ms = int(datetime(2026, 9, 12, 16, 0, tzinfo=cst).timestamp() * 1000)
     assert btd6._daily_issue_date(now_ms) == "20260912"
-    assert btd6._daily_pick(items, "Standard", now_ms)["id"] == "rot295320260911"
-    assert btd6._daily_pick(items, "Advanced", now_ms)["id"] == "adv294020260911"
-    # 09-12 01:00 CST：00:20 切换后进行的仍是 2953（后缀 0911），不得跳到未生效的 2954
-    early_ms = int(datetime(2026, 9, 12, 1, 0, tzinfo=cst).timestamp() * 1000)
+    assert btd6._daily_pick(items, "Standard", now_ms)["id"] == "rot295420260912"
+    assert btd6._daily_pick(items, "Advanced", now_ms)["id"] == "adv294120260912"
+    # 09-12 08:00：< 16:00 → 目标后缀为昨日(0911)，进行中的一期是 2953
+    early_ms = int(datetime(2026, 9, 12, 8, 0, tzinfo=cst).timestamp() * 1000)
+    assert btd6._daily_issue_date(early_ms) == "20260911"
     assert btd6._daily_pick(items, "Standard", early_ms)["id"] == "rot295320260911"
-    # 09-12 23:45 CST：2954 已写入（createdAt 23:31 已过）→ 后缀命中即视为新一期
+    # 09-12 23:45：仍命中今日缀 2954
     eve_ms = int(datetime(2026, 9, 12, 23, 45, tzinfo=cst).timestamp() * 1000)
     assert btd6._daily_pick(items, "Standard", eve_ms)["id"] == "rot295420260912"
-    # 09-13 白天：后缀无 0913 条目 → fallback 取最新已生效的 2954
+    # 09-13 10:00：< 16:00 → 目标仍为昨日(0912)，直接命中 2954
     next_ms = int(datetime(2026, 9, 13, 10, 0, tzinfo=cst).timestamp() * 1000)
-    assert btd6._daily_issue_date(next_ms) == "20260913"
+    assert btd6._daily_issue_date(next_ms) == "20260912"
     assert btd6._daily_pick(items, "Standard", next_ms)["id"] == "rot295420260912"
+    # 09-13 16:00：窗口切换 → 命中今日缀 2955（新期刚开）
+    late_ms = int(datetime(2026, 9, 13, 16, 0, tzinfo=cst).timestamp() * 1000)
+    assert btd6._daily_issue_date(late_ms) == "20260913"
+    assert btd6._daily_pick(items, "Standard", late_ms)["id"] == "rot295520260913"
+    # 09-13 16:00 且后缀 0913 缺号（NK 未生成）→ 兜底取后缀 ≤ 目标的最新一期 2954
+    items_no13 = [x for x in items if x["id"] != "rot295520260913"]
+    assert btd6._daily_pick(items_no13, "Standard", late_ms)["id"] == "rot295420260912"
 
     meta = {"name": "Today's Challenge", "mapURL": "", "map": ""}
     bodies = {
         btd6.URL_DAILY: items,
-        "https://meta/2953": meta,
-        "https://meta/a2940": meta,
+        "https://meta/2954": meta,
+        "https://meta/a2941": meta,
     }
     monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(bodies))
+    # 09-12 16:00：窗口切换瞬间 → 进行中的一期是 2954（新期刚开）
     col = asyncio.run(btd6.collect_daily(False, now_ms))
-    assert col["prefix"] == "每日标准·第2953期"
+    assert col["prefix"] == "每日标准·第2954期"
     adv = asyncio.run(btd6.collect_daily(True, now_ms))
-    assert adv["prefix"] == "每日高级·第2940期"
+    assert adv["prefix"] == "每日高级·第2941期"
 
 
 def test_reward_txt():

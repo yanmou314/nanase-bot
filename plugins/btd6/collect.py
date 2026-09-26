@@ -294,38 +294,41 @@ def _daily_prefix(label: str, advanced: bool) -> str:
 
 
 def _daily_issue_date(now_ms: int) -> str:
-    """NK id 后缀的「发行日」口径（YYYYMMDD），以 Asia/Shanghai 日历日为准。
+    """每日挑战窗口边界：每天 16:00（CST）切换，窗口 = 发行日 16:00 → 次日 16:00。
 
-    注意：后缀日 ≠ 玩家当前可玩的一期（当日缀条目发行在当晚、次日凌晨生效），
-    选期逻辑见 _daily_pick——这里只提供后缀匹配的目标日期。
+    目标后缀 = (now − 16h) 的日期：now ≥ 16:00 取今日（16:00 刚开的新一期），
+    now < 16:00 取昨日（进行中的一期）。用户 2026-09-27 实测：当前窗口为
+    昨 16:00 → 今 16:00，与 push.py「游戏内正式刷新点 16:00」相互印证。
     """
-    dt = datetime.fromtimestamp(now_ms / 1000, tz=timezone(timedelta(hours=8)))
+    dt = datetime.fromtimestamp(now_ms / 1000, tz=timezone(timedelta(hours=8))) - timedelta(hours=16)
     return dt.strftime("%Y%m%d")
 
 
 def _daily_pick(items: list, want: str, now_ms: int) -> dict | None:
-    """每日/高级选期：取「当前正在进行」的一期。
+    """每日/高级选期：id 后缀 = 窗口起始日，窗口 = 该日 16:00 → 次日 16:00。
 
-    NK 列表 newest-first。实测口径（2026-09-26 生产 plays 佐证：白天当日缀条目
-    仅 3 plays、昨日缀 38,807）：id 日期后缀是「发行日」——当日缀条目在发行日
-    当晚 ~23:31 才写入列表、次日凌晨 ~00:20 生效，白天进行中的一期永远是后缀为
-    昨天的条目。因此 createdAt 未到（含 id 后缀命中）的条目必须跳过，否则全天
-    都在预告今晚才上线的一期（2026-09-26 16:00 推送事故）；fallback 取最新一个
-    已生效条目，覆盖后缀缺号与凌晨切换前的窗口。
+    target = (now − 16h) 的日期——now ≥ 16:00 命中今日缀（新期刚开），
+    now < 16:00 命中昨日缀（进行中的一期）。后缀缺号（NK 未生成）时兜底取
+    后缀 ≤ target 的最新一期。
+    注意：列表条目的 createdAt 是滚动占位值（恒为 now − 24h×期龄，随请求漂移），
+    与挑战窗口无关，不可用作判据——2026-09-26 的「选期提前」误判即源于此。
     """
     target = _daily_issue_date(now_ms)
-    fallback = None
+    picked = None
+    best_suffix = ""
     for x in items:
         if not isinstance(x, dict) or not str(x.get("name") or "").startswith(want):
             continue
-        if _int0(x.get("createdAt")) > now_ms:
-            continue
         iid = str(x.get("id") or "")
-        if iid.endswith(target):
+        suffix = iid[-8:] if len(iid) >= 8 else ""
+        if not suffix.isdigit():
+            continue
+        if suffix == target:
             return x
-        if fallback is None or _int0(x.get("createdAt")) > _int0(fallback.get("createdAt")):
-            fallback = x
-    return fallback
+        if suffix <= target and suffix > best_suffix:
+            best_suffix = suffix
+            picked = x
+    return picked
 
 
 async def _challenge_map_img(meta: dict, tag: str) -> str:
