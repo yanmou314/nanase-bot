@@ -671,6 +671,24 @@ body {{ width: {BOSS_DUAL_CARD_W}px; height: {h}px; color: #ffffff;
                    color: #e8f2fc; font-size: 18px; line-height: 24px; font-weight: 800; }}
 
 .bdual-chip.sm {{ font-size: 15px; line-height: 20px; padding: 6px 8px; }}
+.bdual-chip.xs {{ font-size: 12px; line-height: 16px; padding: 4px 8px; }}
+.bdual-chip.xs img, .bdual-chip.xs .bdual-chip-icon {{ width: 16px; height: 16px;
+                                                   vertical-align: -3px; margin-right: 3px; }}
+
+.bdual-panel3 {{ border: 1px solid #3d648c; border-radius: 12px; overflow: hidden;
+                 background: #213753; }}
+.bdual-t3 {{ display: table; width: 100%; table-layout: fixed; }}
+.bdual-trow {{ display: table-row; }}
+.bdual-tcell {{ display: table-cell; vertical-align: top; background: #213753;
+               padding: 0 10px 10px; }}
+.bdual-tcell + .bdual-tcell {{ border-left: 1px solid #3d648c; }}
+.bdual-headcell {{ text-align: center; padding: 8px 6px; color: #ffffff; font-size: 18px;
+                  line-height: 24px; font-weight: 900; text-shadow: 0 1px 0 rgba(4,16,30,.45);
+                  box-shadow: inset 0 1px 0 rgba(255,255,255,.22); }}
+.bdual-headcell.standard {{ background: linear-gradient(180deg, #5b9fd4 0%, #2f6fad 100%);
+                           border-bottom: 2px solid #1d4f80; }}
+.bdual-headcell.elite {{ background: linear-gradient(180deg, #e07070 0%, #b83232 100%);
+                        border-bottom: 2px solid #7a1e1e; }}
 
 .bdual-cols {{ display: table; width: 100%; table-layout: fixed; }}
 .bdual-col {{ display: table-cell; width: 50%; vertical-align: top; }}

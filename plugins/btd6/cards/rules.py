@@ -659,19 +659,10 @@ def boss_dual_html(col: dict) -> str:
     return common._boss_dual_shell(body, frame_h)
 
 
-_BDUAL_COL_W = 330  # 三列布局下面板内容可用宽度（1220 画布三等分减内边距/缝隙）
-
-
-def _bdual_chip_text_w(text: str) -> int:
-    """compact chips 文本估算宽：CJK≈15px，数字/字母/符号≈8px。"""
-    return sum(15 if ord(ch) > 0x2000 else 8 for ch in text)
-
-
 def _daily_meta_chip_html(variant_col: dict) -> str:
-    """每日面板元信息 chips：固定两行结构（行1 难度/模式/回合，行2 资金/生命）。
+    """每日面板元信息 chips：固定两行（行1 难度/模式/回合，行2 资金/生命）。
 
-    每行最坏文本宽度 ≈ 313px < 可用宽度，行数与当天数据无关，三面板天然等高；
-    「最大生命」按需求移除。
+    「最大生命」按需求移除；共享表格下行高自动取三列最大值，天然对齐。
     """
     meta = variant_col["meta"]
     diff_raw = str(meta.get("difficulty") or "")
@@ -682,18 +673,20 @@ def _daily_meta_chip_html(variant_col: dict) -> str:
     cash = int(meta.get("startingCash") or 0)
     lives = int(meta.get("lives") or 0)
 
-    def chip(label, value):
-        return (f"<span class='bdual-chip sm' style='white-space:nowrap'>"
+    def chip(icon, fallback, label, value):
+        img_html = common._race_ui_img(icon, fallback, "bdual-chip-icon")
+        return (f"<span class='bdual-chip xs' style='white-space:nowrap'>{img_html}"
                 f"{util._esc(label)} <b>{util._esc(value)}</b></span>")
 
+    diff_icon = _difficulty_ui_icon(diff_raw)
     row1 = ("<div class='bdual-chip-row'>"
-            + chip("难度", diff or "?")
-            + chip("模式", mode or "?")
-            + chip("回合", f"{start_r}–{end_r}")
+            + chip(diff_icon, "★", "难度", diff or "?")
+            + chip("RaceIcon.png", "🏁", "模式", mode or "?")
+            + chip("start-round.png", "▶", "回合", f"{start_r}–{end_r}")
             + "</div>")
     row2 = ("<div class='bdual-chip-row'>"
-            + chip("资金", f"{cash:,}")
-            + chip("生命", f"{lives:,}")
+            + chip("cash.png", "🪙", "资金", f"{cash:,}")
+            + chip("heart.png", "❤", "生命", f"{lives:,}")
             + "</div>")
     return row1 + row2
 
@@ -716,32 +709,8 @@ def _daily_rule_chips(meta: dict) -> str:
     return "".join(chips)
 
 
-def _daily_panel_metrics(v: dict) -> tuple[int, int, bool]:
-    """规则调节行数 / 猴子网格行数 / 是否有 extras——纯计数，供对齐与画布高度。"""
-    meta = v["meta"]
-    mt = int(meta.get("maxTowers") or 0)
-    towers_cap = "无限制" if mt >= 9999 or mt <= 0 else f"{mt:,}"
-    widths = [_bdual_chip_text_w("限制塔数 " + towers_cap) + 50,
-              _bdual_chip_text_w("限制模范 " + str(int(meta.get("maxParagons") or 0))) + 50]
-    for label, value, _icon in common._race_modifier_items(meta.get("_bloonModifiers")):
-        widths.append(_bdual_chip_text_w(f"{label} {value}") + 50)
-    rule_rows, cur = 1, 0
-    for w in widths:
-        if cur and cur + w > _BDUAL_COL_W:
-            rule_rows += 1
-            cur = w
-        else:
-            cur += w
-    grid_rows = max(1, -(-len(_daily_monkey_cells(meta)) // 3))
-    has_extras = bool(_custom_round_sets(meta)) or any(
-        meta.get(key) for key, _lb in i18n.FLAG_LABELS)
-    return rule_rows, grid_rows, has_extras
-
-
-def _daily_dual_panel(v: dict, head_cls: str = "standard", rule_h: int = 0,
-                      grid_rows: int = 1) -> str:
-    """每日 bdual 单面板。分区高度：元信息固定 88px；规则调节区按三面板最大
-    行数预留（rule_h，由 daily_dual_html 统一下传）——「可用猴子」三列对齐。"""
+def _daily_variant_cells(v: dict, head_cls: str = "standard") -> dict:
+    """单变体的五个分区 html：head/pmap/meta/rule/grid（供共享表格按行拼装）。"""
     meta = v["meta"]
     grid_cells = _daily_monkey_cells(meta)
     grid_html = _bdual_grid_table(grid_cells, 3)
@@ -756,35 +725,56 @@ def _daily_dual_panel(v: dict, head_cls: str = "standard", rule_h: int = 0,
             f"{map_thumb}</div>"
             f"<div class='bdual-pmap-copy'>{util._esc(map_txt)}</div></div>")
 
-    rule_chips = _daily_rule_chips(meta)
+    rule_html = ("<div class='bdual-sec-label'>规则调节</div>" + _daily_rule_chips(meta))
     if _custom_round_sets(meta):
-        rule_chips += "<div class='bdual-extras'>自定义回合</div>"
+        rule_html += "<div class='bdual-extras'>自定义回合</div>"
     bans = [label_b for key, label_b in i18n.FLAG_LABELS if meta.get(key)]
     if bans:
-        rule_chips += f"<div class='bdual-extras'>{util._esc('禁用：' + '、'.join(bans))}</div>"
-    rule_zone = (f"<div style='min-height:{rule_h}px'>"
-                 "<div class='bdual-sec-label'>规则调节</div>"
-                 f"{rule_chips}</div>")
+        rule_html += f"<div class='bdual-extras'>{util._esc('禁用：' + '、'.join(bans))}</div>"
 
-    return (
-        "<div class='bdual-panel'>"
-        f"<div class='bdual-panel-head {head_cls}'>{util._esc(v['issue'])}</div>"
-        "<div class='bdual-panel-body'>"
-        f"{pmap}"
-        "<div style='min-height:88px'>"
-        "<div class='bdual-chip-row'>" + _daily_meta_chip_html(v) + "</div>"
-        "</div>"
-        f"{rule_zone}"
-        "<div class='bdual-sec-label'>可用猴子</div>"
-        f"{grid_html}"
-        "</div></div>")
+    head = f"<div class='bdual-headcell {head_cls}'>{util._esc(v['issue'])}</div>"
+    return {"head": head, "pmap": pmap, "meta": _daily_meta_chip_html(v),
+            "rule": rule_html, "grid": grid_html, "_head_cls": head_cls}
+
+
+def _daily_content_bottom_css(png_path: str, dpi: int) -> int:
+    """扫描探针渲染图，返回内容最后一行的 CSS 高度（排除背景渐变）。"""
+    from PIL import Image
+
+    im = Image.open(png_path).convert("RGB")
+    w, h = im.size
+    scale = dpi / 96
+    stops = ((0.0, (90, 163, 216)), (0.52, (47, 126, 184)), (1.0, (26, 95, 150)))
+
+    def bg_at(y):
+        t = min(1.0, y / h)
+        for (t0, c0), (t1, c1) in zip(stops, stops[1:]):
+            if t <= t1:
+                k = (t - t0) / (t1 - t0) if t1 > t0 else 0
+                return tuple(c0[i] + (c1[i] - c0[i]) * k for i in range(3))
+        return stops[-1][1]
+
+    bottom = h
+    for y in range(h - 1, -1, -1):
+        er, eg, eb = bg_at(y)
+        hit = False
+        for x in range(0, w, 10):
+            r, g, b = im.getpixel((x, y))
+            if abs(r - er) > 28 or abs(g - eg) > 28 or abs(b - eb) > 28:
+                hit = True
+                break
+        if hit:
+            bottom = y + 1
+            break
+    return int(bottom / scale)
 
 
 def daily_dual_html(col: dict) -> str:
     """每日挑战 标准/高级/Coop 三面板平行合卡（Boss bdual 版式）。
 
-    高度自适应：规则调节行数、猴子网格行数按当天活动数据计算（宽度估算法，
-    与实际换行口径一致），画布高度随内容变化，无需手工标定常数。
+    分区对齐与画布高度完全自适应（两遍渲染）：三个变体拼进一张共享表格，
+    行高自动取该行三列最大值——规则调节/可用猴子天然对齐；先以宽松画布渲染
+    探针图实测内容底部，再按实测值出正式尺寸，不依赖手工标定常数。
     """
     if col.get("empty"):
         body = f"<div class='bdual-empty'>{util._esc(col['empty'])}</div>"
@@ -792,8 +782,8 @@ def daily_dual_html(col: dict) -> str:
 
     variants = col.get("variants") or []
     ids = []
-    panels = []
-    panel_hs = []
+    cells_list = []
+    rough = 62 + 10
     for v in variants:
         ev = v.get("ev") or {}
         sid = str(ev.get("id") or "")
@@ -802,14 +792,11 @@ def daily_dual_html(col: dict) -> str:
         if sid:
             ids.append(sid)
         variant = v.get("variant")
-        rule_rows, grid_rows, has_extras = _daily_panel_metrics(v)
-        rule_h = rule_rows * 36 + 10 + (22 if has_extras else 0)
         head_cls = {"advanced": "elite"}.get(variant, "standard")
-        panel = _daily_dual_panel(v, head_cls=head_cls, rule_h=rule_h, grid_rows=grid_rows)
-        cls = "eli" if variant == "advanced" else "std"
-        panels.append(f"<div class='bdual-col {cls}' style='width:33.3%'>{panel}</div>")
-        panel_hs.append(42 + 68 + 88 + rule_h + 34 + grid_rows * 120 + 20)
-        _ = v  # noqa: B018
+        cells_list.append(_daily_variant_cells(v, head_cls=head_cls))
+        meta = v["meta"]
+        grid_rows = max(1, -(-len(_daily_monkey_cells(meta)) // 3))
+        rough = max(rough, 62 + 10 + 42 + 78 + 88 + 150 + 34 + grid_rows * 120 + 40)
 
     ids_txt = f"ID: {' / '.join(ids)}" if ids else ""
     titlebar = (
@@ -817,13 +804,42 @@ def daily_dual_html(col: dict) -> str:
         "<div class='bdual-title'>每日挑战情报</div>"
         f"<div class='bdual-subtitle'>{util._esc(ids_txt)}</div>"
         "</div>")
-    body = titlebar + f"<div class='bdual-cols'>{''.join(panels)}</div>"
+
+    sections = ("head", "pmap", "meta", "rule", "grid")
+    table = "<div class='bdual-t3'>"
+    for sec in sections:
+        table += "<div class='bdual-trow'>"
+        for cells in cells_list:
+            cell_cls = "bdual-tcell"
+            if sec == "head":
+                head_cls = cells["_head_cls"]
+                cell_cls += f" bdual-headcell {head_cls}"
+            table += f"<div class='{cell_cls}'>{cells[sec]}</div>"
+        table += "</div>"
+    table += "</div>"
+    body = titlebar + f"<div class='bdual-panel3'>{table}</div>"
     stale_note = col.get("stale_note") or ""
     if stale_note:
         body += f"<div class='bdual-note'>{util._esc(stale_note)}</div>"
 
-    frame_h = 10 + 62 + 8 + max(panel_hs, default=420) + 8
-    return common._boss_dual_shell(body, frame_h)
+    # ---- 两遍渲染定高：宽松探针 → 实测内容底部 → 正式尺寸 ----
+    import os
+
+    from common import render_html_to_png  # 顶层 common（cards/common 不含渲染管线）
+
+    cache_dir = os.path.join(os.path.dirname(__file__), "cache")
+    probe_dpi = 60
+    probe_png = render_html_to_png(
+        common._boss_dual_shell(body, rough + 600), "btd6dailyprobe", cache_dir,
+        max_age=120, dpi=probe_dpi)
+    try:
+        need_css = _daily_content_bottom_css(probe_png, probe_dpi) + 16
+    finally:
+        try:
+            os.remove(probe_png)
+        except OSError:
+            pass
+    return common._boss_dual_shell(body, need_css)
 
 
 def rules_html(col: dict) -> str:
