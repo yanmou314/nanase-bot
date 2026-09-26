@@ -152,6 +152,13 @@ Type=simple
 User=root
 User=napcat
 ExecStart=/usr/bin/xvfb-run -a /opt/napcat/opt/QQ/qq --no-sandbox
+
+# napcat（专用用户）需要能读到 qqbot 渲染出的图片（file:// 发图），
+# 并能遍历插件目录；.env 等敏感文件不受影响（仅目录遍历 + cache 读）：
+#   setfacl -m u:napcat:rx /opt/bot/plugins /opt/bot/plugins/*/
+#   for c in $(find /opt/bot/plugins -type d -name cache); do
+#     setfacl -R -m u:napcat:rX "$c"; setfacl -m d:u:napcat:rX "$c"
+#   done
 Restart=always
 RestartSec=10
 KillMode=process
