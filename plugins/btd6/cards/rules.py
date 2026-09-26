@@ -748,7 +748,7 @@ def _daily_content_bottom_css(png_path: str, dpi: int) -> int:
 
     def bg_at(y):
         t = min(1.0, y / h)
-        for (t0, c0), (t1, c1) in zip(stops, stops[1:]):
+        for (t0, c0), (t1, c1) in zip(stops, stops[1:], strict=True):
             if t <= t1:
                 k = (t - t0) / (t1 - t0) if t1 > t0 else 0
                 return tuple(c0[i] + (c1[i] - c0[i]) * k for i in range(3))
@@ -829,16 +829,20 @@ def daily_dual_html(col: dict) -> str:
 
     cache_dir = os.path.join(os.path.dirname(__file__), "cache")
     probe_dpi = 60
-    probe_png = render_html_to_png(
-        common._boss_dual_shell(body, rough + 600), "btd6dailyprobe", cache_dir,
-        max_age=120, dpi=probe_dpi)
+    need_css = rough + 120  # 探针失败（如环境缺 pdftoppm/字体）时的兜底估算
     try:
-        need_css = _daily_content_bottom_css(probe_png, probe_dpi) + 16
-    finally:
+        probe_png = render_html_to_png(
+            common._boss_dual_shell(body, rough + 600), "btd6dailyprobe", cache_dir,
+            max_age=120, dpi=probe_dpi)
         try:
-            os.remove(probe_png)
-        except OSError:
-            pass
+            need_css = _daily_content_bottom_css(probe_png, probe_dpi) + 16
+        finally:
+            try:
+                os.remove(probe_png)
+            except OSError:
+                pass
+    except Exception:  # 探针失败不应毁掉整卡：退回估算高度
+        pass
     return common._boss_dual_shell(body, need_css)
 
 
