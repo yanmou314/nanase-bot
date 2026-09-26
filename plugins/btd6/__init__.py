@@ -218,6 +218,7 @@ from .collect import (  # noqa: F401
     collect_collectevent,
     collect_ct,
     collect_daily,
+    collect_daily_dual,
     collect_daily_coop,
     collect_leaderboard,
     collect_leaderboard_page,
@@ -371,6 +372,7 @@ from .cards import (  # noqa: F401
     overview_html,
     player_html,
     rules_html,
+    daily_dual_html,
 )
 
 from .push import (  # noqa: F401
@@ -733,6 +735,7 @@ __all__ = [
     'collect',
     'collect_ct',
     'collect_daily',
+    'collect_daily_dual',
     'collect_daily_coop',
     'collect_leaderboard',
     'collect_leaderboard_page',
@@ -815,6 +818,7 @@ __all__ = [
     'push_status_cmd',
     'rules_cmd',
     'rules_html',
+    'daily_dual_html',
     'rules_text',
     'rush_cmd',
     'rotation_start',

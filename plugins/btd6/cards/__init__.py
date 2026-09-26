@@ -121,6 +121,7 @@ from .rules import (  # noqa: F401
     _fmt_range_full,
     boss_dual_html,
     rules_html,
+    daily_dual_html,
 )
 
 from .rush import (  # noqa: F401
@@ -307,5 +308,6 @@ __all__ = [
     'player_oak_html',
     'rules',
     'rules_html',
+    'daily_dual_html',
     'rush',
 ]

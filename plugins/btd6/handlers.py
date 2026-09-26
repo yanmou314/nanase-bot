@@ -484,15 +484,20 @@ async def handle_maps(event: MessageEvent):
 @daily_cmd.handle()
 async def handle_daily(event: MessageEvent):
     await nkapi._enforce_cooldown(daily_cmd, event, "daily")
-    # 统一三版本一起发（标准+高级+Coop），忽略参数区分；三次取数相互独立，并发执行
+    # 标准+高级合并为一张 bdual 风格卡，Coop 保持独立卡；取数相互独立，并发执行
     daily_cols = await asyncio.gather(
-        collect._safe(collect.collect_daily(False), "daily"),
-        collect._safe(collect.collect_daily(True), "daily_adv"),
+        collect._safe(collect.collect_daily_dual(), "daily"),
         collect._safe(collect.collect_daily_coop(), "coop"))
     cards = []
-    for key, c in zip(("btd6daily", "btd6dailya", "btd6coop"), daily_cols, strict=True):
-        if c and not c.get("empty"):
-            cards.append((key, lambda c=c: cards_mod.rules_html(c), lambda c=c: textfmt.rules_text(c)))
+    c_dual, c_coop = daily_cols
+    if c_dual and not c_dual.get("empty"):
+        cards.append(("btd6daily",
+                      lambda c=c_dual: cards_mod.daily_dual_html(c),
+                      lambda c=c_dual: textfmt.rules_text(c)))
+    if c_coop and not c_coop.get("empty"):
+        cards.append(("btd6coop",
+                      lambda c=c_coop: cards_mod.rules_html(c),
+                      lambda c=c_coop: textfmt.rules_text(c)))
     if not cards:
         nkapi._release_cooldown(event, "daily")
         await daily_cmd.finish("⚠️ 获取 BTD6 每日挑战失败，请稍后再试")

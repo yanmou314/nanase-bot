@@ -1440,20 +1440,19 @@ def test_push_daily_uses_real_prefix(monkeypatch, tmp_path):
         # 必须是绝对路径：Windows 下 Path("/tmp/x.png") 非绝对，as_uri() 会抛 ValueError
         return str(tmp_path / "x.png")
 
-    async def fake_collect(adv):
-        return {"prefix": "每日高级·第2923期" if adv else "每日标准·第2936期", "meta": {}}
+    async def fake_collect_dual():
+        return {"prefix": "每日挑战", "announce": "标准·第2936期 / 高级·第2923期",
+                "meta": {}, "variants": [], "ev": {}, "map_img": "", "side_img": ""}
 
     monkeypatch.setattr(btd6.push, "get_bot", lambda: _Bot())
     monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
-    monkeypatch.setattr(btd6.collect, "collect_daily", fake_collect)
+    monkeypatch.setattr(btd6.collect, "collect_daily_dual", fake_collect_dual)
 
     asyncio.run(btd6._btd6_push_single(
         "daily", {"id": "d1", "name": "Standard 2936: X"}, "d1", "Standard 2936: X", {100}))
-    assert any("每日挑战已刷新·每日标准·第2936期" in m for m in sent)
-    assert any("每日挑战已刷新·每日高级·第2923期" in m for m in sent)
-    for msg in sent:
-        if "每日高级" in msg:
-            assert "2936" not in msg  # 高级推送不得携带标准期号
+    # 标准+高级合并为一张卡：一条详情、文案带双期号
+    assert len(sent) == 1
+    assert "每日挑战已刷新·标准·第2936期 / 高级·第2923期" in sent[0]
 
 
 def test_push_single_coop_sends_card(monkeypatch, tmp_path):
@@ -2290,8 +2289,9 @@ def test_push_batch_renders_all_before_send(monkeypatch, tmp_path):
         phases.append(f"render:{prefix}")
         return str(tmp_path / f"{prefix}.png")
 
-    async def fake_daily(adv):
-        return {"prefix": "每日标准" if not adv else "每日高级", "meta": {}}
+    async def fake_daily_dual():
+        return {"prefix": "每日挑战", "announce": "标准 / 高级", "meta": {},
+                "variants": [], "ev": {}, "map_img": "", "side_img": ""}
 
     async def fake_coop():
         return {"prefix": "Co-op 挑战", "meta": {"name": "N"}, "map_img": "", "side_img": "",
@@ -2300,7 +2300,8 @@ def test_push_batch_renders_all_before_send(monkeypatch, tmp_path):
     monkeypatch.setattr(btd6.push, "get_bot", lambda: _Bot())
     monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
     monkeypatch.setattr(btd6.cards, "rules_html", lambda col: "<html/>")
-    monkeypatch.setattr(btd6.collect, "collect_daily", fake_daily)
+    monkeypatch.setattr(btd6.cards, "daily_dual_html", lambda col: "<html/>")
+    monkeypatch.setattr(btd6.collect, "collect_daily_dual", fake_daily_dual)
     monkeypatch.setattr(btd6.collect, "collect_daily_coop", fake_coop)
 
     asyncio.run(_run_batch(monkeypatch, tmp_path, [
@@ -2310,7 +2311,7 @@ def test_push_batch_renders_all_before_send(monkeypatch, tmp_path):
     assert "send" in phases
     first_send = phases.index("send")
     assert all(p.startswith("render:") for p in phases[:first_send])
-    assert first_send >= 3  # daily×2 + coop×1 全部渲完
+    assert first_send >= 2  # daily×1（标准+高级合卡）+ coop×1 全部渲完
 
 
 def test_push_odyssey_overview_before_details(monkeypatch, tmp_path):
@@ -2599,3 +2600,30 @@ def test_flush_give_up_clears_overview_skip(monkeypatch, tmp_path):
     # 健康群 100 每轮都收到总览（重复可接受），坏群 200 永远发不出
     assert sent_groups.count(100) == 4 and 200 not in sent_groups
     btd6.push._batch_retries.pop(("race", "r1"), None)
+
+
+def test_daily_dual_html_smoke():
+    """每日 bdual 合卡：双面板期号标签/地图名/stale 注记齐全。"""
+    meta = {"name": "Standard 2954: X", "map": "Tree Stump", "difficulty": "medium",
+            "mode": "", "startingCash": 650, "lives": 150, "maxLives": 200,
+            "startRound": 1, "endRound": 40, "maxTowers": 0, "maxParagons": 0,
+            "_towers": [], "metadata": "https://meta/2954"}
+    col = {"variants": [
+        {"variant": "standard", "label": "标准", "issue": "标准·第2954期",
+         "meta": meta, "ev": {"id": "rot2954_0912", "name": "Standard 2954: X"},
+         "map_img": "", "scoring_cn": ""},
+        {"variant": "advanced", "label": "高级", "issue": "高级·第2941期",
+         "meta": dict(meta, name="Advanced 2941: Y"),
+         "ev": {"id": "adv2941_0912", "name": "Advanced 2941: Y"},
+         "map_img": "", "scoring_cn": ""},
+    ], "meta": meta, "map_img": "", "side_img": "", "stale_note": "stale!"}
+    html = btd6.daily_dual_html(col)
+    assert "每日挑战情报" in html
+    assert "标准·第2954期" in html and "高级·第2941期" in html
+    assert "最大生命" in html  # daily 专属 chip
+    assert "Tree Stump" in html  # 面板自带地图名
+    assert "stale!" in html
+
+
+def test_daily_dual_html_empty():
+    assert "暂无每日挑战数据" in btd6.daily_dual_html({"empty": "暂无每日挑战数据"})
