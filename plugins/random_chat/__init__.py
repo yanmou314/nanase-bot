@@ -9,7 +9,7 @@ from nonebot import get_driver, logger, on_command, on_message
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageSegment
 from nonebot.params import CommandArg
 
-from common import is_owner, load_json_state, save_json_state
+from common import RELAY_GROUP_ID, is_owner, load_json_state, save_json_state
 
 watcher = on_message(priority=11, block=False)
 
@@ -152,7 +152,7 @@ async def _generate_reply(gid: int) -> str:
 @watcher.handle()
 async def watch(bot: Bot, event: GroupMessageEvent):
     gid = event.group_id
-    if gid == 864213945:  # OW 任务中继群：保持静默，不插话
+    if gid == RELAY_GROUP_ID:  # OW 任务中继群：保持静默，不插话
         return
     text = event.get_plaintext().strip()
     if not text or (_COMMAND_START and text.startswith(_COMMAND_START)):

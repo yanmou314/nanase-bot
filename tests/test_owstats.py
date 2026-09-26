@@ -399,6 +399,53 @@ def test_second_image_not_stolen_by_pending_frozen():
     assert not any(s["group_id"] == 10001 for s in bot.sent_group)
 
 
+def test_image_quoting_current_task_not_stolen_by_frozen():
+    """回归：图片 reply 引用在途任务的下发消息 → 属于在途任务，不得判给冻结用户。
+
+    2026-09 审查发现：冻结任务存在时“首条即图片”无条件判给冻结用户——
+    B 的总结图会被发给 A，且 B 的查询被重新入队重复执行。
+    """
+    bot = _relay_bot()
+    frozen = _make_task(seq=1, user_id="111", group_id=10001)
+    frozen["t0"] = time.monotonic() - 400
+    frozen["task_msg_id"] = 900001
+    owstats._frozen_tasks.append(frozen)
+    current = _make_task(seq=2, user_id="222", group_id=10002, kind="strength", tag="B#2")
+    current["task_msg_id"] = 900002
+    owstats._task_current = current
+
+    ev = _relay_event(Message([
+        MessageSegment("reply", {"id": "900002"}),
+        MessageSegment.image("http://x/b.png"),
+    ]))
+    asyncio.run(_relay(bot, ev))
+    delivered = [s for s in bot.sent_group if s["group_id"] == 10002]
+    assert delivered and "b.png" in str(delivered[0]["message"])  # 在途用户收到自己的图
+    assert owstats._task_current is None  # 当前任务正常完成
+    assert not any(s["group_id"] == 10001 for s in bot.sent_group)  # 冻结用户没收到
+    assert owstats._frozen_tasks and owstats._frozen_tasks[0].get("seq") == 1  # 冻结仍挂着
+
+
+def test_image_quoting_frozen_task_goes_to_frozen():
+    """引用了冻结任务下发消息的图片：明确判给冻结用户。"""
+    bot = _relay_bot()
+    frozen = _make_task(seq=1, user_id="111", group_id=10001)
+    frozen["t0"] = time.monotonic() - 400
+    frozen["task_msg_id"] = 900001
+    owstats._frozen_tasks.append(frozen)
+    current = _make_task(seq=2, user_id="222", group_id=10002)
+    current["task_msg_id"] = 900002
+    owstats._task_current = current
+
+    ev = _relay_event(Message([
+        MessageSegment("reply", {"id": "900001"}),
+        MessageSegment.image("http://x/a.png"),
+    ]))
+    asyncio.run(_relay(bot, ev))
+    delivered = [s for s in bot.sent_group if s["group_id"] == 10001]
+    assert delivered and "a.png" in str(delivered[0]["message"])
+
+
 def test_first_image_without_claim_goes_to_frozen_and_requeues():
     """未发领取 @，但对方把缓存图贴在了新查询后：首条图仍给冻结用户。"""
     bot = _relay_bot()

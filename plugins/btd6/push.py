@@ -306,11 +306,13 @@ async def _btd6_warm_on_connect(bot=None) -> None:
         _logger.info("BTD6 帮助菜单已预渲染到本地")
     except Exception:
         _logger.warning("BTD6 帮助菜单预渲染失败", exc_info=True)
-    # 连接后补检 CT：错过 06:00 窗口且未标记时立即入队（窗口外仅未推过的进行中活动）
-    try:
-        await _btd6_push_kind("ct")
-    except Exception:
-        _logger.warning("BTD6 连接后 CT 补检失败", exc_info=True)
+    # 连接后全类补检：停机超过 misfire 宽限(1h)跨过刷新点时不漏推（此前只补 CT，
+    # daily/coop 最长漏 24h）。各类有 last_pushed 去重，重复调用幂等。
+    for _kind in _BTD6_PUSH_KINDS:
+        try:
+            await _btd6_push_kind(_kind)
+        except Exception:
+            _logger.warning("BTD6 连接后 %s 补检失败", _kind, exc_info=True)
 
 
 # ---------------- 活动刷新推送（群自动播报） ----------------
@@ -421,7 +423,7 @@ async def _btd6_push_kind(kind: str) -> None:
     原每 5 分钟全量检查 288 次/日 → 现仅刷新点后 3 次/类。同小时多类（如每日+Coop）
     错峰采样时先进队列，等防抖窗口结束后一起处理，避免总览卡重复发送。
     """
-    groups = _push_groups()
+    groups = await asyncio.to_thread(_push_groups)
     if not groups:
         return
     try:
@@ -432,7 +434,7 @@ async def _btd6_push_kind(kind: str) -> None:
     real_now = int(time.time() * 1000)  # 窗口比较用真实时间：start 带秒级偏移时桶取整会恒判"未在窗口内"而漏推
     # 12 分钟窗口：:10 采样点距刷新点恰为 10min，10min 窗口会漏掉第三次容错采样
     window_ms = 12 * 60 * 1000
-    last = _last_pushed()
+    last = await asyncio.to_thread(_last_pushed)
     try:
         ev = await _fetch_push_event(kind, now, real_now)
         if not isinstance(ev, dict):
@@ -472,6 +474,11 @@ _flush_in_progress = False  # 防抖任务已进入 flush 时不可 cancel，避
 # 总览已发出但详情失败的 kind：重试时只补详情，避免总览刷两遍
 _overview_already_sent: set[str] = set()
 _OVERVIEW_KINDS = frozenset({"race", "boss", "ct", "odyssey", "rush"})
+# 单期重试预算与按群送达记账：详情失败只补发失败群；同一期连续多轮不完整送达则
+# 放弃本轮（交还采样层/手动补推），避免一个坏群让全部健康群每 70s 重复收推送
+_PUSH_RETRY_MAX = 3
+_batch_retries: dict[tuple[str, str], int] = {}  # (kind, ev_id) -> 已失败轮数
+_detail_delivered: dict[tuple[str, str], set[int]] = {}  # (kind, ev_id) -> 已收到详情的群
 
 
 def _kind_display_name(kind: str, label: str) -> str:
@@ -496,6 +503,8 @@ async def _enqueue_push(kind: str, ev: dict, ev_id: str, label: str) -> None:
                 _pending_batch.pop(k, None)
         # 社季几乎不会与其他类并批，单独命中时立即发送，避免固定多等 70s
         social_alone = kind == "social" and len(_pending_batch) == 1
+    if _flush_in_progress:
+        return  # flush 进行中：条目留在缓冲，flush 结束的 leftover 检测统一补挂，防两轮并发
     if social_alone or _PUSH_BATCH_DELAY_S <= 0:
         await _flush_push_batch()
         return
@@ -623,13 +632,19 @@ async def _render_kind_payload(kind: str, ev: dict, label: str,
     return None
 
 
-async def _send_push_batch(payloads: list[tuple[str, str, dict]], groups: set[int]) -> dict:
+async def _send_push_batch(payloads: list[tuple[str, str, dict]], groups: set[int],
+                           delivered: dict[str, set[int]] | None = None) -> dict:
     """先发总览目录（至多一张），再发各类详情；全部渲染完成后才开始发送。
+
+    delivered: {"kind:消息序号": 已收到该条详情的群}——重试轮据此跳过已送达的
+    消息，一个坏群不再让其余订阅群每轮重收全部详情。就地更新。
 
     返回 per-kind 结果，供调用方只标记真正推出去的类：
       overview_ok: 总览消息是否至少在一个群发出
       detail_ok:   {kind: 该类详情是否至少一条发出}
     """
+    if delivered is None:
+        delivered = {}
     empty = {"overview_ok": False, "detail_ok": {k: False for k, _i, _p in payloads}}
     try:
         bot = get_bot()
@@ -655,12 +670,14 @@ async def _send_push_batch(payloads: list[tuple[str, str, dict]], groups: set[in
     order = {k: i for i, k in enumerate(_BTD6_PUSH_KINDS)}
     payloads = sorted(payloads, key=lambda x: order.get(x[0], 99))
     # (text, path, owner_kind)；owner_kind=None 表示共享总览
-    messages: list[tuple[str, str | None, str | None]] = []
+    messages: list[tuple[str, str | None, str | None, int]] = []
     if overview_path:
-        messages.append((ov_text, overview_path, None))
+        messages.append((ov_text, overview_path, None, 0))
+    per_kind_idx: dict[str, int] = {}
     for kind, _ev_id, p in payloads:
         for text, path in p.get("details") or []:
-            messages.append((text, path, kind))
+            messages.append((text, path, kind, per_kind_idx.get(kind, 0)))
+            per_kind_idx[kind] = per_kind_idx.get(kind, 0) + 1
     if not messages:
         return empty
     detail_ok: dict[str, bool] = {k: False for k, _i, _p in payloads}
@@ -671,7 +688,11 @@ async def _send_push_batch(payloads: list[tuple[str, str, dict]], groups: set[in
     for gid in groups:
         gid_detail_ok: dict[str, bool] = {k: False for k, _i, _p in payloads}
         gid_overview_ok = False
-        for text, path, owner in messages:
+        for text, path, owner, owner_idx in messages:
+            msg_key = None if owner is None else f"{owner}:{owner_idx}"
+            if msg_key is not None and gid in delivered.get(msg_key, set()):
+                gid_detail_ok[owner] = True  # 重试轮：该群已收过本条详情，跳过但计入送达
+                continue
             try:
                 if path and text:
                     msg = MessageSegment.text(text) + MessageSegment.image(Path(path).as_uri())
@@ -686,6 +707,7 @@ async def _send_push_batch(payloads: list[tuple[str, str, dict]], groups: set[in
                 else:
                     detail_ok[owner] = True
                     gid_detail_ok[owner] = True
+                    delivered.setdefault(msg_key, set()).add(gid)
                 await asyncio.sleep(0.5)
             except Exception:
                 _logger.warning("BTD6 推送到群 %s 失败 owner=%s", gid, owner, exc_info=True)
@@ -720,16 +742,21 @@ def _kind_push_ok(kind: str, payload: dict, result: dict) -> bool:
 async def _flush_push_batch() -> None:
     """取出缓冲中的全部待推活动：统一渲染 → 统一发送 → 按 kind 成功才标记。"""
     global _flush_in_progress, _batch_flush_task
+    if _flush_in_progress:
+        return  # 已有 flush 在跑：新条目由其结束后的 leftover 检测统一补挂
+    _flush_in_progress = True
     with _batch_lock:
         pending = dict(_pending_batch)
         _pending_batch.clear()
     if not pending:
+        _flush_in_progress = False
         return
-    groups = _push_groups()
+    groups = await asyncio.to_thread(_push_groups)
     if not groups:
         with _batch_lock:
             for k, v in pending.items():
                 _pending_batch.setdefault(k, v)
+        _flush_in_progress = False
         return
     try:
         get_bot()
@@ -738,8 +765,8 @@ async def _flush_push_batch() -> None:
         with _batch_lock:
             for k, v in pending.items():
                 _pending_batch.setdefault(k, v)
+        _flush_in_progress = False
         return
-    _flush_in_progress = True
     try:
         # 需要总览的类型共享同一张渲染结果，避免两类同时刷新时渲/发两遍目录
         need_shared_ov = any(
@@ -774,9 +801,28 @@ async def _flush_push_batch() -> None:
                         _pending_batch.setdefault(kind, pending[kind])
             _logger.warning("BTD6 批量推送渲染失败已回填 kinds=%s", render_failed)
         if not payloads:
+            # 渲染全失败：条目已回填缓冲，仍要走 leftover 补挂，否则要等下一轮采样点
+            if _PUSH_BATCH_DELAY_S > 0:
+                try:
+                    _batch_flush_task = asyncio.get_running_loop().create_task(_delayed_flush())
+                except RuntimeError:
+                    pass
             return
-        result = await _send_push_batch(payloads, groups)
+        # 按群送达记账（键 "kind:消息序号"）：重试轮只补发未收到的消息，健康群不重复收
+        delivered: dict[str, set[int]] = {}
+        for kind, ev_id, _p in payloads:
+            for mk, gids in (_detail_delivered.get((kind, ev_id)) or {}).items():
+                delivered.setdefault(mk, set()).update(gids)
+        result = await _send_push_batch(payloads, groups, delivered)
+        for kind, ev_id, _p in payloads:
+            mine = {mk: gids for mk, gids in delivered.items() if mk.startswith(kind + ":")}
+            if mine:
+                _detail_delivered[(kind, ev_id)] = mine
+        if len(_detail_delivered) > 256:
+            for k in list(_detail_delivered)[: len(_detail_delivered) - 256]:
+                _detail_delivered.pop(k, None)
         to_mark: list[tuple[str, str]] = []
+        to_give_up: list[str] = []
         to_retry: list[str] = []
         for kind, ev_id, p in payloads:
             if _kind_push_ok(kind, p, result):
@@ -784,7 +830,12 @@ async def _flush_push_batch() -> None:
                 if kind in _OVERVIEW_KINDS:
                     _overview_already_sent.add(kind)
             else:
-                to_retry.append(kind)
+                n = _batch_retries.get((kind, ev_id), 0) + 1
+                _batch_retries[(kind, ev_id)] = n
+                if n > _PUSH_RETRY_MAX:
+                    to_give_up.append(kind)
+                else:
+                    to_retry.append(kind)
                 # 总览已发出但本类未完成：标记 skip，重试只补详情
                 if result.get("overview_ok") and kind in _OVERVIEW_KINDS:
                     _overview_already_sent.add(kind)
@@ -792,6 +843,13 @@ async def _flush_push_batch() -> None:
             await asyncio.to_thread(_set_last_pushed, kind, ev_id)
             # 本期已完成，下一期新 id 再重新渲染总览
             _overview_already_sent.discard(kind)
+            _batch_retries.pop((kind, ev_id), None)
+            _detail_delivered.pop((kind, ev_id), None)
+        if to_give_up:
+            _logger.error(
+                "BTD6 批量推送连续 %d 轮未完整送达，本轮放弃 kinds=%s"
+                "（多半是某个订阅群已不可达；可用 .btd6推送检查 手动补推）",
+                _PUSH_RETRY_MAX, to_give_up)
         if to_retry:
             with _batch_lock:
                 for kind in to_retry:
@@ -940,7 +998,7 @@ async def _push_check(event: MessageEvent):
         try:
             now = util.bucket_now()
             real_now = int(time.time() * 1000)
-            last = _last_pushed()
+            last = await asyncio.to_thread(_last_pushed)
             for k in _BTD6_PUSH_KINDS:
                 try:
                     ev = await _fetch_push_event(k, now, real_now)
@@ -973,7 +1031,8 @@ async def _push_check(event: MessageEvent):
     if not ev_id:
         await push_check_cmd.finish("当期活动无有效 id，拒绝推送")
         return
-    if _last_pushed().get(kind) == ev_id:
+    last_now = await asyncio.to_thread(_last_pushed)
+    if last_now.get(kind) == ev_id:
         await push_check_cmd.finish(f"{_PUSH_KIND_CN[kind]}当期（{ev_id}）已推送过，无需重推")
         return
     try:

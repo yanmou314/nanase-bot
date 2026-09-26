@@ -19,6 +19,15 @@ if not _OWNER.isdigit():
         "QQBOT_OWNER 未配置或不是纯数字 QQ 号，请在 .env 中设置后再启动"
     )
 
+# 测试特权防呆：特权群开启且未配 UID 白名单时，群内所有成员都会通过 is_owner
+# （约 50 个调用点覆盖全部管理命令），等价于把整群提权为 Bot 主人。宁可拒绝启动。
+if os.getenv("QQBOT_TEST_PRIVILEGED_GROUPS", "").strip() and not os.getenv("QQBOT_TEST_OWNER_UIDS", "").strip():
+    _logger.critical(
+        "QQBOT_TEST_PRIVILEGED_GROUPS 已配置但 QQBOT_TEST_OWNER_UIDS 为空："
+        "特权群内所有成员都会被视为 Bot 主人，拒绝启动。"
+        "如确需测试特权，请同时配置 QQBOT_TEST_OWNER_UIDS 限定 QQ 号。")
+    sys.exit(1)
+
 nonebot.init(
     apscheduler_config={
         "apscheduler.job_defaults.misfire_grace_time": 3600,

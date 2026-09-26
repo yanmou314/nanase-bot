@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from nonebot import on_command
-from nonebot.adapters.onebot.v11 import Bot, MessageEvent
+from nonebot.adapters.onebot.v11 import Bot, MessageEvent, MessageSegment
 from nonebot.params import CommandArg
 
 from common import OWNER, is_owner, load_json_state, save_json_state
@@ -484,7 +484,8 @@ async def _preview(bot: Bot, event: MessageEvent, arg=CommandArg()):
     if len(targets) > _PREVIEW_LIST_MAX:
         lines.append(f"… 另有 {len(targets) - _PREVIEW_LIST_MAX} 人未列出")
     lines.append(f"\n确认无误后发送：.清人执行 {gid} 确认")
-    await preview_cmd.finish("\n".join(lines))
+    # MessageSegment.text 包裹：昵称由成员自行设置，防伪造 [CQ:...] 借回执注入
+    await preview_cmd.finish(MessageSegment.text("\n".join(lines)))
 
 
 _run_lock = asyncio.Lock()
@@ -597,4 +598,5 @@ async def _run_inner(bot: Bot, event: MessageEvent, arg=CommandArg()):
             f"\n另有 {more} 人超出本轮上限 {_MAX_KICK_PER_RUN}，"
             f"可再次发送：.清人执行 {gid} 确认"
         )
-    await run_cmd.finish(msg)
+    # 同预览回执：MessageSegment.text 包裹防 CQ 注入
+    await run_cmd.finish(MessageSegment.text(msg))

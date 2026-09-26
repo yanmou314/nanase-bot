@@ -125,3 +125,63 @@ def test_write_loop_requeue_does_not_deadlock_when_full(monkeypatch):
     flat = [m for batch in written for m in batch]
     assert len(flat) == 3  # 队列满时丢弃了 m0，但循环存活并写完后续消息
     assert "m0" not in [m[3] for m in flat]
+
+
+class _FakeCursor:
+    def __init__(self, description):
+        self.description = description
+        self.fetch_called = False
+
+    async def execute(self, sql, params=()):
+        pass
+
+    async def fetchall(self):
+        self.fetch_called = True
+        return [("row",)]
+
+
+class _FakePool:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def connection(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def cursor(self):
+        cur = self._cursor
+
+        class _Ctx:
+            async def __aenter__(self_):
+                return cur
+
+            async def __aexit__(self_, *exc):
+                return False
+
+        return _Ctx()
+
+
+def test_exec_non_query_skips_fetchall(monkeypatch):
+    """回归：DELETE/INSERT 无结果集，exec 不得 fetchall——无条件 fetchall 会让
+    psycopg 抛 ProgrammingError 并回滚事务，每日清理因此从未成功过。"""
+    del_cursor = _FakeCursor(None)  # DELETE：description 为 None
+    sel_cursor = _FakeCursor([("day",)])  # SELECT：有结果集
+
+    async def fake_pool_del():
+        return _FakePool(del_cursor)
+
+    monkeypatch.setattr(db_pg, "get_pool", fake_pool_del)
+    assert asyncio.run(db_pg.exec("DELETE FROM messages WHERE day < %s", ("2026-08-27",))) == []
+    assert not del_cursor.fetch_called
+
+    async def fake_pool_sel():
+        return _FakePool(sel_cursor)
+
+    monkeypatch.setattr(db_pg, "get_pool", fake_pool_sel)
+    assert asyncio.run(db_pg.exec("SELECT day FROM messages LIMIT 1")) == [("row",)]
+    assert sel_cursor.fetch_called

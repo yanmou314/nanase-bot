@@ -146,12 +146,17 @@ async def close_pool() -> None:
 
 
 async def exec(sql: str, params: tuple = ()) -> list:
-    """执行查询并一次性返回全部行；异常直接向上抛，由调用方决定如何提示/记录。"""
+    """执行查询并一次性返回全部行；异常直接向上抛，由调用方决定如何提示/记录。
+
+    非 SELECT（DELETE/INSERT/UPDATE 等）没有结果集（cur.description 为 None），
+    必须跳过 fetchall 直接返回 []：无条件 fetchall 会让 psycopg 抛 ProgrammingError
+    并把整个事务回滚——每日清理任务曾因此自上线起从未成功（删除被白做）。
+    """
     pool = await get_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(sql, params)
-            return await cur.fetchall()
+            return await cur.fetchall() if cur.description is not None else []
 
 
 async def iter_rows(sql: str, params: tuple = ()) -> AsyncIterator[tuple]:

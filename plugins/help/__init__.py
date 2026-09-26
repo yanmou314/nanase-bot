@@ -10,7 +10,7 @@ from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import MessageEvent, MessageSegment
 from PIL import Image, ImageDraw, ImageFont
 
-from common import FONTS, TEST_PRIVILEGED_GROUPS, cleanup_cache, is_owner
+from common import FONTS, RENDER_SEM, RENDER_TOTAL_TIMEOUT, TEST_PRIVILEGED_GROUPS, cleanup_cache, is_owner
 
 _logger = logging.getLogger(__name__)
 _BASE_DIR = os.path.dirname(__file__)
@@ -113,7 +113,7 @@ OWNER_TEXT = """
   .自动通过查看    · 查看当前关键字配置
   .自动通过数量    · 查看关键字数量
   .同意 QQ号      · 通过待审批的入群申请（战网验证超时转人工时用）
-  .战网验证 开启/关闭 · 按群开关入群战网ID验证（在本群发可省略群号）
+  .战网验证开启/关闭 · 按群开关入群战网ID验证（在本群发可省略群号）
   .战网验证       · 查看各群验证开关状态
   私聊回复 同意/拒绝 · 处理待审批的加群/好友申请（多个时引用通知消息）
 
@@ -260,7 +260,11 @@ async def handle(bot: Bot, event: MessageEvent):
             variant = "public"
 
     try:
-        path = await asyncio.to_thread(_render_help_image, text, variant)
+        # 与全站渲染一致：经 RENDER_SEM 串行化 + 看门狗超时
+        async with RENDER_SEM:
+            path = await asyncio.wait_for(
+                asyncio.to_thread(_render_help_image, text, variant),
+                timeout=RENDER_TOTAL_TIMEOUT)
         content = MessageSegment.image("file://" + path)
     except Exception:
         _logger.exception("帮助图片生成失败，回退发送文本")

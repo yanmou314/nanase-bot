@@ -28,9 +28,9 @@ from nonebot_plugin_apscheduler import scheduler
 from common import (
     FONTS,
     OWNER,
+    RELAY_GROUP_ID,
     RENDER_SEM,
     cleanup_cache,
-    close_http_clients,
     get_http_client,
     is_owner,
     load_json_state,
@@ -65,7 +65,6 @@ _MAX_STITCH_HEIGHT = 25000  # 拼合高度上限（px）
 _MAX_FILE_BYTES = 8 * 1024 * 1024  # 成图文件上限
 _RENDER_ATTEMPTS = 3  # 长截图偶发失败重试次数
 _MAX_CHUNK_IMAGES = 3  # 分块回落最多正文图数（+1 张标题卡）
-RELAY_GROUP_ID = 864213945  # 任务中继群（与 owstats.RELAY_GROUP_ID 保持一致）
 _RELAY_SKIP = {str(RELAY_GROUP_ID)}  # 任务中继群默认不推
 _SEND_SOURCE_LINK = True  # 图后追加官网原文链接（QQ 会展开成官方卡片）；不需要就改 False
 
@@ -79,13 +78,8 @@ sub_test_cmd = on_command("ow补丁测试", priority=5, block=True)
 
 
 def _get_http_client() -> httpx.AsyncClient:
-    # 统一走 common 的按超时缓存单例，由 owstats 注册的 on_shutdown 统一关闭
+    # 统一走 common 的按超时缓存单例，由 common 导入时注册的 on_shutdown 统一关闭
     return get_http_client(30)
-
-
-@get_driver().on_shutdown
-async def _close_shared_http_clients() -> None:
-    await close_http_clients()
 
 
 # ---------------- state ----------------
@@ -660,7 +654,9 @@ async def _render_long_image(patch: dict, data_uris: list, attempts: int = _REND
             if len(pages) > _MAX_PDF_PAGES:
                 raise _TooBig(f"PDF {len(pages)} 页超限")
             try:
-                return [await asyncio.to_thread(_stitch_pngs, pages, dest)]
+                # 拼合是最大的纯 PIL 像素操作，纳入 RENDER_SEM 防小内存机器并发渲染 OOM
+                async with RENDER_SEM:
+                    return [await asyncio.to_thread(_stitch_pngs, pages, dest)]
             except _TooBig:
                 raise
             except Exception as exc:
@@ -969,7 +965,18 @@ async def _poll_once() -> str:
         await _mutate_state(lambda s: s.update(
             last_check=datetime.now(_SH).strftime("%Y-%m-%d %H:%M:%S")))
         if not fresh:
-            await _mutate_state(lambda s: s.update(consec_fail=0, lowmem_skips=0))
+            # 正常无新内容 vs 抓取成功但解析出 0 节（页面改版）要区分：后者会静默永久停摆
+            def _do(state: dict) -> None:
+                state["consec_fail"] = 0
+                state["lowmem_skips"] = 0
+                state["empty_parse_rounds"] = (
+                    0 if sections else int(state.get("empty_parse_rounds") or 0) + 1
+                )
+            st = await _mutate_state(_do)
+            if not sections and int(st.get("empty_parse_rounds") or 0) == 3:
+                await _notify_owner(
+                    "⚠️ ow补丁连续 3 轮抓取成功但解析出 0 节（官网可能已改版），"
+                    "插件将静默失效，请检查解析器")
             return "empty"
         try:
             bot = get_bot()

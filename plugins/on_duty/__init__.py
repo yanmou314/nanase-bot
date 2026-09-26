@@ -21,7 +21,7 @@ from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageSegment
 from nonebot.params import CommandArg
 from nonebot.rule import Rule
 
-from common import at_prefix, is_owner, load_json_state, save_json_state
+from common import at_prefix, get_member_name, is_owner, load_json_state, save_json_state
 
 _logger = logging.getLogger(__name__)
 
@@ -268,14 +268,9 @@ async def _member_name(bot: Bot, gid: str, uid: str) -> str:
     tag = _bound_tag(uid)
     if tag:
         return tag
-    try:
-        info = await bot.get_group_member_info(group_id=int(gid), user_id=int(uid))
-        name = str((info or {}).get("card") or (info or {}).get("nickname") or "").strip()
-        if name:
-            return name
-    except Exception:
-        _logger.debug("上号榜获取群成员 %s 群名片失败", uid, exc_info=True)
-    return uid
+    # common.get_member_name：TTL 300s 共享缓存 + 10s 超时 + 失败负缓存，
+    # 替代此前的每成员直查 API（.谁玩 对全员 N+1 且无缓存）
+    return await get_member_name(bot, int(gid), int(uid))
 
 
 def _bound_tag(uid: str) -> str:
