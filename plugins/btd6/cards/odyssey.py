@@ -96,6 +96,7 @@ def _odyssey_top_icon(kind: str) -> str:
         "lives":  ("game", "UI_LivesIcon.webp"),
         "seats":  ("game", "UI_HeroSeat.webp"),
         "towers": ("ui",   "monkey-cap.png"),
+        "power":  ("game", "UI_PowerIcon.webp"),
     }
     item = mapping.get(kind)
     if not item:
@@ -277,7 +278,7 @@ def _odyssey_available_html(meta: dict, diffs: dict | None = None) -> str:
     tower_html = "".join(
         _odyssey_tower_card(
             str(t.get("tower")), False,
-            str(int(t.get("max"))) if isinstance(t.get("max"), (int, float)) and t.get("max") > 0 else "∞",
+            f"×{int(t.get('max'))}" if isinstance(t.get("max"), (int, float)) and t.get("max") > 0 else "∞",
             "available",
             category=assets._tower_category(str(t.get("tower")), False),
             upgrade_caps=_odyssey_upgrade_caps(t),
@@ -291,7 +292,11 @@ def _odyssey_available_html(meta: dict, diffs: dict | None = None) -> str:
             avail[str(p.get("power") or "").strip()] = p.get("max")
     power_html = []
     for raw, default_kind in _POWER_CATALOG:
-        if raw in avail and (avail[raw] is None or int(avail[raw] or 0) == 0):
+        if raw not in avail:
+            # 未列入本期 availablePowers 的力量（IAP 付费类）：API 无上限数据，
+            # 渲染无数量的块会误导（2026-09-27 用户反馈），整体跳过
+            continue
+        if avail[raw] is None or int(avail[raw] or 0) == 0:
             continue
         kind = _POWER_KIND.get(raw, default_kind)
         bg = assets._game_asset_data_url(_POWER_BG[kind])
@@ -303,7 +308,7 @@ def _odyssey_available_html(meta: dict, diffs: dict | None = None) -> str:
         count = avail.get(raw)
         count_html = ""
         if count is not None and int(count or 0) > 0:
-            count_html = f"<span class='ody-power-count'>{int(count)}</span>"
+            count_html = f"<span class='ody-power-count'>×{int(count)}</span>"
         # 六边形底座图（角透明）出形；tile 本身不能铺矩形底色
         seat_html = (
             f"<img class='ody-power-seat' src='{util._esc(bg)}' alt=''/>"
@@ -395,6 +400,7 @@ def _odyssey_diff_box(key: str, meta: dict | None) -> str:
         lives = int(meta.get("startingHealth") or 0)
         seats = int(meta.get("maxMonkeySeats") or 0)
         cap = int(meta.get("maxMonkeysOnBoat") or 0)
+        pslots = int(meta.get("maxPowerSlots") or 0)
 
         def row(kind: str, text: str, fallback: str) -> str:
             icon = _odyssey_top_icon(kind)
@@ -405,6 +411,7 @@ def _odyssey_diff_box(key: str, meta: dict | None) -> str:
             row("lives", f"生命 {lives}", "❤")
             + row("seats", f"猴位 {seats}", "🪑")
             + row("towers", f"猴子上限 {cap}", "🐵")
+            + row("power", f"力量槽位 {pslots}", "⚡")
             + "<div class='ody-diff-rewards'>" + _odyssey_reward_cells(meta.get("_rewards") or []) + "</div>"
         )
         if meta.get("isExtreme"):
@@ -602,7 +609,6 @@ def _odyssey_map_row_html(mp: dict, col: dict) -> str:
     icons = _odyssey_map_icons()
     thumb = (f"<img class='ody-map-img' src='{util._esc(mp['img'])}' alt='{util._esc(mp.get('map') or mp.get('name') or '')}'/>"
              if mp.get("img") else "<div class='ody-map-empty'>暂无地图图像</div>")
-    difficulty = i18n.cn(mp.get("difficulty"), i18n.DIFFICULTY_CN) or "未知难度"
     mode = i18n.mode_cn(mp.get("mode")) or "标准"
     start_round = int(mp.get("startRound") or 0)
     end_round = int(mp.get("endRound") or 0)
@@ -610,7 +616,7 @@ def _odyssey_map_row_html(mp: dict, col: dict) -> str:
     plain_rule = _odyssey_map_rule_text(mp)
     coin_img = _odyssey_img(icons.get("coin", ""), "ody-mini-icon", "🪙", "金币")
     play_img = _odyssey_img(icons.get("play", ""), "ody-mini-icon", "▶", "开始")
-    diff_ico, mode_ico = _ody_diff_mode_icons(difficulty, mp.get("mode") or "")
+    _diff_ico, mode_ico = _ody_diff_mode_icons(mp.get("difficulty") or "", mp.get("mode") or "")
     if plain_rule:
         mods_html = f"<div class='ody-map-rule'>{util._esc(plain_rule)}</div>"
     else:
@@ -622,7 +628,7 @@ def _odyssey_map_row_html(mp: dict, col: dict) -> str:
         "<div class='ody-map-meta ody-map-meta-line'>"
         f"<span class='ody-map-meta-item'>{coin_img}{int(mp.get('startingCash') or 0):,}</span>"
         f"<span class='ody-map-meta-item'>{play_img}{util._esc(rounds)}</span>"
-        f"<span class='ody-map-meta-item'>{diff_ico}{util._esc(difficulty)} / {mode_ico}{util._esc(mode)}</span>"
+        f"<span class='ody-map-meta-item'>{mode_ico}{util._esc(mode)}</span>"
         "</div>"
         f"{mods_html}"
         "</div></div>"
@@ -695,12 +701,13 @@ def _odyssey_layout_stats(meta: dict | None) -> dict:
     heroes = sum(1 for t in at if t.get("isHero"))
     regular = len(at) - heroes
     # 力量按目录全量渲染（max==0 跳过），与 _available_html 同口径
-    avail_max0 = {
-        str(p.get("power") or "").strip()
+    avail = {
+        str(p.get("power") or "").strip(): p.get("max")
         for p in meta.get("_availablePowers") or []
-        if isinstance(p, dict) and p.get("max") is not None and int(p.get("max") or 0) == 0
+        if isinstance(p, dict) and str(p.get("power") or "").strip()
     }
-    power_count = sum(1 for raw, _k in _POWER_CATALOG if raw not in avail_max0)
+    power_count = sum(1 for raw, _k in _POWER_CATALOG
+                      if raw in avail and avail[raw] is not None and int(avail[raw] or 0) > 0)
     # 栏宽约 20% / 42% / 38%（800px 卡）：英雄 2/行、猴子 5/行、力量 5/行
     h_rows = max(1, -(-heroes // 2))
     t_rows = max(1, -(-regular // 5))
