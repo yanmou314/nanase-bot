@@ -479,7 +479,9 @@ def _bdual_grid_table(cells: list[str], cols: int = 5) -> str:
 
 
 def _boss_dual_monkey_grid(meta: dict, cols: int = 5) -> str:
-    """可用猴子网格：固定 cols 列表格，强制从左到右、从上到下。"""
+    """可用猴子网格：固定 cols 列表格，强制从左到右、从上到下。
+
+    英雄必为单放：max=1 的英雄不打 ×1 角标（与每日网格口径一致）。"""
     towers = meta.get("_towers")
     cells: list[str] = []
     if _heroes_all_available(towers):
@@ -489,7 +491,17 @@ def _boss_dual_monkey_grid(meta: dict, cols: int = 5) -> str:
             if not (isinstance(t, dict) and bool(t.get("isHero"))
                     and str(t.get("tower") or "").strip() != "ChosenPrimaryHero")
         ]
-    cells.extend(_race_monkey_cell(tower) for tower in _race_visible_towers(towers))
+    norm = []
+    for tower in _race_visible_towers(towers):
+        if isinstance(tower, dict) and tower.get("isHero"):
+            try:
+                if float(tower.get("max")) == 1:
+                    tower = dict(tower)
+                    tower["max"] = None
+            except (TypeError, ValueError):
+                pass
+        norm.append(tower)
+    cells.extend(_race_monkey_cell(tower) for tower in norm)
     if not cells:
         return "<div class='bdual-mk-grid'><div class='race-mk-fallback'>无</div></div>"
     return _bdual_grid_table(cells, cols)
@@ -582,9 +594,9 @@ def boss_dual_html(col: dict) -> str:
         variants[0] if variants else {},
     )
     meta = primary.get("meta") or {}
-    boss_cn_name = i18n.boss_cn(ev.get("bossType") or "")
-    raw_name = (ev.get("name") or meta.get("name") or "").strip()
-    title = f"BOSS情报 - {raw_name or boss_cn_name or 'Boss'}"
+    # 标题直接用汉化名（用户要求：不显示英文原名与层数数字）
+    boss_cn_name = i18n.boss_cn(ev.get("bossType") or "").strip()
+    title = f"BOSS情报 - {boss_cn_name or 'Boss'}"
     short_id = str(ev.get("id") or "")
     if "_" in short_id:
         short_id = short_id.split("_", 1)[1]
