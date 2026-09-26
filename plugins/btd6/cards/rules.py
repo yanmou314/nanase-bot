@@ -659,7 +659,7 @@ def boss_dual_html(col: dict) -> str:
     return common._boss_dual_shell(body, frame_h)
 
 
-def _daily_dual_panel(v: dict, cols: int = 5) -> tuple[str, int]:
+def _daily_dual_panel(v: dict, cols: int = 5, head_cls: str = "standard") -> tuple[str, int]:
     """每日 bdual 单面板：返回 (html, 网格行数)。
 
     与 Boss 面板共用元信息 chips/规则调节 chips 版式，猴子区改用每日全塔限制网格；
@@ -700,7 +700,7 @@ def _daily_dual_panel(v: dict, cols: int = 5) -> tuple[str, int]:
 
     panel = (
         "<div class='bdual-panel'>"
-        f"<div class='bdual-panel-head standard'>{util._esc(v['issue'])}</div>"
+        f"<div class='bdual-panel-head {head_cls}'>{util._esc(v['issue'])}</div>"
         "<div class='bdual-panel-body'>"
         f"{pmap}"
         f"{_boss_dual_meta_chips(v, daily=True)}"
@@ -730,10 +730,8 @@ def daily_dual_html(col: dict) -> str:
 
     variants = col.get('variants') or []
     ids = []
-    main_rows = []  # (panel_html, h) 标准/高级
+    main_rows = []  # 标准/高级/Coop 三面板平行
     panel_hs = []
-    coop_html = None
-    coop_h = 0
     for v in variants:
         ev = v.get("ev") or {}
         sid = str(ev.get("id") or "")
@@ -741,17 +739,16 @@ def daily_dual_html(col: dict) -> str:
             sid = sid.split("_", 1)[1]
         if sid:
             ids.append(sid)
-        is_coop = v.get("variant") == "coop"
-        if is_coop:
-            panel, panel_h = _daily_dual_panel(v, cols=10)  # 全宽行：10 列网格
-            coop_html = f"<div style='margin-top:8px'>{panel}</div>"
-            coop_h = panel_h
-        else:
-            panel, panel_h = _daily_dual_panel(v)
-            cls = "adv" if v.get("variant") == "advanced" else "std"
-            main_rows.append(f"<div class='bdual-col {cls}'>{panel}</div>")
-            panel_hs.append(panel_h)
-    if not main_rows and coop_html is None:
+        variant = v.get("variant")
+        # 三面板平行：每列 3 列猴子网格；列间留 4px 缝，末列不留右侧缝
+        gutter = "padding:0;" if len(main_rows) == 2 else "padding:0 4px 0 0;" if not main_rows else "padding:0 4px;"
+        head_cls = {"advanced": "elite", "coop": "standard"}.get(variant, "standard")
+        panel, panel_h = _daily_dual_panel(v, cols=3, head_cls=head_cls)
+        main_rows.append(
+            f"<div class='bdual-col {('eli' if variant == 'advanced' else 'std')}'"
+            f" style='width:33.3%;{gutter}'>{panel}</div>")
+        panel_hs.append(panel_h)
+    if not main_rows:
         body = "<div class='bdual-empty'>暂无每日挑战数据</div>"
         return common._boss_dual_shell(body, 320)
 
@@ -765,17 +762,13 @@ def daily_dual_html(col: dict) -> str:
     body = titlebar
     if main_rows:
         body += f"<div class='bdual-cols'>{''.join(main_rows)}</div>"
-    if coop_html:
-        body += coop_html
     stale_note = col.get("stale_note") or ""
     if stale_note:
         body += f"<div class='bdual-note'>{util._esc(stale_note)}</div>"
 
     extras_h = 22  # 可能的自定义回合/禁用行
-    col_h = max((h + extras_h for h in panel_hs), default=0)
-    frame_h = 10 + 62 + 8 + col_h + 8 + coop_h + 8
-    if not col_h:
-        frame_h = 10 + 62 + 8 + coop_h + 8
+    col_h = max((h + extras_h for h in panel_hs), default=420)
+    frame_h = 10 + 62 + 8 + col_h + 8
     return common._boss_dual_shell(body, frame_h)
 
 
