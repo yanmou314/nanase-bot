@@ -414,7 +414,7 @@ def player_oak_html(col):
         pic = (f"<img class='pf-topimg' src='{util._esc(img)}'/>") if img else ""
         # 有容器底时数字放框内左上角角标（Explorer towerTopLeft）；英雄无容器则放图下
         # 数字一律压在图标右下角（与奖章一致）
-        return (f"<div class='pf-topcell has-frame'" + style + ">" + pic
+        return ("<div class='pf-topcell has-frame'" + style + ">" + pic
                 + f"<div class='pf-topbadge'>{num:,}</div></div>")
 
     def _topsec(title, cells, purple=False):
