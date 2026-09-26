@@ -659,7 +659,42 @@ def boss_dual_html(col: dict) -> str:
     return common._boss_dual_shell(body, frame_h)
 
 
-def _daily_dual_panel(v: dict, cols: int = 5, head_cls: str = "standard") -> tuple[str, int]:
+def _daily_meta_chip_rows(variant_col: dict) -> str:
+    """每日面板元信息 chips：固定两行（行内不换行），保证三面板纵向对齐。
+
+    行1 难度/模式/回合；行2 资金/生命/最大生命。
+    """
+    meta = variant_col["meta"]
+    diff_raw = str(meta.get("difficulty") or "")
+    diff = i18n.cn(diff_raw, i18n.DIFFICULTY_CN)
+    mode = i18n.mode_cn(meta.get("mode"))
+    start_r = int(meta.get("startRound") or 0)
+    end_r = int(meta.get("endRound") or 0)
+    cash = int(meta.get("startingCash") or 0)
+    lives = int(meta.get("lives") or 0)
+    max_lives = int(meta.get("maxLives") or 0)
+
+    def chip(icon, fallback, label, value):
+        img_html = common._race_ui_img(icon, fallback, "bdual-chip-icon") if icon else ""
+        return (f"<span class='bdual-chip' style='white-space:nowrap'>{img_html}"
+                f"{util._esc(label)} <b>{util._esc(value)}</b></span>")
+
+    diff_icon = _difficulty_ui_icon(diff_raw)
+    row1 = ("<div class='bdual-chip-row'>"
+            + chip(diff_icon, "★", "难度", diff or "?")
+            + chip("RaceIcon.png", "🏁", "模式", mode or "?")
+            + chip("start-round.png", "▶", "回合", f"{start_r}–{end_r}")
+            + "</div>")
+    row2 = ("<div class='bdual-chip-row'>"
+            + chip("cash.png", "🪙", "资金", f"{cash:,}")
+            + chip("heart.png", "❤", "生命", f"{lives:,}")
+            + chip("heart.png", "❤", "最大生命", f"{max_lives:,}")
+            + "</div>")
+    return row1 + row2
+
+
+def _daily_dual_panel(v: dict, cols: int = 5, head_cls: str = "standard",
+                      meta_h: int = 175, rule_h: int = 200) -> tuple[str, int]:
     """每日 bdual 单面板：返回 (html, 网格行数)。
 
     与 Boss 面板共用元信息 chips/规则调节 chips 版式，猴子区改用每日全塔限制网格；
@@ -698,22 +733,22 @@ def _daily_dual_panel(v: dict, cols: int = 5, head_cls: str = "standard") -> tup
             f"<div class='bdual-rule-chip'>{util._esc(line)}</div>" for line in mod_lines)
         modifier_chips = f"<div class='bdual-rule-chips'>{mod_chips}</div>"
 
+    # 规则调节区整体（标签+chips+气球强化+extras）包固定高度：
+    # 三面板以 max 预留，chips 少的面板留白，保证「可用猴子」纵向对齐
+    rule_zone = (f"<div style='min-height:{rule_h}px'>"
+                 "<div class='bdual-sec-label'>规则调节</div>"
+                 f"{_boss_dual_rule_chips(meta)}{modifier_chips}{extras_html}</div>")
     panel = (
         "<div class='bdual-panel'>"
         f"<div class='bdual-panel-head {head_cls}'>{util._esc(v['issue'])}</div>"
         "<div class='bdual-panel-body'>"
         f"{pmap}"
-        f"{_boss_dual_meta_chips(v, daily=True)}"
-        "<div class='bdual-sec-label'>规则调节</div>"
-        f"{_boss_dual_rule_chips(meta)}"
-        f"{modifier_chips}"
-        f"{extras_html}"
+        f"<div style='min-height:{meta_h}px'>{_daily_meta_chip_rows(v)}</div>"
+        f"{rule_zone}"
         "<div class='bdual-sec-label'>可用猴子</div>"
         f"{grid_html}"
         "</div></div>")
-    chips = _boss_dual_rule_chip_count(meta) + len(mod_lines)
-    chip_rows = max(1, -(-chips // 3))
-    panel_h = 142 + 78 + 68 + 36 + 34 + chip_rows * 36 + 8 + rows * 120 + 8  # +68: 面板地图行
+    panel_h = 42 + 78 + meta_h + rule_h + 34 + rows * 120 + 22 + 60
     return panel, panel_h
 
 
@@ -732,6 +767,16 @@ def daily_dual_html(col: dict) -> str:
     ids = []
     main_rows = []  # 标准/高级/Coop 三面板平行
     panel_hs = []
+    # 规则调节区高度：按三面板中 chips 文本量最多者预留（对齐可用猴子标签）
+    rule_h = 0
+    for v in variants:
+        meta_v = v["meta"]
+        mt = int(meta_v.get("maxTowers") or 0)
+        towers_cap_txt = "无限制" if mt >= 9999 or mt <= 0 else f"{mt:,}"
+        chars = len("限制塔数 " + towers_cap_txt) + len("限制模范 " + str(int(meta_v.get("maxParagons") or 0)))
+        chars += sum(len(line) for line in textfmt.bloon_mod_lines(meta_v.get("_bloonModifiers")))
+        rows_v = max(1, -(-chars // 16))  # 估算每行约 16 个全角字符宽
+        rule_h = max(rule_h, 34 + 8 + rows_v * 36 + 8 + 24, 200)  # 标签 + chips + extras 余量；下限按实测标定
     for v in variants:
         ev = v.get("ev") or {}
         sid = str(ev.get("id") or "")
@@ -743,7 +788,7 @@ def daily_dual_html(col: dict) -> str:
         # 三面板平行：每列 3 列猴子网格；列间留 4px 缝，末列不留右侧缝
         gutter = "padding:0;" if len(main_rows) == 2 else "padding:0 4px 0 0;" if not main_rows else "padding:0 4px;"
         head_cls = {"advanced": "elite", "coop": "standard"}.get(variant, "standard")
-        panel, panel_h = _daily_dual_panel(v, cols=3, head_cls=head_cls)
+        panel, panel_h = _daily_dual_panel(v, cols=3, head_cls=head_cls, meta_h=175, rule_h=rule_h)
         main_rows.append(
             f"<div class='bdual-col {('eli' if variant == 'advanced' else 'std')}'"
             f" style='width:33.3%;{gutter}'>{panel}</div>")
