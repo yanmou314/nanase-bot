@@ -2,6 +2,7 @@
 
 必须在任何插件导入前完成 stub 注入（pytest 会在收集测试前先导入本文件）。
 """
+import pytest
 import logging
 import os
 import sys
@@ -316,3 +317,11 @@ def _install_stubs():
 
 
 _install_stubs()
+
+@pytest.fixture(autouse=True)
+def _auto_chat_usage_isolation(tmp_path, monkeypatch):
+    """auto_chat 计费文件隔离：以 root 跑测试会重建 usage.json（属主 root、
+    权限 600），生产进程（qqbot 用户）随后不可读。重定向到 tmp_path。"""
+    mod = sys.modules.get("plugin_auto_chat")
+    if mod is not None and getattr(mod, "_USAGE_FILE", None):
+        monkeypatch.setattr(mod, "_USAGE_FILE", str(tmp_path / "usage.json"))
