@@ -2640,3 +2640,22 @@ def test_daily_dual_html_smoke():
 
 def test_daily_dual_html_empty():
     assert "暂无每日挑战数据" in btd6.daily_dual_html({"empty": "暂无每日挑战数据"})
+
+
+def test_boss_dual_title_cn_and_hero_no_badge():
+    """Boss 合卡：标题用汉化名且不带层数数字；英雄不打 ×1 角标。"""
+    meta = {"name": "Bloonarius 300", "map": "Cubism", "difficulty": "hard", "mode": "standard",
+            "startRound": 20, "endRound": 100, "startingCash": 650, "lives": 150,
+            "maxTowers": 0, "maxParagons": 0,
+            "_towers": [{"tower": "Quincy", "isHero": True, "max": 1},
+                        {"tower": "DartMonkey", "max": 1},
+                        {"tower": "BombShooter"}]}
+    col = {"ev": {"bossType": "Bloonarius", "name": "Bloonarius 300", "id": "boss123_0926"},
+           "variants": [{"variant": "standard", "label": "标准", "meta": meta},
+                        {"variant": "elite", "label": "精英", "meta": dict(meta)}],
+           "meta": meta, "side_img": "", "map_img": "", "stale_note": ""}
+    html = btd6.boss_dual_html(col)
+    assert "BOSS情报 - 布隆纳留斯" in html  # 汉化名
+    assert "Bloonarius 300" not in html  # 英文原名+数字不再出现
+    assert "昆西 · ×1" not in html  # 英雄 max=1 不打角标
+    assert "飞镖猴 · ×1" in html  # 非英雄限购（max=1）仍显示 ×1
