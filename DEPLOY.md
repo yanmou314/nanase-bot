@@ -150,7 +150,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/xvfb-run -a /root/Napcat/opt/QQ/qq --no-sandbox
+User=napcat
+ExecStart=/usr/bin/xvfb-run -a /opt/napcat/opt/QQ/qq --no-sandbox
 Restart=always
 RestartSec=10
 KillMode=process

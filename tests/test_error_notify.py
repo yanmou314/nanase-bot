@@ -98,3 +98,63 @@ def test_build_message_uses_shanghai_timezone():
         expected,
         (datetime.now(ZoneInfo("Asia/Shanghai")).replace(second=59)).strftime("%m-%d %H:%M"),
     )) or "🕐" in msg
+
+
+def test_log_alert_handler_levels_and_ignore(monkeypatch):
+    """日志兜底：WARNING+ 通知；框架日志/设计内可选失败/INFO 不通知。"""
+    import logging
+
+    scheduled = []
+
+    class _LoopStub:
+        def is_closed(self):
+            return False
+
+    monkeypatch.setattr(error_notify, "_loop", _LoopStub())
+    monkeypatch.setattr(error_notify, "_schedule_log_notice",
+                        lambda key, text: scheduled.append((key, text)))
+
+    def _rec(name, level, msg):
+        return logging.LogRecord(name, level, "f.py", 1, msg, (), None)
+
+    h = error_notify._LogAlertHandler(level=logging.WARNING)
+    h.emit(_rec("plugin_random_chat", logging.WARNING, "random_chat AI 生成失败，本次静默跳过"))
+    assert len(scheduled) == 1 and "plugin_random_chat" in scheduled[0][0]
+    assert "WARNING" in scheduled[0][1]
+
+    h.emit(_rec("nonebot", logging.ERROR, "adapter down"))  # 框架日志：忽略
+    h.emit(_rec("plugin_btd6.collect", logging.WARNING,
+                "btd6 optional call failed [races]"))  # 设计内可选失败：忽略
+    h.emit(_rec("plugin_x", logging.INFO, "info 不到阈值"))  # INFO：忽略
+    assert len(scheduled) == 1
+
+    # 清理预占的冷却键，避免影响其他测试
+    error_notify._last_notified.pop(
+        "log|plugin_random_chat|random_chat AI 生成失败，本次静默跳过", None)
+
+
+def test_schedule_log_notice_rolls_back_on_failure(monkeypatch):
+    """发送失败时回滚冷却预占，恢复后可立即重试。"""
+    import asyncio
+
+    async def failing_send(text):
+        raise RuntimeError("napcat down")
+
+    monkeypatch.setattr(error_notify, "_send_notice", failing_send)
+    loop = asyncio.new_event_loop()
+    old_loop = error_notify._loop
+    error_notify._loop = loop
+
+    async def main():
+        error_notify._last_notified.pop("log|x|boom", None)
+        assert error_notify._should_notify("log|x|boom", time.time()) is True  # 预占冷却
+        error_notify._schedule_log_notice("log|x|boom", "告警文本")
+        await asyncio.sleep(0.05)  # 让回调执行回滚
+        assert "log|x|boom" not in error_notify._last_notified  # 已回滚
+
+    try:
+        loop.run_until_complete(main())
+    finally:
+        error_notify._loop = old_loop
+        loop.close()
+        error_notify._last_notified.pop("log|x|boom", None)
