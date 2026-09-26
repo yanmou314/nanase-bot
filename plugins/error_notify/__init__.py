@@ -200,38 +200,49 @@ scheduler.add_listener(_on_job_error, EVENT_JOB_ERROR)
 scheduler.add_listener(_on_job_missed, EVENT_JOB_MISSED)
 
 
-# ---------------- ERROR+ 日志兜底告警 ----------------
-# 插件把异常 catch 后仅 logger.exception 落 ERROR 日志的场景（如 chat_stats 每日
-# 清理失败），run_postprocessor / APScheduler 监听器都收不到——2026-09 审查发现
-# 此类失败最长静默数周无人知。此处对 ERROR+ 日志限频私聊通知主人。
-# 框架自身日志（nonebot/uvicorn/websockets 等）不计：适配器抖动属常态噪音。
+# ---------------- WARNING+/ERROR 日志兜底告警 ----------------
+# 插件把异常 catch 后仅 logger 写 WARNING/ERROR 日志的场景（如 chat_stats 每日
+# 清理失败、random_chat AI 失败静默跳过），run_postprocessor / APScheduler 监听器
+# 都收不到——2026-09 审查发现此类失败最长静默数周无人知。此处对 WARNING+ 日志
+# 限频私聊通知主人。框架自身日志（nonebot/uvicorn/websockets 等）不计：适配器抖动
+# 属常态噪音；「btd6 optional call failed」为设计内的可选素材失败（结果卡片自带
+# stale 提示兜底），同样不计。
 _LOG_ALERT_IGNORED = ("nonebot", "apscheduler", "websockets", "uvicorn", "fastapi", "asyncio")
+_LOG_ALERT_MSG_IGNORED = ("btd6 optional call failed",)
 
 
 class _LogAlertHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            if record.levelno < logging.ERROR:
+            if record.levelno < logging.WARNING:
                 return
             if record.name.startswith(_LOG_ALERT_IGNORED):
                 return
+            msg_head = record.getMessage()[:100]
+            if msg_head.startswith(_LOG_ALERT_MSG_IGNORED):
+                return
             if _loop is None or _loop.is_closed():
                 return  # 事件循环未就绪（启动早期）：不预占冷却，就绪后自然重报
-            key = f"log|{record.name}|{record.getMessage()[:100]}"
+            key = f"log|{record.name}|{msg_head}"
             if not _should_notify(key, time.time()):
                 return
             text = (
-                "⚠️ 日志告警（被插件捕获、未向上抛的异常）\n"
+                f"⚠️ 日志告警（{record.levelname}，被插件捕获、未向上抛）\n"
                 f"🔌 来源：{record.name}\n"
                 f"❌ 内容：{record.getMessage()[:300]}\n"
                 f"🕐 {datetime.now(_SH).strftime('%m-%d %H:%M')}\n"
                 f"（同来源 {_COOLDOWN // 60} 分钟内不重复提醒；详情见 journalctl）"
             )
-            asyncio.run_coroutine_threadsafe(_send_notice(text), _loop).add_done_callback(
-                lambda fut, key=key: _log_notice_result(fut, key)
-            )
+            _schedule_log_notice(key, text)
         except Exception:
             pass  # 告警兜底自身绝不抛
 
 
-logging.getLogger().addHandler(_LogAlertHandler(level=logging.ERROR))
+def _schedule_log_notice(key: str, text: str) -> None:
+    """把日志告警投递回主循环发送（线程安全；发送失败回滚冷却预占）。"""
+    asyncio.run_coroutine_threadsafe(_send_notice(text), _loop).add_done_callback(
+        lambda fut, key=key: _log_notice_result(fut, key)
+    )
+
+
+logging.getLogger().addHandler(_LogAlertHandler(level=logging.WARNING))
