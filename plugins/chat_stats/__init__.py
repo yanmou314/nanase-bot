@@ -357,6 +357,9 @@ WORDS_PUSH_HOUR = 0
 WORDS_PUSH_MINUTE = 2
 
 
+_words_push_running = False
+
+
 def _last_push_date() -> str:
     """读取最近一次每日词云推送日期（YYYY-MM-DD）；从未推送返回空串。"""
     data = load_json_state(WORDS_STATE, _state_lock)
@@ -377,31 +380,38 @@ def _mark_pushed(day: date) -> None:
     "cron", hour=WORDS_PUSH_HOUR, minute=WORDS_PUSH_MINUTE, id="daily_words", timezone="Asia/Shanghai"
 )
 async def daily_words_job():
+    global _words_push_running
+    if _words_push_running:
+        return
     if _last_push_date() >= _sh_today().isoformat():
         return  # 今日已推送（如启动补发已执行过），防重复
     groups = _words_groups()
     if not groups:
         return
-    # 写路径有 0.5 秒批量 flush 窗口，先等队列清空再统计，避免漏掉临界消息；
-    # 30 秒超时兜底防止数据库异常时任务卡死
-    await wait_writes_drained(30)
+    _words_push_running = True
     try:
-        bot = get_bot()
-    except Exception:
-        _logger.exception("获取 bot 失败")
-        return
-    sent = 0
-    for gid in groups:
+        # 写路径有 0.5 秒批量 flush 窗口，先等队列清空再统计，避免漏掉临界消息；
+        # 30 秒超时兜底防止数据库异常时任务卡死
+        await wait_writes_drained(30)
         try:
-            path = await _build_word_image(int(gid), 40)
-            if not path:
-                continue
-            await bot.send_group_msg(group_id=int(gid), message=MessageSegment.image("file://" + path))
-            sent += 1
+            bot = get_bot()
         except Exception:
-            _logger.exception("每日词云推送到群 %s 失败", gid)
-    if sent:
-        _mark_pushed(_sh_today())  # 有群成功送达才记录，全失败保留补发机会
+            _logger.exception("获取 bot 失败")
+            return
+        sent = 0
+        for gid in groups:
+            try:
+                path = await _build_word_image(int(gid), 40)
+                if not path:
+                    continue
+                await bot.send_group_msg(group_id=int(gid), message=MessageSegment.image("file://" + path))
+                sent += 1
+            except Exception:
+                _logger.exception("每日词云推送到群 %s 失败", gid)
+        if sent:
+            _mark_pushed(_sh_today())  # 有群成功送达才记录，全失败保留补发机会
+    finally:
+        _words_push_running = False
 
 
 # 启动补发：APScheduler 用内存 jobstore，进程重启后错过的当日词云静默丢失；

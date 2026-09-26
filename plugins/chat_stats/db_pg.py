@@ -45,6 +45,12 @@ def _log_queue_full(detail: str) -> None:
 
 
 def load_dsn() -> str:
+    """优先环境变量 PG_DSN；否则回退 plugins/chat_stats/db.json（兼容旧部署）。"""
+    dsn = (os.getenv("PG_DSN") or "").strip()
+    if dsn:
+        if "postgresql" not in dsn:
+            raise ValueError("invalid PG_DSN")
+        return dsn
     try:
         with open(CFG_FILE, encoding="utf-8") as f:
             cfg = json.load(f)
@@ -53,7 +59,9 @@ def load_dsn() -> str:
             raise ValueError("invalid dsn")
         return dsn
     except Exception:
-        raise RuntimeError("数据库配置缺失：请创建 plugins/chat_stats/db.json（含 dsn 字段）") from None
+        raise RuntimeError(
+            "数据库配置缺失：请设置环境变量 PG_DSN，或创建 plugins/chat_stats/db.json（含 dsn 字段）"
+        ) from None
 
 
 async def get_pool() -> AsyncConnectionPool:

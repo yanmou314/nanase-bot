@@ -312,20 +312,18 @@ def player_oak_html(col):
     av_html = (f"<img src='{util._esc(av)}'/>") if av else "<div class='pf-av-fallback'>?</div>"
     # 无 OAK 存档时（排行榜点名 / 公开档案）用公开 rank 字段
     if sv and (sv.get("xp") is not None or sv.get("veteranXp") is not None):
-        lvl, lv_xp, lv_goal = _collect.profile_rank_info(sv)
-        vet, vet_xp, vet_goal = _collect.profile_veteran_info(sv)
+        lvl, _, _ = _collect.profile_rank_info(sv)
+        vet, _, _ = _collect.profile_veteran_info(sv)
         has_vet_xp = int(sv.get("veteranXp") or 0) > 0
     else:
         try:
             lvl = int(public.get("rank") or 1)
         except (TypeError, ValueError):
             lvl = 1
-        lv_xp, lv_goal = None, None  # 无存档不画经验条
         try:
             vet = int(public.get("veteranRank") or 0)
         except (TypeError, ValueError):
             vet = 0
-        vet_xp, vet_goal = 0, 20000000
         has_vet_xp = vet > 0
     _lvl_bg = _assets._site_asset_data_url("UI/LvlHolder.webp")
     _lvl_style = (f" style='background-image:url(&quot;{util._esc(_lvl_bg)}&quot;);'") if _lvl_bg else ""

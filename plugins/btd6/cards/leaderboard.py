@@ -164,9 +164,10 @@ def leaderboard_html(col: dict) -> str:
             f"<div class='lb-name'>{util._esc(name)}</div>"
             f"<div class='lb-score'>{util._esc(score)}</div></div>"
         )
+    rows_html = "".join(rows) or "<div class='lb-empty'>（暂无上榜数据）</div>"
     body = (f"<div class='exlb-banner'><div class='exlb-banner-title'>{util._esc(banner_title)}</div></div>"
             f"<div class='lb-head'>{head_body}</div>"
-            f"<div class='lb-panel'>{''.join(rows) or '<div class=\'lb-empty\'>（暂无上榜数据）</div>'}</div>")
+            f"<div class='lb-panel'>{rows_html}</div>")
     h = 20 + 56 + 90 + max(len(rows), 1) * 56 + 40
     return common._list_shell(body, h)
 

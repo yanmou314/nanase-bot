@@ -665,7 +665,12 @@ async def _send_push_batch(payloads: list[tuple[str, str, dict]], groups: set[in
         return empty
     detail_ok: dict[str, bool] = {k: False for k, _i, _p in payloads}
     overview_ok = False
+    # 按群记账：只有每个目标群都成功发出，才算完整送达，避免任一群成功即写 last_pushed
+    detail_all: dict[str, bool] = {k: True for k, _i, _p in payloads}
+    overview_all = True
     for gid in groups:
+        gid_detail_ok: dict[str, bool] = {k: False for k, _i, _p in payloads}
+        gid_overview_ok = False
         for text, path, owner in messages:
             try:
                 if path and text:
@@ -677,26 +682,38 @@ async def _send_push_batch(payloads: list[tuple[str, str, dict]], groups: set[in
                 await bot.send_group_msg(group_id=gid, message=msg)
                 if owner is None:
                     overview_ok = True
+                    gid_overview_ok = True
                 else:
                     detail_ok[owner] = True
+                    gid_detail_ok[owner] = True
                 await asyncio.sleep(0.5)
             except Exception:
                 _logger.warning("BTD6 推送到群 %s 失败 owner=%s", gid, owner, exc_info=True)
-    return {"overview_ok": overview_ok, "detail_ok": detail_ok}
+        for k in detail_all:
+            if not gid_detail_ok.get(k):
+                detail_all[k] = False
+        if not gid_overview_ok:
+            overview_all = False
+    return {
+        "overview_ok": overview_ok,
+        "detail_ok": detail_ok,
+        "overview_all": overview_all,
+        "detail_all": detail_all,
+    }
 
 
 def _kind_push_ok(kind: str, payload: dict, result: dict) -> bool:
-    """该 kind 是否算「完整推送成功」——只有成功才允许写 last_pushed。
+    """该 kind 是否算「完整推送成功」——只有全部目标群成功才允许写 last_pushed。
 
-    - 有详情（Boss 规则 / 远征分图 / 每日 / Co-op / 社季）：至少一条详情发出
-    - 纯总览（竞速 / CT / Rush）：总览发出即可
+    - 有详情（Boss 规则 / 远征分图 / 每日 / Co-op / 社季）：每个目标群都至少发出一条详情
+    - 纯总览（竞速 / CT / Rush）：每个目标群都发出总览
     - 总览已发但详情全失败：不算成功，重试时跳过总览只补详情
     """
     details = payload.get("details") or []
     if details:
-        return bool(result.get("detail_ok", {}).get(kind))
+        return bool(result.get("detail_all", result.get("detail_ok", {})).get(kind))
     if payload.get("overview"):
-        return bool(result.get("overview_ok"))
+        return bool(result.get("overview_all", result.get("overview_ok")))
     return False
 
 
@@ -798,17 +815,21 @@ async def _flush_push_batch() -> None:
             pass
 
 
-async def _btd6_push_single(kind: str, ev: dict, ev_id: str, label: str, groups: set[int]) -> None:
-    """单类立即推送（手动补推/兼容旧调用）：同样先渲染完再发，总览在详情之前。"""
+async def _btd6_push_single(kind: str, ev: dict, ev_id: str, label: str, groups: set[int], *, mark_global: bool = True) -> None:
+    """单类立即推送（手动补推/兼容旧调用）：同样先渲染完再发，总览在详情之前。
+
+    mark_global=False 用于「只补推到本群」的路径：成功后不得写全局 last_pushed，
+    否则其他订阅群本期会被跳过造成永久漏推。
+    """
     payload = await _render_kind_payload(kind, ev, label)
     if not payload:
         return
     result = await _send_push_batch([(kind, ev_id, payload)], groups)
     ok = _kind_push_ok(kind, payload, result)
-    if ok:
+    if ok and mark_global:
         await asyncio.to_thread(_set_last_pushed, kind, ev_id)
-    _logger.info("BTD6 精准推送 %s %s 到 %d 群（成功标记：%s）",
-                 kind, ev_id, len(groups), ok)
+    _logger.info("BTD6 精准推送 %s %s 到 %d 群（成功标记：%s，写全局：%s）",
+                 kind, ev_id, len(groups), ok, mark_global and ok)
 
 
 # 精准采样：已知刷新点后 0/5/10 分钟各一次（3 次容错，覆盖 API 延迟）
@@ -861,6 +882,7 @@ async def btd6_push_rush_5(): await _btd6_push_kind("rush")
 async def btd6_push_rush_10(): await _btd6_push_kind("rush")
 
 # 每日 16:00（北京时间，与游戏内正式刷新点一致；普通+高级双版本）。勿改：见 collect.py 每日选期模块注释
+# 备注：Co-op 业务约定刷新/推送固定为北京时间下午 16:00，与部分 API 展示口径不一致，以本排程为准。
 @scheduler.scheduled_job("cron", hour=16, minute=0, id="btd6_push_daily_0", timezone="Asia/Shanghai")
 async def btd6_push_daily_0(): await _btd6_push_kind("daily")
 @scheduler.scheduled_job("cron", hour=16, minute=5, id="btd6_push_daily_5", timezone="Asia/Shanghai")
@@ -959,7 +981,6 @@ async def _push_check(event: MessageEvent):
     except Exception:
         await push_check_cmd.finish("拿不到 Bot 实例，请稍后再试")
         return
-    await _btd6_push_single(kind, ev, ev_id, label, {int(event.group_id)})
-    if _last_pushed().get(kind) == ev_id:
-        return  # 推送成功（_btd6_push_single 内已发图，无需额外回执刷屏）
-    await push_check_cmd.finish("补推失败，详情见日志")
+    # 补推只发当前群，绝不能写全局 last_pushed（否则其他订阅群本期永久漏推）
+    await _btd6_push_single(kind, ev, ev_id, label, {int(event.group_id)}, mark_global=False)
+    await push_check_cmd.finish("补推已发送到本群（未标记全局已推，其他群仍可自动收）")

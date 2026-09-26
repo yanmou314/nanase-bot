@@ -124,11 +124,36 @@ def _odyssey_reward_icon(kind: str, sub: str) -> str:
 
 
 def _odyssey_map_icons() -> dict[str, str]:
-    """岛屿行用小图标：金币 / 开始回合。"""
+    """岛屿行用小图标：金币 / 开始回合 / 金钱限制 / 升级限制。"""
     return {
         "coin": assets._game_asset_data_url("UI_CoinIcon.webp"),
         "play": assets._ui_asset_data_url("start-round.png"),
+        "least_cash": assets._game_asset_data_url("LeastCashIcon.webp"),
+        "least_tiers": assets._game_asset_data_url("LeastTiersIcon.webp"),
     }
+
+
+def _odyssey_island_limits(mp: dict) -> list[tuple[str, str, str]]:
+    """岛屿特殊限制：leastCashUsed / leastTiersUsed（-1 或缺失 = 无限制）。
+    返回 (中文标签, 数值文本, 图标 key)。"""
+    if not isinstance(mp, dict):
+        return []
+    out = []
+    for key, label, icon_key, fmt in (
+        ("leastCashUsed", "金钱限制", "least_cash", lambda n: f"≤{n:,}"),
+        ("leastTiersUsed", "升级限制", "least_tiers", lambda n: f"≤{n}"),
+    ):
+        raw = mp.get(key)
+        if raw is None:
+            continue
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if n < 0:
+            continue
+        out.append((label, fmt(n), icon_key))
+    return out
 
 
 def _odyssey_img(data_url: str, cls: str, fallback: str, alt: str = "") -> str:
@@ -145,10 +170,68 @@ def _odyssey_tower_lookup(meta: dict) -> dict[str, dict]:
     }
 
 
+def _odyssey_unit_membership(diffs: dict) -> dict[str, frozenset]:
+    """单位名 → 出现的难度集合（easy/medium/hard），用于难度色环。"""
+    acc: dict[str, set] = {}
+    for key in _DIFF_KEY_ORDER:
+        meta = (diffs or {}).get(key) or {}
+        meta = meta.get("meta") or meta if isinstance(meta, dict) else {}
+        towers = meta.get("_availableTowers") or []
+        for t in towers:
+            if not isinstance(t, dict) or t.get("max") == 0:
+                continue
+            raw = str(t.get("tower") or "").strip()
+            if not raw or raw == "ChosenPrimaryHero":
+                continue
+            acc.setdefault(raw, set()).add(key)
+    return {k: frozenset(v) for k, v in acc.items()}
+
+
+def _odyssey_unit_diff_keys(name: str, membership: dict[str, frozenset]) -> tuple[str, ...]:
+    """该单位出现的难度，按 外→内 顺序：困难、中等、简单（与地图嵌套色环一致）。"""
+    keys = membership.get(str(name or "").strip()) or frozenset()
+    order = []
+    if "hard" in keys:
+        order.append("hard")
+    if "medium" in keys:
+        order.append("medium")
+    if "easy" in keys:
+        order.append("easy")
+    return tuple(order)
+
+
+def _odyssey_unit_ring_class(name: str, membership: dict[str, frozenset]) -> str:
+    """兼容旧测试：组合 class（实际渲染改用嵌套 border 色环）。"""
+    keys = membership.get(str(name or "").strip()) or frozenset()
+    if not keys:
+        return ""
+    parts = []
+    if "easy" in keys:
+        parts.append("e")
+    if "medium" in keys:
+        parts.append("m")
+    if "hard" in keys:
+        parts.append("h")
+    return "ody-diff-" + "".join(parts) if parts else ""
+
+
+def _odyssey_wrap_diff_rings(inner: str, diff_keys: tuple[str, ...]) -> str:
+    """用嵌套 border 色环包住单位卡（WeasyPrint 不可靠渲染 box-shadow）。
+    外→内：困难黑 / 中等红 / 简单蓝，与地图 ody-ring 同色。"""
+    html = inner
+    # 与地图嵌套一致：先包简单（最内），再中等，最后困难（最外）
+    for key in ("easy", "medium", "hard"):
+        if key in diff_keys:
+            html = f"<div class='ody-unit-ring ody-ring-{key}'>{html}</div>"
+    return html
+
+
 def _odyssey_tower_card(raw: str, is_hero: bool, count_text: str = "",
                         classes: str = "", category: str = "",
                         upgrade_caps: str = "",
-                        badge_pos: str = "right") -> str:
+                        badge_pos: str = "right",
+                        ring_class: str = "",
+                        diff_keys: tuple[str, ...] = ()) -> str:
     name = assets._tower_display_name(raw, is_hero)
     icon = assets._tower_icon(raw, is_hero)
     cat = category or assets._tower_category(raw, is_hero)
@@ -165,22 +248,32 @@ def _odyssey_tower_card(raw: str, is_hero: bool, count_text: str = "",
         content += f"<span class='{qcls}'>{util._esc(count_text)}</span>"
     if upgrade_caps:
         content += f"<span class='ody-unit-caps'>{util._esc(upgrade_caps)}</span>"
-    return f"<div class='ody-unit-wrap'><div class='{card_classes}' title='{util._esc(name)}'>{content}</div></div>"
+    wrap_classes = "ody-unit-wrap" + (f" {ring_class}" if ring_class else "")
+    return f"<div class='{wrap_classes}'><div class='{card_classes}' title='{util._esc(name)}'>{content}</div></div>"
 
 
-def _odyssey_available_html(meta: dict) -> str:
-    """可用英雄/猴子/力量三面板；图标从左到右排列。"""
+def _odyssey_available_html(meta: dict, diffs: dict | None = None) -> str:
+    """可用英雄/猴子/力量三面板。
+    猴子不标注难度；英雄仍一行两个，仅「困难可用」的英雄加贴身黑边。"""
+    diffs = diffs or {}
+    membership = _odyssey_unit_membership(diffs)
     towers = [t for t in meta.get("_availableTowers") or []
               if isinstance(t, dict) and str(t.get("tower") or "").strip() and t.get("max") != 0]
     heroes = [t for t in towers if t.get("isHero")]
     regular = [t for t in towers if not t.get("isHero")]
-    hero_html = "".join(
-        _odyssey_tower_card(str(t.get("tower")), True, "", "available",
-                            category="hero",
-                            upgrade_caps=_odyssey_upgrade_caps(t),
-                            badge_pos="left")
-        for t in heroes
-    )
+
+    def _hero_card(t: dict) -> str:
+        raw = str(t.get("tower") or "").strip()
+        is_hard = "hard" in (membership.get(raw) or frozenset())
+        return _odyssey_tower_card(
+            raw, True, "", "available" + (" is-hard" if is_hard else ""),
+            category="hero",
+            upgrade_caps=_odyssey_upgrade_caps(t),
+            badge_pos="left",
+        )
+
+    hero_html = "".join(_hero_card(t) for t in heroes)
+
     tower_html = "".join(
         _odyssey_tower_card(
             str(t.get("tower")), False,
@@ -349,6 +442,8 @@ def _odyssey_map_rule_text(mp: dict) -> str:
     """仅在无强化时用短文案；有强化时由图标行展示。"""
     modifiers = common._race_modifier_items(mp.get("_bloonModifiers"))
     details = [f"{label} {value}" for label, value, _icon in modifiers]
+    for label, value, _icon in _odyssey_island_limits(mp):
+        details.append(f"{label} {value}")
     custom_rounds = [str(x) for x in mp.get("roundSets") or [] if str(x).casefold() != "default"]
     if custom_rounds:
         details.append("自定义回合")
@@ -374,8 +469,47 @@ def _ody_mod_display_label(label: str) -> str:
     return mapping.get(label, label)
 
 
-def _ody_diff_mode_icons(difficulty: str) -> str:
-    """困难难度图标；模式用竞赛图标。"""
+def _ody_mode_icon_file(mode: str) -> str:
+    """API mode → modes/ 下的专属图标文件名（扁平归一化）。"""
+    raw = str(mode or "").strip()
+    if not raw:
+        return ""
+    table = {
+        "deflation": "Deflation.png",
+        "impoppable": "Impoppable.png",
+        "chimps": "CHIMPS.png",
+        "clicks": "CHIMPS.png",
+        "primaryonly": "PrimaryOnly.png",
+        "primarymonkeysonly": "PrimaryOnly.png",
+        "militaryonly": "MilitaryOnly.png",
+        "militarymonkeysonly": "MilitaryOnly.png",
+        "magiconly": "MagicOnly.png",
+        "magicmonkeysonly": "MagicOnly.png",
+        "reverse": "Reverse.png",
+        "apopalypse": "Apopalypse.png",
+        "alternatebloonsrounds": "AlternateBloonsRounds.png",
+        "alternatebloons": "AlternateBloonsRounds.png",
+        "abr": "AlternateBloonsRounds.png",
+        "doublemoabhealth": "DoubleMoabHealth.png",
+        "doublehpmoabs": "DoubleMoabHealth.png",
+        "halfcash": "HalfCash.png",
+        "halfmoney": "HalfCash.png",
+        "sandbox": "Sandbox.png",
+    }
+    return table.get(raw.replace(" ", "").lower(), "")
+
+
+def _ody_mode_icon_html(mode: str) -> str:
+    """地图模式专属图标；缺失回退竞赛图标。"""
+    fname = _ody_mode_icon_file(mode)
+    url = assets._mode_asset_data_url(fname) if fname else ""
+    if url:
+        return f"<img class='ody-meta-ico' src='{util._esc(url)}'/>"
+    return common._race_ui_img("RaceIcon.png", "🏁", "ody-meta-ico")
+
+
+def _ody_diff_mode_icons(difficulty: str, mode: str = "") -> str:
+    """难度图标 + 模式专属图标。"""
     raw = str(difficulty or "").strip()
     key = raw.lower()
     diff_map = {
@@ -396,14 +530,30 @@ def _ody_diff_mode_icons(difficulty: str) -> str:
         common._race_ui_img(fname, "★", "ody-meta-ico") if fname
         else "<span class='ody-meta-ico-fb'>★</span>"
     )
-    mode_html = common._race_ui_img("RaceIcon.png", "🏁", "ody-meta-ico")
-    return diff_html, mode_html
+    return diff_html, _ody_mode_icon_html(mode)
 
 
 def _odyssey_mod_chips_html(mp: dict) -> str:
-    """气球强化：图标 + 名称（上）+ 倍率（下）。"""
+    """气球强化 + 岛屿金钱/升级限制：图标 + 名称（上）+ 数值（下）。"""
     items = common._race_modifier_items(mp.get("_bloonModifiers"))
     chips = []
+    icons = _odyssey_map_icons()
+    limit_fallback = {"least_cash": "💰", "least_tiers": "⬆"}
+    for label, value, icon_key in _odyssey_island_limits(mp):
+        icon_url = icons.get(icon_key, "")
+        icon_html = (
+            f"<img class='ody-mod-chip-ico' src='{util._esc(icon_url)}'/>"
+            if icon_url
+            else f"<span class='ody-mod-chip-ico-fallback'>{limit_fallback.get(icon_key, '⚡')}</span>"
+        )
+        chips.append(
+            "<span class='ody-mod-chip'>"
+            f"{icon_html}"
+            "<span class='ody-mod-chip-text'>"
+            f"<span class='ody-mod-chip-label'>{util._esc(label)}</span>"
+            f"<span class='ody-mod-chip-val'>{util._esc(value)}</span>"
+            "</span></span>"
+        )
     for label, value, icon in items:
         name = _ody_mod_display_label(label)
         chips.append(
@@ -453,14 +603,14 @@ def _odyssey_map_row_html(mp: dict, col: dict) -> str:
     thumb = (f"<img class='ody-map-img' src='{util._esc(mp['img'])}' alt='{util._esc(mp.get('map') or mp.get('name') or '')}'/>"
              if mp.get("img") else "<div class='ody-map-empty'>暂无地图图像</div>")
     difficulty = i18n.cn(mp.get("difficulty"), i18n.DIFFICULTY_CN) or "未知难度"
-    mode = i18n.cn(mp.get("mode"), i18n.MODE_CN) or "标准"
+    mode = i18n.mode_cn(mp.get("mode")) or "标准"
     start_round = int(mp.get("startRound") or 0)
     end_round = int(mp.get("endRound") or 0)
     rounds = f"{start_round}/{end_round}" if start_round or end_round else "—"
     plain_rule = _odyssey_map_rule_text(mp)
     coin_img = _odyssey_img(icons.get("coin", ""), "ody-mini-icon", "🪙", "金币")
     play_img = _odyssey_img(icons.get("play", ""), "ody-mini-icon", "▶", "开始")
-    diff_ico, mode_ico = _ody_diff_mode_icons(difficulty)
+    diff_ico, mode_ico = _ody_diff_mode_icons(difficulty, mp.get("mode") or "")
     if plain_rule:
         mods_html = f"<div class='ody-map-rule'>{util._esc(plain_rule)}</div>"
     else:
@@ -667,7 +817,7 @@ def odyssey_html(col: dict) -> str:
         banner
         + _odyssey_diff_trio(col)
         + ("<div class='ody-extreme-badge'>极限模式</div>" if any_extreme else "")
-        + _odyssey_available_html(_odyssey_available_meta(diffs))
+        + _odyssey_available_html(_odyssey_available_meta(diffs), diffs)
         + "<div class='ody-section-banner'>岛屿规则</div>"
         + _odyssey_maps_html(primary_maps, col)
         + "<div class='ody-event-desc' style='margin-top:6px;text-align:center;'>"

@@ -106,7 +106,7 @@ QQBOT_OWNER=你的QQ号
 # QQBOT_TEST_OWNER_UIDS=QQ1,QQ2   # 非空时特权群内还必须命中此白名单
 
 # 若 NapCatQQ 侧配置了 access token，需增加：
-# ONEBOT_ACCESS_TOKEN=与NapCat一致
+ONEBOT_ACCESS_TOKEN=与NapCat一致（必配，空 token 可被伪造事件）
 
 ```
 
@@ -117,8 +117,8 @@ QQBOT_OWNER=你的QQ号
 | 插件 | 配置文件 | 示例 |
 |------|----------|------|
 | `chat_stats` | `plugins/chat_stats/db.json` | `{"dsn": "postgresql://user:pass@127.0.0.1:5432/qqbot"}` |
-| `auto_chat` | `plugins/auto_chat/config.json` | `{"api_key": "sk-xxx"}`（智谱GLM） |
-| `news` | `plugins/news/ai_config.json` | `{"api_key": "..."}`（智谱，也可用 `.新闻key` 命令配置） |
+| `auto_chat` | 环境变量 `DEEPSEEK_API_KEY`（或兼容 `plugins/auto_chat/config.json`） | 业务密钥，勿写入源码树 |
+| `news` | 环境变量 `GLM_API_KEY`/`GLM_MODEL`（或 `.新闻key` 命令） | 业务密钥，勿写入源码树 |
 | `ow_patch` | 无（官网直连，无需 key） | — |
 | `request_manager` | `plugins/request_manager/approve_guard.json` | 拉黑名单与自动通过节流记录（`.进群拉黑` 管理） |
 

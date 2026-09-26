@@ -24,6 +24,7 @@ STATE_FILE = os.path.join(os.path.dirname(__file__), "join_state.json")
 
 # (group_id, user_id) -> 入群时间戳
 _join_ts: dict = {}
+_save_lock = asyncio.Lock()
 _JOIN_MAX_KEYS = 20000  # 防止字典无限增长，超过后清理 30 天前的记录（全量 dict 常驻内存，2 万条约 3-5MB）
 _JOIN_TTL = 30 * 86400
 
@@ -82,9 +83,11 @@ async def _save_state_async() -> None:
 
     入群记录上限 10 万条、全量序列化可达数 MB，直接在事件循环内写会阻塞其他事件；
     先 copy 再进线程也避免了线程内迭代时字典被并发修改。
+    串行化保存：防止旧 snapshot 后写覆盖新数据。
     """
-    snapshot = dict(_join_ts)
-    await asyncio.to_thread(_save_state, snapshot)
+    async with _save_lock:
+        snapshot = dict(_join_ts)
+        await asyncio.to_thread(_save_state, snapshot)
 
 
 _load_state()

@@ -58,7 +58,15 @@ async def _owner_decision_rule(event: MessageEvent) -> bool:
     if isinstance(event, GroupMessageEvent):
         reply_id = _reply_message_id(event)
         return bool(reply_id) and _notify_index.get(reply_id) in _pending
-    return True
+    # 私聊：仅当确有待审批时才抢占，避免主人正常说「同意/拒绝」被吞
+    if _pending:
+        return True
+    try:
+        from plugins import bnet_verify as _bv
+        _lst = getattr(_bv, "list_verify_pending", None)
+        return bool(_lst()) if callable(_lst) else False
+    except Exception:
+        return False
 
 
 decision_matcher = on_message(
@@ -68,6 +76,7 @@ decision_matcher = on_message(
 )
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "auto_approve.json")
+_pm_throttle: dict = {}
 GUARD_FILE = os.path.join(os.path.dirname(__file__), "approve_guard.json")
 
 # 自动通过的两道安全闸（防「暗号外泄后被反复利用」）：
@@ -286,6 +295,10 @@ async def auto_on(bot: Bot, event: MessageEvent, arg=CommandArg()):
         kws = [k for k in re.split(r"[\s,，、]+", " ".join(parts[1:])) if k]
     if not kws:
         await auto_on_cmd.finish("请提供至少一个关键字")
+    # 拒绝把管理词存成暗号，避免附言含「关闭」等即被放行
+    _RESERVED = {"关闭", "查看", "数量", "统计", "帮助"}
+    if any(k in _RESERVED for k in kws):
+        await auto_on_cmd.finish("❌ 关键字不能使用「关闭 / 查看 / 数量 / 统计 / 帮助」等管理词")
     merged = await _save_keywords(gid, kws, merge=True)
     await _finish_owner_config(bot, auto_on_cmd, event, f"✅ 群 {gid} 自动通过已开启\n🔑 关键字：{' / '.join(merged)}\n进群附言包含任一关键字将自动同意（不区分大小写）")
 
@@ -415,7 +428,14 @@ def _is_bnet_managed(group_id: int) -> bool:
 
 @request_matcher.handle()
 async def handle_request(bot: Bot, event):
-    if event.user_id == int(OWNER):
+    # 主人「邀请 bot 入群」的 user_id 是邀请人，必须进待审；
+    # 仅跳过非 invite 且申请人是 Owner 的加群/好友申请。
+    _is_owner_invite = (
+        isinstance(event, GroupRequestEvent)
+        and getattr(event, "sub_type", None) == "invite"
+        and event.user_id == int(OWNER)
+    )
+    if event.user_id == int(OWNER) and not _is_owner_invite:
         return
     _purge_pending()
     ts = now_str()
@@ -604,6 +624,16 @@ async def owner_decision(bot: Bot, event: MessageEvent):
 # ---------------- 私聊消息转发 ----------------
 @private_matcher.handle()
 async def forward_private(bot: Bot, event: MessageEvent):
+    # 每用户 5 分钟内最多转发 3 条，超出折叠为统计，防止私聊刷屏 Owner
+    uid = str(event.user_id)
+    now = time.time()
+    rec = _pm_throttle.setdefault(uid, {"window": now, "n": 0})
+    if now - rec["window"] > 300:
+        rec["window"] = now
+        rec["n"] = 0
+    rec["n"] += 1
+    if rec["n"] > 3:
+        return
     if is_owner(event) or event.message_type != "private":
         return
     text = event.get_plaintext().strip() or "（非文字消息）"

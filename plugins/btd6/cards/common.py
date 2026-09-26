@@ -1,4 +1,3 @@
-import os
 """卡片公共件：HTML 转义、背景图、四种外壳（通用/远征/竞速）与竞速强化部件。"""
 import base64
 import os
@@ -564,6 +563,12 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
   box-sizing: border-box;
 }}
 .ody-ring-hard {{ border: 4px solid #1a1a1a; padding: 0; }}
+/* 英雄：一行两个；仅「困难可用」加贴身黑边（#1a1a1a，与地图困难圈同色）。猴子不标注。 */
+.ody-hero-grid {{ padding: 4px 2px 2px; }}
+.ody-hero-grid .ody-unit-card.is-hard {{
+    border: 3px solid #1a1a1a;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.65), 0 2px 0 rgba(0,0,0,.25);
+}}
 .ody-ring-medium {{ border: 4px solid #d63a14; padding: 0; }}
 .ody-ring-easy {{ border: 4px solid #2d7cc0; padding: 10px; }}
 /* 圈外但仍属上级难度的地图：左缩进与蓝圈内容对齐 */

@@ -38,6 +38,7 @@ _buffers: dict[int, deque] = {}  # group_id -> 最近消息文本
 _last_interject: dict[int, float] = {}  # group_id -> 上次插话时间戳
 _last_seen: dict[int, float] = {}  # group_id -> 最近一条消息时间戳（缓冲驱逐依据）
 _inflight: set[int] = set()  # 正在生成插话的群，防止同群并发触发
+_rnd_usage = {"date": "", "count": 0}  # 独立日限额计数器（QQBOT_RANDOM_CHAT_DAILY_LIMIT，默认80/天）
 
 FALLBACK_LINES = [
     "えっと…ななせ一直在这里看你们聊天哦…（小声）",
@@ -126,6 +127,18 @@ async def _generate_reply(gid: int) -> str:
         {"role": "system", "content": mod.SYSTEM + EXTRA_PROMPT},
         {"role": "user", "content": f"最近的群聊记录：\n{transcript}"},
     ]
+    # 独立日限额：random_chat 不得吃光 auto_chat 的 @ 对话额度
+    _rnd_limit = int(os.getenv("QQBOT_RANDOM_CHAT_DAILY_LIMIT", "80") or "80")
+    if _rnd_limit > 0:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+        if _rnd_usage["date"] != today:
+            _rnd_usage["date"] = today
+            _rnd_usage["count"] = 0
+        if _rnd_usage["count"] >= _rnd_limit:
+            return  # 超额静默，不发言
+        _rnd_usage["count"] += 1
     reply = await mod.chat_completion(messages, max_tokens=120)
     if not reply or reply.strip() == "[SKIP]":
         return ""
@@ -148,6 +161,8 @@ async def watch(bot: Bot, event: GroupMessageEvent):
         return
 
     sender = event.sender.card or event.sender.nickname or str(event.user_id)
+    # 剥离结构字符，防止昵称伪造「」:：换行等注入多说话人协议
+    sender = "".join(ch for ch in sender[:20] if ch not in "」」:：\n\r\t")
     _record(gid, sender[:20], text[:100])
 
     buf = _buffers.get(gid)
@@ -164,8 +179,9 @@ async def watch(bot: Bot, event: GroupMessageEvent):
     try:
         reply = await _generate_reply(gid)
     except Exception as e:
-        logger.warning(f"random_chat 群 {gid} AI 生成失败（{e!r}），本次改用语料")
-        reply = random.choice(FALLBACK_LINES)
+        # AI 失败/预算熔断时静默放弃，不再回退语料发言（避免故障期刷屏噪音）
+        logger.warning(f"random_chat 群 {gid} AI 生成失败（{e!r}），本次静默跳过")
+        return
     finally:
         _inflight.discard(gid)
     if not reply:

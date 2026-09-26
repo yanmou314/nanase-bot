@@ -76,12 +76,27 @@ DIFFICULTY_CN = {
     # 游戏内难度（活动元数据用）
     "Easy": "简单", "Medium": "中等", "Hard": "困难",
 }
+# 译名对齐 BWIKI《游戏模式》：https://wiki.biligame.com/btd6/游戏模式
+# Impoppable BWIKI 作「不可击破」（又译极难）；Half Cash 作「金币减半」；
+# CHIMPS BWIKI 作「超猩星」（国际服客户端烂译「点击」，社区亦常直接写 CHIMPS）。
 MODE_CN = {
     "Standard": "标准", "Reverse": "反向", "Apopalypse": "天启",
-    "Half Cash": "半价", "Double HP": "双倍血量", "CHIMPS": "CHIMPS",
-    "DoubleMoabHealth": "双倍MOAB血量", "AlternateBloonsRounds": "ABR交替回合",
-    "Only": "仅限", "MagicMonkeysOnly": "仅魔法猴", "DoubleCash": "双倍现金",
+    "Half Cash": "金币减半", "HalfCash": "金币减半", "HalfMoney": "金币减半",
+    "Double HP": "双倍血量", "DoubleHP": "双倍血量",
+    "CHIMPS": "超猩星", "Clicks": "超猩星",
+    "Deflation": "放气",
+    "Impoppable": "不可击破",
+    "DoubleMoabHealth": "双倍生命MOAB", "DoubleHpMoabs": "双倍生命MOAB",
+    "AlternateBloonsRounds": "替代气球回合", "AlternateBloons": "替代气球回合", "ABR": "替代气球回合",
+    "Only": "仅限",
+    "MagicMonkeysOnly": "仅魔法", "MagicOnly": "仅魔法",
+    "PrimaryMonkeysOnly": "仅初级", "PrimaryOnly": "仅初级",
+    "MilitaryMonkeysOnly": "仅军事", "MilitaryOnly": "仅军事",
+    "DoubleCash": "双倍现金",
+    "Sandbox": "沙盒",
 }
+# 归一化别名：去空格 + 小写（兼容 "Half Cash" / "HalfCash" 等 API 写法）
+_MODE_CN_FLAT = {k.replace(" ", "").lower(): v for k, v in MODE_CN.items()}
 MAP_CN = {
     # Beginner（译名对齐 B 站气球塔防6 WIKI；Frozen Over 游戏内为「冰封三尺」）
     "Tutorial": "教程", "MonkeyMeadow": "猴子草甸",
@@ -159,7 +174,17 @@ FLAG_LABELS = [
 
 def cn(value, mapping: dict) -> str:
     raw = str(value or "").strip()
-    return mapping.get(raw, raw)
+    hit = mapping.get(raw)
+    if hit:
+        return hit
+    # 扁平化回退：去空格 + 小写，兼容 API CamelCase / 带空格两种写法
+    flat = {k.replace(" ", "").lower(): v for k, v in mapping.items()} if mapping else {}
+    return flat.get(raw.replace(" ", "").lower(), raw)
+
+
+def mode_cn(value: str) -> str:
+    """游戏模式内部名 → 中文（MODE_CN，FLAT 归一化查找）；查不到回退原名。"""
+    return cn(value, MODE_CN)
 
 
 def boss_cn(boss_type: str) -> str:

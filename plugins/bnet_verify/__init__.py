@@ -96,7 +96,9 @@ def _load_verify_state() -> dict:
 async def _save_verify_state() -> None:
     try:
         await save_json_state_async(
-            _VERIFY_FILE, {"pending": _verify_pending, "active": _verify_active})
+            _VERIFY_FILE,
+            {"pending": dict(_verify_pending), "active": dict(_verify_active)},
+        )
     except Exception:
         logger.warning("[bnet_verify] 验证状态落盘失败", exc_info=True)
 
@@ -334,7 +336,9 @@ def list_verify_pending() -> dict:
 
 async def approve_verify_by_qq(bot, target_qq: str):
     """通过指定 QQ 的战网验证待审批（含改名片+绑定）。返回 (handled, notice文本)。"""
-    target = "".join(ch for ch in str(target_qq or "") if ch.isdigit())
+    raw = str(target_qq or "").strip()
+    # 必须整串纯数字，避免 "12 34" 被拼成 1234 导致批错 QQ
+    target = raw if raw.isdigit() else ""
     rec = _verify_pending.get(target)
     if not rec or not isinstance(rec, dict):
         return (False,

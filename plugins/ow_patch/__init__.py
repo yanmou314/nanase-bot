@@ -105,13 +105,16 @@ def _save_state(data: dict) -> None:
     save_json_state(STATE_FILE, data, _LOCK)
 
 
-def _mutate_state(mutate) -> dict:
-    """load → mutate → save 同锁完成，避免推送标记与订阅命令互相覆盖。"""
-    with _LOCK:
-        state = _load_state()
-        mutate(state)
-        _save_state(state)
-        return state
+async def _mutate_state(mutate) -> dict:
+    """load → mutate → save 同锁完成，避免推送标记与订阅命令互相覆盖。
+    磁盘 IO 放线程池，避免阻塞事件循环。"""
+    def _do() -> dict:
+        with _LOCK:
+            state = _load_state()
+            mutate(state)
+            _save_state(state)
+            return state
+    return await asyncio.to_thread(_do)
 
 
 # ---------------- 资源护栏 ----------------
@@ -466,9 +469,15 @@ def _split_sections(body_html: str) -> list[str]:
 # ---------------- 渲染：PDF 分页 → 拼长图 ----------------
 
 def _write_pdf(html: str, pdf_path: str) -> None:
-    from weasyprint import HTML
+    from weasyprint import HTML, default_url_fetcher
 
-    HTML(string=html).write_pdf(pdf_path)
+    def _local_only_fetcher(url, timeout=10, *args, **kwargs):
+        # 与 common.render_html_to_png 一致：只允许 data:，阻断渲染侧 SSRF
+        if url.startswith("data:"):
+            return default_url_fetcher(url, timeout, *args, **kwargs)
+        return {"string": "", "mime_type": "", "encoding": None}
+
+    HTML(string=html, url_fetcher=_local_only_fetcher).write_pdf(pdf_path)
 
 
 def _pdf_to_pngs(pdf_path: str, out_prefix: str) -> list[str]:
@@ -907,7 +916,7 @@ async def _push_patch(bot: Bot, groups: list[str], patch: dict, attempts: int,
     return True
 
 
-def _mark_seen(patch: dict) -> None:
+async def _mark_seen(patch: dict) -> None:
     def _do(state: dict) -> None:
         seen = state.setdefault("seen", {})
         seen[patch["key"]] = {
@@ -918,7 +927,7 @@ def _mark_seen(patch: dict) -> None:
         if len(seen) > 60:
             for k in sorted(seen)[:-60]:
                 seen.pop(k, None)
-    _mutate_state(_do)
+    await _mutate_state(_do)
 
 
 async def _notify_owner(text: str) -> None:
@@ -945,7 +954,7 @@ async def _poll_once() -> str:
 
             def _do(state: dict) -> None:
                 state["lowmem_skips"] = int(state.get("lowmem_skips") or 0) + 1
-            st = _mutate_state(_do)
+            st = await _mutate_state(_do)
             if st.get("lowmem_skips") == 3:
                 await _notify_owner(f"⚠️ ow补丁因内存不足已连续跳过 3 轮（{reason}），请检查服务器内存")
             return "skipped-lowmem"
@@ -957,10 +966,10 @@ async def _poll_once() -> str:
         with _LOCK:
             seen = dict(_load_state().get("seen") or {})
         fresh = _diff_new(sections, seen)
-        _mutate_state(lambda s: s.update(
+        await _mutate_state(lambda s: s.update(
             last_check=datetime.now(_SH).strftime("%Y-%m-%d %H:%M:%S")))
         if not fresh:
-            _mutate_state(lambda s: s.update(consec_fail=0, lowmem_skips=0))
+            await _mutate_state(lambda s: s.update(consec_fail=0, lowmem_skips=0))
             return "empty"
         try:
             bot = get_bot()
@@ -970,7 +979,7 @@ async def _poll_once() -> str:
         groups = [str(g) for g in (_load_state().get("groups") or []) if str(g)]
         if not groups:
             for p in fresh:
-                _mark_seen(p)  # 无订阅群：只记已读，避免攒一堆待推
+                await _mark_seen(p)  # 无订阅群：只记已读，避免攒一堆待推
             return "empty"
         selected = _select_push_list(fresh, seen)
         selected_keys = {p["key"] for p in selected}
@@ -984,15 +993,15 @@ async def _poll_once() -> str:
             )
             for p in fresh:
                 if p["key"] not in selected_keys:
-                    _mark_seen(p)  # 静默记已读，避免下轮再入选
+                    await _mark_seen(p)  # 静默记已读，避免下轮再入选
         ok_all = True
         for patch in selected[-3:]:  # 单轮最多推 3 节，防积压一次性刷屏
             if not await _push_patch(bot, groups, patch, _RENDER_ATTEMPTS):
                 ok_all = False
                 continue
-            _mark_seen(patch)
+            await _mark_seen(patch)
         if ok_all:
-            _mutate_state(lambda s: s.update(consec_fail=0, lowmem_skips=0))
+            await _mutate_state(lambda s: s.update(consec_fail=0, lowmem_skips=0))
             return "spent"
         return await _note_fail()
     finally:
@@ -1002,7 +1011,7 @@ async def _poll_once() -> str:
 async def _note_fail() -> str:
     def _do(state: dict) -> None:
         state["consec_fail"] = int(state.get("consec_fail") or 0) + 1
-    st = _mutate_state(_do)
+    st = await _mutate_state(_do)
     if st.get("consec_fail") == 3:
         await _notify_owner("⚠️ ow补丁连续 3 轮推送失败，请检查官网连通性与渲染管线")
     return "failed"
@@ -1049,7 +1058,7 @@ async def _on(event: MessageEvent):
         groups = {str(g) for g in (state.get("groups") or [])}
         groups.add(str(event.group_id))
         state["groups"] = sorted(groups)
-    _mutate_state(_do)
+    await _mutate_state(_do)
     await sub_on_cmd.finish("✅ 本群已订阅OW国服补丁推送\n新补丁说明将以长截图形式自动发送（每小时检查一次）")
 
 
@@ -1064,7 +1073,7 @@ async def _off(event: MessageEvent):
         groups = {str(g) for g in (state.get("groups") or [])}
         groups.discard(str(event.group_id))
         state["groups"] = sorted(groups)
-    _mutate_state(_do)
+    await _mutate_state(_do)
     await sub_off_cmd.finish("✅ 本群已退订OW国服补丁推送")
 
 

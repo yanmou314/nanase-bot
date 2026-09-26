@@ -10,7 +10,7 @@ from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, Message
 from nonebot.matcher import Matcher
 from nonebot.params import CommandArg
 
-from common import at_prefix, parse_tag, save_json_state
+from common import at_prefix, is_owner, parse_tag, save_json_state
 
 try:
     from nonebot_plugin_apscheduler import scheduler
@@ -215,6 +215,8 @@ async def _enqueue_task(kind: str, tag: str, group_id, user_id: str, matcher, ev
     if len(_task_queue) >= TASK_MAX_PENDING:
         await matcher.finish(at_prefix(event) + Message("排队任务太多，请稍后再试～"))
     _task_seq += 1
+    if len(_task_queue) >= TASK_MAX_PENDING:
+        raise RuntimeError("OW 查询队列已满，请稍后再试")
     _task_queue.append({"seq": _task_seq, "kind": kind, "tag": tag,
                         "group_id": group_id, "user_id": user_id, "t0": 0.0})
     waiting = len(_task_queue) - 1 + (1 if _task_current is not None else 0)
@@ -243,6 +245,8 @@ async def submit_relay_task(kind: str, tag: str, text=None, timeout=None):
     loop = asyncio.get_running_loop()
     fut = loop.create_future()
     _task_seq += 1
+    if len(_task_queue) >= TASK_MAX_PENDING:
+        raise RuntimeError("OW 查询队列已满，请稍后再试")
     _task_queue.append({"seq": _task_seq, "kind": kind, "tag": tag,
                         "text": text, "future": fut,
                         "timeout": timeout or TASK_TIMEOUT,
@@ -862,8 +866,7 @@ owreset_cmd = on_command("ow重置", aliases={"ow清理"}, priority=5, block=Tru
 
 @owstatus_cmd.handle()
 async def ow_status(event: MessageEvent):
-    owner = str(os.getenv("QQBOT_OWNER", "1543758852")).strip()
-    if str(event.user_id) != owner:
+    if not is_owner(event):
         await owstatus_cmd.finish(at_prefix(event) + "仅Bot主人可查看队列状态")
     if _task_current is None:
         cur = "当前无在途任务"
@@ -889,8 +892,7 @@ async def ow_status(event: MessageEvent):
 @owreset_cmd.handle()
 async def ow_reset(event: MessageEvent):
     global _task_current, _claiming_task, _claim_sent_at
-    owner = str(os.getenv("QQBOT_OWNER", "1543758852")).strip()
-    if str(event.user_id) != owner:
+    if not is_owner(event):
         await owreset_cmd.finish(at_prefix(event) + "仅Bot主人可重置队列")
     dropped = []
     if _task_current is not None:
