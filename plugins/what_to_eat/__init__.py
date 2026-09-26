@@ -99,7 +99,9 @@ KFC_THURSDAY = "KFC 疯狂星期四（V我50）"
 
 def pick(now: datetime.date | None = None) -> str:
     """随机选一种食物；“KFC 疯狂星期四（V我50）”仅周四作为彩蛋入池。"""
-    if (now or datetime.date.today()).weekday() == 3:
+    from zoneinfo import ZoneInfo
+    day = now or datetime.datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    if day.weekday() == 3:
         return random.choice(FOODS)
     return random.choice([f for f in FOODS if f != KFC_THURSDAY])
 

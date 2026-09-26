@@ -109,7 +109,7 @@ def test_pick_active_next_fallback():
 # ---------------- 分数格式化 ----------------
 
 def test_fmt_score_game_time():
-    assert btd6.fmt_score("GameTime", 118300) == "1:58.300"
+    assert btd6.fmt_score("GameTime", 118300) == "01:58.30"
 
 
 def test_fmt_score_least_cash_and_tiers():
@@ -425,13 +425,15 @@ def test_handler_events_overview(monkeypatch):
 
 
 def test_handler_events_failure(monkeypatch):
+    # 取数层 _safe 兜底后，上游全挂不再抛错：渲染「暂无」空总览（handlers 的报错分支仅兜底真异常）
     async def broken(url):
         raise RuntimeError("down")
 
     monkeypatch.setattr(btd6.nkapi, "fetch_body", broken)
     with pytest.raises(FinishedException):
         asyncio.run(btd6.events_cmd.handlers[0](_ev(".btd6活动")))
-    assert "获取 BTD6 活动信息失败" in str(btd6.events_cmd.finished[-1])
+    text = str(btd6.events_cmd.finished[-1])
+    assert "BTD6 当前活动" in text and "暂无" in text
 
 
 def test_handler_leaderboard_race(monkeypatch):
@@ -448,8 +450,8 @@ def test_handler_leaderboard_race(monkeypatch):
     with pytest.raises(FinishedException):
         asyncio.run(btd6.lb_cmd.handlers[0](_ev(".btd6排行 竞赛")))
     text = str(btd6.lb_cmd.finished[-1])
-    assert "🥇 ISAB — 1:58.300" in text
-    assert "🥈 <b>注入</b> — 1:59.017" in text
+    assert "🥇 ISAB — 01:58.30" in text
+    assert "🥈 <b>注入</b> — 01:59.01" in text
     assert "third" in text  # 默认前50，3条全部展示
     # 毫秒级分差在格式化后仍可分辨（118300 vs 119017）
 
@@ -843,15 +845,15 @@ def test_odyssey_upgrade_caps():
 
 def test_odyssey_card_height():
     # 缺失 meta 回退 260（与 odyssey_diff_html 的空态高度一致）
-    assert btd6._odyssey_card_height(None, 0) == 260
+    assert btd6._odyssey_card_height(None, 0) == 320
     meta = {"startingHealth": 150, "_availableTowers": [{"tower": "DartMonkey", "max": 1}],
             "_availablePowers": [{"power": "CashDrop", "max": 4}]}
     base = btd6._odyssey_card_height(meta, 1)
     # 地图越多卡片越高（每张 130px）
-    assert btd6._odyssey_card_height(meta, 3) == base + 2 * 130
-    # 极限模式徽章增加高度
+    assert btd6._odyssey_card_height(meta, 3) == base + 2 * 140
+    # 极限模式徽章：当前高度公式不再单独加成（渲染后有 trim 兜底）
     ext = dict(meta, isExtreme=True)
-    assert btd6._odyssey_card_height(ext, 1) == base + 22
+    assert btd6._odyssey_card_height(ext, 1) == base
 
 
 def test_merge_history_merges_by_id(monkeypatch, tmp_path):
@@ -878,7 +880,8 @@ def test_odyssey_html_renders_difficulties():
                      "_availablePowers": [{"power": "CashDrop", "max": 4}],
                      "_availableTowers": [{"tower": "DartMonkey", "max": 1}]},
             "maps": [{"name": "Odyssey Map 1", "img": "data:image/jpg;base64,M1",
-                      "difficulty": "Easy", "startingCash": 650}],
+                      "difficulty": "Easy", "startingCash": 650,
+                      "leastCashUsed": 4000, "leastTiersUsed": 15}],
         },
         "medium": {"meta": None, "maps": []},
         "hard": {"meta": {"startingHealth": 100, "isExtreme": True, "_rewards": []},
@@ -892,10 +895,12 @@ def test_odyssey_html_renders_difficulties():
     assert "猴币×100" not in html  # 奖励改为图标 + 数值
     assert "现金掉落" in html and "ody-power-tile" in html
     assert "Odyssey Map 1" in html and "M1" in html  # 地图缩略图
+    assert "金钱限制" in html and "≤4,000" in html  # 岛屿金钱限制（leastCashUsed）
+    assert "升级限制" in html and "≤15" in html  # 岛屿升级限制（leastTiersUsed）
     html_hard = btd6.odyssey_diff_html(col, "hard", "困难")
     assert "极限模式" in html_hard
     html_med = btd6.odyssey_diff_html(col, "medium", "中等")
-    assert "（该难度数据缺失）" in html_med
+    assert "（数据缺失）" in html_med
 
 
 def test_player_html_renders_profile():
@@ -935,6 +940,113 @@ def test_odyssey_text_fallback():
     text = btd6.odyssey_text(col)
     assert "Skulls" in text and "骷髅主题" in text and "【简单】" in text
     assert btd6.odyssey_text({"empty": "🏰 当前没有远征活动"}) == "🏰 当前没有远征活动"
+
+
+def test_ody_mode_icon_file():
+    assert btd6._ody_mode_icon_file("Deflation") == "Deflation.png"
+    assert btd6._ody_mode_icon_file("Impoppable") == "Impoppable.png"
+    assert btd6._ody_mode_icon_file("CHIMPS") == "CHIMPS.png"
+    assert btd6._ody_mode_icon_file("Clicks") == "CHIMPS.png"
+    assert btd6._ody_mode_icon_file("HalfCash") == "HalfCash.png"
+    assert btd6._ody_mode_icon_file("Half Cash") == "HalfCash.png"
+    assert btd6._ody_mode_icon_file("AlternateBloonsRounds") == "AlternateBloonsRounds.png"
+    assert btd6._ody_mode_icon_file("Standard") == ""
+    assert btd6._ody_mode_icon_file("") == ""
+
+
+def test_ody_mode_icon_html_fallback():
+    html = btd6._ody_mode_icon_html("NoSuchMode")
+    assert "RaceIcon" in html or "🏁" in html or "ody-meta-ico" in html
+
+
+def test_mode_cn_translates_odyssey_modes():
+    # 图四/图五等：Deflation / Impoppable 此前漏译
+    assert btd6.mode_cn("Deflation") == "放气"
+    assert btd6.mode_cn("Impoppable") == "不可击破"
+    assert btd6.mode_cn("DoubleMoabHealth") == "双倍生命MOAB"
+    assert btd6.mode_cn("AlternateBloonsRounds") == "替代气球回合"
+    # 带空格 / CamelCase 两种 API 写法都要命中
+    assert btd6.mode_cn("Half Cash") == "金币减半"
+    assert btd6.mode_cn("HalfCash") == "金币减半"
+    assert btd6.mode_cn("Double HP") == "双倍血量"
+    assert btd6.mode_cn("DoubleHP") == "双倍血量"
+    assert btd6.mode_cn("UnknownMode") == "UnknownMode"
+
+
+def test_odyssey_map_row_shows_chinese_mode():
+    diffs = {
+        "easy": {"meta": {"startingHealth": 150}, "maps": [
+            {"name": "Odyssey Map 4", "map": "Balance", "img": "",
+             "difficulty": "Hard", "mode": "Deflation",
+             "startingCash": 30000, "startRound": 50, "endRound": 80},
+            {"name": "Odyssey Map 5", "map": "Ascent", "img": "",
+             "difficulty": "Hard", "mode": "Impoppable",
+             "startingCash": 10000, "startRound": 25, "endRound": 100},
+        ]},
+        "medium": {"meta": None, "maps": []},
+        "hard": {"meta": None, "maps": []},
+    }
+    col = {"ev": dict(BOSS_UPCOMING, name="ModeCN", description=""), "diffs": diffs}
+    html = btd6.odyssey_diff_html(col, "easy", "简单")
+    assert "放气" in html and "Deflation" not in html
+    assert "不可击破" in html and "Impoppable" not in html
+
+
+def test_odyssey_trophy_defaults_match_bwiki():
+    # BWIKI《征程》：简单15 / 中等25 / 困难50
+    assert btd6._ODYSSEY_TROPHY_DEFAULT == {"easy": 15, "medium": 25, "hard": 50}
+    assert btd6._ODYSSEY_TROPHY == {}
+
+
+def test_odyssey_unit_ring_class_by_difficulty():
+    diffs = {
+        "easy": {"meta": {"_availableTowers": [
+            {"tower": "DanDMonke", "isHero": True, "max": 1},
+            {"tower": "Adora", "isHero": True, "max": 1},
+        ]}},
+        "medium": {"meta": {"_availableTowers": [
+            {"tower": "DanDMonke", "isHero": True, "max": 1},
+            {"tower": "Adora", "isHero": True, "max": 1},
+        ]}},
+        "hard": {"meta": {"_availableTowers": [
+            {"tower": "DanDMonke", "isHero": True, "max": 1},
+        ]}},
+    }
+    m = btd6._odyssey_unit_membership(diffs)
+    assert m["DanDMonke"] == frozenset({"easy", "medium", "hard"})
+    assert m["Adora"] == frozenset({"easy", "medium"})
+    # 与地图色环同色：全难度三环，简单+中等两环（无黑=困难不可用）
+    assert btd6._odyssey_unit_ring_class("DanDMonke", m) == "ody-diff-emh"
+    assert btd6._odyssey_unit_ring_class("Adora", m) == "ody-diff-em"
+
+
+def test_odyssey_island_limits():
+    assert btd6._odyssey_island_limits({}) == []
+    assert btd6._odyssey_island_limits({"leastCashUsed": -1, "leastTiersUsed": -1}) == []
+    assert btd6._odyssey_island_limits({"leastCashUsed": 4000}) == [
+        ("金钱限制", "≤4,000", "least_cash")]
+    assert btd6._odyssey_island_limits({"leastTiersUsed": 15}) == [
+        ("升级限制", "≤15", "least_tiers")]
+    assert btd6._odyssey_island_limits({"leastCashUsed": 7500, "leastTiersUsed": 10}) == [
+        ("金钱限制", "≤7,500", "least_cash"),
+        ("升级限制", "≤10", "least_tiers"),
+    ]
+    assert btd6._odyssey_island_limits({"leastCashUsed": "x", "leastTiersUsed": None}) == []
+
+
+def test_odyssey_text_includes_island_limits():
+    col = {"ev": dict(BOSS_UPCOMING, name="Not all Heroes", description=""),
+           "diffs": {
+               "easy": {"meta": None, "maps": [
+                   {"name": "Odyssey Map 1", "leastCashUsed": 4000, "leastTiersUsed": -1},
+                   {"name": "Odyssey Map 2", "leastCashUsed": -1, "leastTiersUsed": 15},
+               ]},
+               "medium": {"meta": None, "maps": []},
+               "hard": {"meta": None, "maps": []},
+           }}
+    text = btd6.odyssey_text(col)
+    assert "Odyssey Map 1（金钱限制≤4,000）" in text
+    assert "Odyssey Map 2（升级限制≤15）" in text
 
 
 def test_maps_html_rows_and_escape():
@@ -2074,18 +2186,23 @@ def test_push_check_force_push_current(monkeypatch, tmp_path):
     async def fake_fetch(kind, now, real_now):
         return {"id": "ody-new", "name": "Spikey Monkeys"}
 
-    async def fake_single(kind, ev, ev_id, label, groups):
+    pushed = {}
+
+    async def fake_single(kind, ev, ev_id, label, groups, *, mark_global=True):
         assert groups == {100}
-        btd6.push._set_last_pushed(kind, ev_id)
+        pushed["mark_global"] = mark_global
 
     monkeypatch.setattr(btd6.push, "_fetch_push_event", fake_fetch)
     monkeypatch.setattr(btd6.push, "_btd6_push_single", fake_single)
     monkeypatch.setattr(btd6.push, "get_bot", lambda: object())
-    # 成功补推不抛 finish（图已发出，避免刷屏），只标记状态
-    asyncio.run(btd6.push.push_check_cmd.handlers[0](_owner_ev(".btd6推送检查 远征")))
-    assert btd6.push._last_pushed().get("odyssey") == "ody-new"
+    # 补推只发本群且不写全局已推（否则其他订阅群本期永久漏推），完成后 finish 提示
+    with pytest.raises(FinishedException):
+        asyncio.run(btd6.push.push_check_cmd.handlers[0](_owner_ev(".btd6推送检查 远征")))
+    assert pushed["mark_global"] is False
+    assert btd6.push._last_pushed().get("odyssey") != "ody-new"
 
-    # 已推送过：明确告知不再重推
+    # 全局已标记过：明确告知不再重推
+    btd6.push._set_last_pushed("odyssey", "ody-new")
     with pytest.raises(FinishedException):
         asyncio.run(btd6.push.push_check_cmd.handlers[0](_owner_ev(".btd6推送检查 远征")))
     assert "无需重推" in str(btd6.push.push_check_cmd.finished[-1])

@@ -256,7 +256,7 @@ def tower_limit_lines(towers: list) -> list[str]:
 
 def _rules_lines(meta: dict, prefix: str) -> list[str]:
     diff = i18n.cn(meta.get("difficulty"), i18n.DIFFICULTY_CN)
-    mode = i18n.cn(meta.get("mode"), i18n.MODE_CN)
+    mode = i18n.mode_cn(meta.get("mode"))
     # 地图名经 MAP_CN 译为中文，查不到回退原始内部名（如 ThreeMinesAround）
     map_name = i18n.map_cn(str(meta.get("map") or "").strip()) or "?"
     cash = int(meta.get("startingCash") or 0)
@@ -380,7 +380,20 @@ def odyssey_text(col: dict, only: list[str] | None = None) -> str:
             lines.append(f"  {_reward_txt(rewards)}")
         maps = diff.get("maps") or []
         if maps:
-            lines.append(f"  🗺 地图：{'、'.join(m['name'] for m in maps)}")
+            map_bits = []
+            for m in maps:
+                bit = str(m.get("name") or "?")
+                extras = []
+                lc = m.get("leastCashUsed")
+                lt = m.get("leastTiersUsed")
+                if isinstance(lc, (int, float)) and int(lc) >= 0:
+                    extras.append(f"金钱限制≤{int(lc):,}")
+                if isinstance(lt, (int, float)) and int(lt) >= 0:
+                    extras.append(f"升级限制≤{int(lt)}")
+                if extras:
+                    bit += f"（{'、'.join(extras)}）"
+                map_bits.append(bit)
+            lines.append(f"  🗺 地图：{'、'.join(map_bits)}")
         lines.append("")
     note = col.get("stale_note") or ""
     if note:

@@ -213,6 +213,35 @@ def _game_asset_data_url(fname: str) -> str:
 
 # 截图风格的界面图标：由参考卡片裁切并随插件本地部署，避免渲染时依赖外链。
 UI_ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets", "ui")
+
+# 地图模式专属图标（BWIKI Mode*Btn 下载，assets/ui/modes/）
+MODE_ASSET_DIR = os.path.join(UI_ASSET_DIR, "modes")
+_mode_mem: OrderedDict[str, str] = OrderedDict()
+
+
+def _mode_asset_data_url(fname: str) -> str:
+    """读取地图模式专属图标（modes/*.png）；缺失返回空串由调用方降级。"""
+    if not fname or not re.fullmatch(r"[A-Za-z0-9_-]+\.png", fname):
+        return ""
+    with _local_mem_lock:
+        hit = _mode_mem.get(fname)
+        if hit:
+            _mode_mem.move_to_end(fname)
+            return hit
+    path = os.path.join(MODE_ASSET_DIR, fname)
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return ""
+    url = "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+    with _local_mem_lock:
+        _mode_mem[fname] = url
+        _mode_mem.move_to_end(fname)
+        nkapi._prune_ordered(_mode_mem, 32)
+    return url
+
+
 _ui_mem: OrderedDict[str, str] = OrderedDict()
 
 

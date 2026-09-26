@@ -63,8 +63,12 @@ def _validate_constants(data: dict) -> None:
 def load_constants() -> dict:
     global _CONSTANTS
     if _CONSTANTS is None:
-        with open(_DATA_PATH, encoding="utf-8") as f:
-            _CONSTANTS = json.load(f)
+        try:
+            with open(_DATA_PATH, encoding="utf-8") as f:
+                _CONSTANTS = json.load(f)
+        except (OSError, ValueError) as e:
+            _logger.warning("rushdata.json 加载失败（%s），Boss Rush 生成降级为空", e)
+            _CONSTANTS = {}
         _validate_constants(_CONSTANTS)
     return _CONSTANTS
 

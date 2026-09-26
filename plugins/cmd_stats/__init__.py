@@ -349,12 +349,16 @@ async def _run_and_push_daily() -> None:
     except Exception:
         _logger.exception("每日指令统计生成失败")
         return
-    await _mark_reported_async(datetime.now(_SH).date())
+    pushed_any = False
     for group_id in groups:
         try:
             await bot.send_group_msg(group_id=group_id, message=MessageSegment.image("file://" + path))
+            pushed_any = True
         except Exception:
             _logger.exception("指令统计推送到群 %s 失败", group_id)
+    # 至少成功推送一个群才标记已出报，避免全失败时当日静默丢失
+    if pushed_any:
+        await _mark_reported_async(datetime.now(_SH).date())
 
 
 @scheduler.scheduled_job("cron", hour=0, minute=5, id="daily_cmd_stats", timezone="Asia/Shanghai")

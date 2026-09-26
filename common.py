@@ -141,7 +141,12 @@ async def save_image_async(data: bytes, content_type: str, prefix: str, cache_di
 
 
 def parse_tag(arg: str) -> str:
-    tag = arg.replace(" ", "").replace("-", "#")
+    """解析战网/游戏标签：名字#数字。拒绝空白与控制符，防止注入下游指令通道。"""
+    tag = arg.replace("-", "#").strip()
+    # 拒绝空白与控制字符，避免 foo#123\t/cmd 这类注入
+    if any(ch.isspace() or ord(ch) < 32 for ch in tag):
+        return ""
+    tag = tag.replace(" ", "")
     return tag if "#" in tag else ""
 
 

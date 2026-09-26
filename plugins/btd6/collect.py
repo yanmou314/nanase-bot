@@ -27,10 +27,19 @@ async def _safe(coro, tag: str = ""):
 async def collect_overview(now_ms: int | None = None) -> dict:
     now = now_ms if now_ms is not None else util.bucket_now()
     races, bosses, cts, odysseys, events_body = await asyncio.gather(
-        nkapi.fetch_body(nkapi.URL_RACES), nkapi.fetch_body(nkapi.URL_BOSSES), nkapi.fetch_body(nkapi.URL_CT),
+        _safe(nkapi.fetch_body(nkapi.URL_RACES), "races"),
+        _safe(nkapi.fetch_body(nkapi.URL_BOSSES), "bosses"),
+        _safe(nkapi.fetch_body(nkapi.URL_CT), "cts"),
         _safe(nkapi.fetch_body(nkapi.URL_ODYSSEY)),
         _safe(nkapi.fetch_body(nkapi.URL_EVENTS)),
     )
+    # races/bosses/cts/odysseys 可能为 None（网络失败）或非列表
+    if not isinstance(races, list):
+        races = []
+    if not isinstance(bosses, list):
+        bosses = []
+    if not isinstance(cts, list):
+        cts = []
     # odysseys 可能为 None（网络失败）或非列表
     if not isinstance(odysseys, list):
         odysseys = []
@@ -308,8 +317,8 @@ def _daily_pick(items: list, want: str, now_ms: int) -> dict | None:
         iid = str(x.get("id") or "")
         if iid.endswith(target):
             return x
-        if int(x.get("createdAt") or 0) <= now_ms:
-            if fallback is None or int(x.get("createdAt") or 0) > int(fallback.get("createdAt") or 0):
+        if _int0(x.get("createdAt")) <= now_ms:
+            if fallback is None or _int0(x.get("createdAt")) > _int0(fallback.get("createdAt")):
                 fallback = x
     return fallback
 
@@ -338,7 +347,8 @@ async def collect_daily(advanced: bool) -> dict:
     ev = _daily_pick(items, want, int(time.time() * 1000))
     if not ev:
         return {"empty": "暂无每日挑战数据"}
-    meta = await nkapi.fetch_body(ev["metadata"])
+    meta_url = ev.get("metadata")
+    meta = await nkapi.fetch_body(meta_url) if meta_url else None
     return {
         "prefix": _daily_prefix(str(ev.get("name") or ""), advanced),
         "meta": meta, "map_img": await _challenge_map_img(meta, "daily_map"),
@@ -355,7 +365,7 @@ def _coop_pick(items: list, now_ms: int) -> dict | None:
                and int(x.get("createdAt") or 0) <= now_ms]
     if not created:
         return None
-    return max(created, key=lambda x: int(x.get("createdAt") or 0))
+    return max(created, key=lambda x: _int0(x.get("createdAt")))
 
 
 async def collect_daily_coop() -> dict:
@@ -371,7 +381,8 @@ async def collect_daily_coop() -> dict:
     ev = _coop_pick(items, int(time.time() * 1000))
     if not ev:
         return {"empty": "暂无 Co-op 挑战数据"}
-    meta = await nkapi.fetch_body(ev["metadata"])
+    meta_url = ev.get("metadata")
+    meta = await nkapi.fetch_body(meta_url) if meta_url else None
     return {
         "prefix": "Co-op 挑战", "meta": meta,
         "map_img": await _challenge_map_img(meta, "coop_map"),
@@ -380,13 +391,12 @@ async def collect_daily_coop() -> dict:
     }
 
 
-# 完成远征的奖杯数：开放 API 的 _rewards 不含 Trophy，按游戏内标准 5/10/15 注入。
+# 完成远征的奖杯数：开放 API 的 _rewards 不含 Trophy，按 BWIKI《征程》注入。
+# 简单 15 / 中等 25 / 困难 50（困难一次拿满活动上限 50；先通简单再通困难会扣掉此前所得）。
+# https://wiki.biligame.com/btd6/征程
 # 特殊期可用 event_id -> {"easy":n,"medium":n,"hard":n} 或标量覆盖全部难度。
-_ODYSSEY_TROPHY_DEFAULT = {"easy": 5, "medium": 10, "hard": 15}
-_ODYSSEY_TROPHY: dict = {
-    "mt7bsc6c": {"easy": 5, "medium": 10, "hard": 15},
-    "mtra21ht": {"easy": 5, "medium": 10, "hard": 15},
-}
+_ODYSSEY_TROPHY_DEFAULT = {"easy": 15, "medium": 25, "hard": 50}
+_ODYSSEY_TROPHY: dict = {}
 
 
 def _odyssey_trophy_count(event_id: str, diff_key: str) -> int | None:
@@ -449,6 +459,9 @@ async def collect_odyssey() -> dict:
                 "maxLives": int(mp.get("maxLives") or 0),
                 "maxTowers": int(mp.get("maxTowers") or 0),
                 "maxParagons": int(mp.get("maxParagons") or 0),
+                # 岛屿特殊限制：金钱（leastCashUsed）/ 升级（leastTiersUsed）；-1 或缺失表示无限制
+                "leastCashUsed": int(mp["leastCashUsed"]) if isinstance(mp.get("leastCashUsed"), (int, float)) else -1,
+                "leastTiersUsed": int(mp["leastTiersUsed"]) if isinstance(mp.get("leastTiersUsed"), (int, float)) else -1,
                 "roundSets": mp.get("roundSets") or [],
                 "_bloonModifiers": mp.get("_bloonModifiers") or {},
                 "disableMK": bool(mp.get("disableMK")),
@@ -466,7 +479,7 @@ async def collect_odyssey() -> dict:
     return {"ev": ev, "diffs": dict(collected), "stale_note": nkapi._stale_warn(nkapi.URL_ODYSSEY)}
 
 
-_PLAYER_ID_RE = re.compile(r"[0-9a-f]{40,}")
+_PLAYER_ID_RE = re.compile(r"[0-9a-fA-F]{40,}")
 _OAK_RE = re.compile(r"oak_[0-9a-fA-F]{8,}")
 
 

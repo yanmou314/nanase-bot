@@ -426,7 +426,7 @@ def _boss_dual_meta_chips(variant_col: dict) -> str:
     meta = variant_col["meta"]
     diff_raw = str(meta.get("difficulty") or "")
     diff = i18n.cn(diff_raw, i18n.DIFFICULTY_CN)
-    mode = i18n.cn(meta.get("mode"), i18n.MODE_CN)
+    mode = i18n.mode_cn(meta.get("mode"))
     scoring = variant_col.get("scoring_cn") or ""
     start_r = int(meta.get("startRound") or 0)
     end_r = int(meta.get("endRound") or 0)
@@ -657,7 +657,7 @@ def rules_html(col: dict) -> str:
     meta = col["meta"]
     name = (meta.get("name") or "").strip()
     diff = i18n.cn(meta.get("difficulty"), i18n.DIFFICULTY_CN)
-    mode = i18n.cn(meta.get("mode"), i18n.MODE_CN)
+    mode = i18n.mode_cn(meta.get("mode"))
     scoring = col.get("scoring_cn") or ""
     prefix = col.get("prefix") or ""
     kind_label = str(col.get("kind_label") or "")

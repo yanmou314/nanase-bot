@@ -105,7 +105,11 @@ def _get_http_client() -> httpx.AsyncClient:
 
 
 def _load_key() -> str:
+    """优先读环境变量 DEEPSEEK_API_KEY；否则回退 plugins/auto_chat/config.json（兼容旧部署）。"""
     global _cached_key, _cached_key_mtime, _key_load_warned
+    env_key = (os.getenv("DEEPSEEK_API_KEY") or "").strip()
+    if env_key:
+        return env_key
     try:
         mtime = os.path.getmtime(CFG_FILE)
         if mtime == _cached_key_mtime:
@@ -120,7 +124,9 @@ def _load_key() -> str:
         _cached_key_mtime = -1.0
         if not _key_load_warned:
             _key_load_warned = True
-            logger.warning(f"auto_chat 读取 api_key 配置失败（{CFG_FILE}），本次按未配置处理")
+            logger.warning(
+                "auto_chat 未配置 api_key（请设置环境变量 DEEPSEEK_API_KEY，或保留 config.json），本次按未配置处理"
+            )
         return ""
 
 
@@ -248,6 +254,8 @@ def _sender_name(event: MessageEvent) -> str:
     card = (getattr(sender, "card", "") or "").strip() if sender else ""
     nick = (getattr(sender, "nickname", "") or "").strip() if sender else ""
     name = (card or nick) or str(event.user_id)
+    # 剥离结构字符，防止昵称伪造「」:：换行等注入多说话人协议
+    return "".join(ch for ch in name[:20] if ch not in "」」:：\n\r\t")
     # 名字只占一行：名片里的换行/连续空白压成单个空格，避免破坏「名字: 内容」结构
     return re.sub(r"\s+", " ", name)[:20]
 

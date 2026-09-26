@@ -124,7 +124,8 @@ def _fingerprint(event: GroupMessageEvent):
             key = json.dumps({k: segs[0].data.get(k) for k in ("emoji_id", "emoji_package_id", "key", "summary")}, sort_keys=True, ensure_ascii=False)
             return ("f", _text_hash(key), segs[0])
         file_id = segs[0].data.get("file") or segs[0].data.get("url") or ""
-        if file_id:
+        # 只接受内部 file_id 或 http(s) CDN，拒绝 file:// 等任意引用（防 SSRF/本地读）
+        if file_id and not file_id.startswith(("file://", "ftp://", "gopher://")):
             return ("i", file_id, file_id)
     if len(segs) == 1 and segs[0].type in _REPEATABLE_SINGLE_TYPES:
         # QQ 小黄脸（face）/表情商城大表情（mface）/VIP 表情（bface）：

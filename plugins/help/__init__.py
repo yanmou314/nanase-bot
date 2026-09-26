@@ -245,7 +245,8 @@ async def handle(bot: Bot, event: MessageEvent):
     # 测试群：完整菜单直接在群内展示；其他群：始终公开菜单在群内展示（不再私发）；
     # 私聊：按权限展示
     if is_test:
-        text = TEXT + OWNER_TEXT
+        # 测试群也只发公开菜单；管理菜单仅 Owner 私聊可见
+        text = TEXT
         variant = "owner"
     elif group_id is not None:
         text = TEXT

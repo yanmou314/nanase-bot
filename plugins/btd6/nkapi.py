@@ -488,4 +488,8 @@ def lb_page_size(kind: str) -> int:
 def lb_page_url(base: str, page: int) -> str:
     if page <= 1:
         return base
-    return f"{base}?page={page}"
+    from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+    p = urlparse(base)
+    q = dict(parse_qsl(p.query, keep_blank_values=True))
+    q["page"] = str(page)
+    return urlunparse(p._replace(query=urlencode(q)))

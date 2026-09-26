@@ -270,13 +270,22 @@ def _parse_hitokoto(data: dict) -> str:
     return str(data.get("hitokoto") or "").strip()
 
 
+def _mask_key(key: str) -> str:
+    """配置查询回显用掩码，不保留可识别前缀。"""
+    return "***" if key else ""
+
+
 _ai_cfg_cache: dict = {"mtime": -1.0, "key": "", "model": "glm-4-flash"}
 _ai_cfg_warned = False
 
 
 def _load_ai_cfg() -> tuple[str, str]:
-    """读取晨报 AI 配置（api_key/model），带 mtime 缓存；未配置返回空 key。"""
+    """读取晨报 AI 配置（api_key/model）。优先环境变量 GLM_API_KEY/GLM_MODEL，否则读 ai_config.json。"""
     global _ai_cfg_warned
+    env_key = (os.getenv("GLM_API_KEY") or "").strip()
+    if env_key:
+        model = (os.getenv("GLM_MODEL") or "glm-4-flash").strip() or "glm-4-flash"
+        return env_key, model
     mtime: float | None = None
     try:
         mtime = os.path.getmtime(AI_CFG_FILE)
@@ -574,7 +583,7 @@ async def news_key(event: MessageEvent):
     key = parts[1].strip() if len(parts) == 2 else ""
     if not key:
         saved_key, model = _load_ai_cfg()
-        state = f"已配置 {model}（{saved_key[:6]}…）" if saved_key else "未配置（当前用本地问候兜底）"
+        state = f"已配置 {model}（{_mask_key(saved_key)}）" if saved_key else "未配置（当前用本地问候兜底）"
         await news_key_cmd.finish(
             f"🤖 晨报 AI：{state}\n"
             "用法：.新闻key <智谱APIkey>\n"
