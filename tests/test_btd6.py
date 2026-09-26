@@ -2616,10 +2616,14 @@ def test_daily_dual_html_smoke():
          "meta": dict(meta, name="Advanced 2941: Y"),
          "ev": {"id": "adv2941_0912", "name": "Advanced 2941: Y"},
          "map_img": "", "scoring_cn": ""},
+        {"variant": "coop", "label": "Co-op", "issue": "Co-op 挑战",
+         "meta": dict(meta, name="coop - Z"), "ev": {"id": "coop123_x", "name": "coop - Z"},
+         "map_img": "", "scoring_cn": ""},
     ], "meta": meta, "map_img": "", "side_img": "", "stale_note": "stale!"}
     html = btd6.daily_dual_html(col)
     assert "每日挑战情报" in html
     assert "标准·第2954期" in html and "高级·第2941期" in html
+    assert "Co-op 挑战" in html  # coop 全宽面板
     assert "最大生命" in html  # daily 专属 chip
     assert "Tree Stump" in html  # 面板自带地图名
     assert "stale!" in html
