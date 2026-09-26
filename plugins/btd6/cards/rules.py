@@ -706,7 +706,8 @@ def _daily_rule_chips(meta: dict) -> str:
              chip("paragon.png", "◉", "限制模范", str(paragon))]
     for label, value, icon in common._race_modifier_items(meta.get("_bloonModifiers")):
         chips.append(chip(icon, "⚡", label, value))
-    return "".join(chips)
+    # 块级容器：让 chips 独占一行，与上方「规则调节」标签分行
+    return "<div class='bdual-rule-chips'>" + "".join(chips) + "</div>"
 
 
 def _daily_variant_cells(v: dict, head_cls: str = "standard") -> dict:
