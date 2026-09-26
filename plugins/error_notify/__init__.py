@@ -207,7 +207,8 @@ scheduler.add_listener(_on_job_missed, EVENT_JOB_MISSED)
 # 限频私聊通知主人。框架自身日志（nonebot/uvicorn/websockets 等）不计：适配器抖动
 # 属常态噪音；「btd6 optional call failed」为设计内的可选素材失败（结果卡片自带
 # stale 提示兜底），同样不计。
-_LOG_ALERT_IGNORED = ("nonebot", "apscheduler", "websockets", "uvicorn", "fastapi", "asyncio")
+_LOG_ALERT_IGNORED = ("nonebot", "apscheduler", "websockets", "uvicorn", "fastapi", "asyncio",
+                      "WEASYPRINT", "weasyprint")  # WEASYPRINT 全大写：weasyprint 的 CSS 告警渠道
 _LOG_ALERT_MSG_IGNORED = ("btd6 optional call failed",)
 
 

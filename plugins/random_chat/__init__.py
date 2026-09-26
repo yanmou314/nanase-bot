@@ -162,7 +162,7 @@ async def watch(bot: Bot, event: GroupMessageEvent):
 
     sender = event.sender.card or event.sender.nickname or str(event.user_id)
     # 剥离结构字符，防止昵称伪造「」:：换行等注入多说话人协议
-    sender = "".join(ch for ch in sender[:20] if ch not in "」」:：\n\r\t")
+    sender = "".join(ch for ch in sender[:20] if ch not in "「」:：\n\r\t")
     _record(gid, sender[:20], text[:100])
 
     buf = _buffers.get(gid)
