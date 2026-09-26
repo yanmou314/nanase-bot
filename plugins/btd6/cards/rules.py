@@ -171,11 +171,13 @@ def _monkey_grid(towers: list) -> str:
     return "<div class='mkgrid'>" + "".join(cells) + "</div>"
 
 
-def _daily_monkey_grid(meta: dict) -> str:
-    """每日挑战：全塔总览——官方 _towers 里有记录的塔带限制角标，
-    未记录的塔表示无限制（正常可放、可满级），max=0 的塔直接不显示。
-    修复：原先仅遍历 towersInOrder（26 猴子），漏掉 heroesInOrder 导致英雄永不显示；
-    -1 视为无限制（与游戏内 9999 同义），不应按限购处理。"""
+def _daily_monkey_cells(meta: dict) -> list[str]:
+    """每日挑战猴子格子（全塔总览口径），供 rules_html 的 div 网格与每日 bdual 表格共用。
+
+    官方 _towers 里有记录的塔带限制角标，未记录的塔表示无限制（正常可放、可满级），
+    max=0 的塔不显示；-1 视为无限制（与游戏内 9999 同义）；英雄全部可用时合并为一张
+    “全部英雄”块放首位。
+    """
     restrictions = {}
     for t in meta.get("_towers") or []:
         raw = str(t.get("tower") or "").strip()
@@ -185,7 +187,6 @@ def _daily_monkey_grid(meta: dict) -> str:
     # 英雄放首位 + 去重：初级/高级的英雄默认 1 不打 ×1 角标，且应排在最前
     order = list(constants.get("heroesInOrder") or []) + list(constants.get("towersInOrder") or [])
     all_heroes_ok = _heroes_all_available(meta.get("_towers"))
-    cells = []
     hero_cells = []
     monkey_cells = []
     for name in order:
@@ -195,7 +196,7 @@ def _daily_monkey_grid(meta: dict) -> str:
         entry.setdefault("tower", name)
         if "isHero" not in entry:
             entry["isHero"] = name in (constants.get("heroesInOrder") or [])
-        # 英雄默认 1 不视为限购：不打 ×1
+        # 英雄默认 1 不视为限购：不打角标
         is_hero = bool(entry.get("isHero"))
         try:
             mx_val = entry.get("max")
@@ -219,10 +220,16 @@ def _daily_monkey_grid(meta: dict) -> str:
             monkey_cells.append(cell)
     if all_heroes_ok:
         hero_cells = [_all_heroes_tile()]
-    cells = hero_cells + monkey_cells
+    return hero_cells + monkey_cells
+
+
+def _daily_monkey_grid(meta: dict) -> str:
+    cells = _daily_monkey_cells(meta)
     if not cells:
         return "<div class='mkgrid race-mkgrid'><div class='race-mk-fallback'>无</div></div>"
     return "<div class='mkgrid race-mkgrid' style='height:auto;overflow:visible;'>" + "".join(cells) + "</div>"
+
+
 
 def _race_visible_towers(towers: list) -> list[dict]:
     """截图中的默认视图：显示所有可用/限购塔，隐藏 max=0 与占位英雄。"""
@@ -422,7 +429,7 @@ def _difficulty_ui_icon(diff_raw: str) -> str:
     return mapping.get(key, "")
 
 
-def _boss_dual_meta_chips(variant_col: dict) -> str:
+def _boss_dual_meta_chips(variant_col: dict, daily: bool = False) -> str:
     meta = variant_col["meta"]
     diff_raw = str(meta.get("difficulty") or "")
     diff = i18n.cn(diff_raw, i18n.DIFFICULTY_CN)
@@ -453,9 +460,22 @@ def _boss_dual_meta_chips(variant_col: dict) -> str:
         "<div class='bdual-chip-row'>"
         + chip("cash.png", "🪙", "资金", f"{cash:,}")
         + chip("heart.png", "❤", "生命", f"{lives:,}")
+        + (chip("heart.png", "❤", "最大生命", f"{int(meta.get('maxLives') or 0):,}") if daily else "")
         + "</div>"
     )
     return row1 + row2
+
+
+def _bdual_grid_table(cells: list[str], cols: int = 5) -> str:
+    """猴子格子 → bdual 固定列表格：强制从左到右、从上到下，不足一行补空单元对齐。"""
+    rows_html = []
+    for start in range(0, len(cells), cols):
+        chunk = cells[start:start + cols]
+        while len(chunk) < cols:
+            chunk.append("<td class='bdual-mk-empty'></td>")
+        # _race_monkey_cell 返回的是 wrap div；塞进 td 时保留结构
+        rows_html.append("<tr>" + "".join(f"<td class='bdual-mk-cell'>{cell}</td>" for cell in chunk) + "</tr>")
+    return "<table class='bdual-mk-grid'>" + "".join(rows_html) + "</table>"
 
 
 def _boss_dual_monkey_grid(meta: dict, cols: int = 5) -> str:
@@ -472,18 +492,8 @@ def _boss_dual_monkey_grid(meta: dict, cols: int = 5) -> str:
     cells.extend(_race_monkey_cell(tower) for tower in _race_visible_towers(towers))
     if not cells:
         return "<div class='bdual-mk-grid'><div class='race-mk-fallback'>无</div></div>"
-    rows_html = []
-    for start in range(0, len(cells), cols):
-        chunk = cells[start:start + cols]
-        # 不足一行补空单元，保证表格边框对齐
-        while len(chunk) < cols:
-            chunk.append("<td class='bdual-mk-empty'></td>")
-        tds = []
-        for cell in chunk:
-            # _race_monkey_cell 返回的是 wrap div；塞进 td 时保留结构
-            tds.append(f"<td class='bdual-mk-cell'>{cell}</td>")
-        rows_html.append("<tr>" + "".join(tds) + "</tr>")
-    return "<table class='bdual-mk-grid'>" + "".join(rows_html) + "</table>"
+    return _bdual_grid_table(cells, cols)
+
 
 
 def _boss_dual_tile_count(meta: dict, cols: int = 5) -> int:
@@ -646,6 +656,128 @@ def boss_dual_html(col: dict) -> str:
     extras_h = 22  # 可能的自定义回合/禁用行
     col_h = max((_boss_dual_panel_h(v) + extras_h for v in variants), default=420)
     frame_h = 10 + 62 + 8 + 268 + 8 + 104 + 8 + col_h + 8
+    return common._boss_dual_shell(body, frame_h)
+
+
+def _daily_dual_panel(v: dict) -> tuple[str, int]:
+    """每日 bdual 单面板：返回 (html, 网格行数)。
+
+    与 Boss 面板共用元信息 chips/规则调节 chips 版式，猴子区改用每日全塔限制网格；
+    面板自带地图名（标准/高级可能不同图），气球强化以 chips 形式并入规则调节。
+    """
+    meta = v["meta"]
+    grid_cells = _daily_monkey_cells(meta)
+    rows = max(1, -(-max(len(grid_cells), 1) // 5))
+    grid_html = _bdual_grid_table(grid_cells)
+
+    extras = []
+    map_raw = str(meta.get("map") or "").strip()
+    map_cn = i18n.map_cn(map_raw)
+    map_txt = f"{map_cn} ({map_raw})" if map_raw and map_cn != map_raw else (map_cn or map_raw or "")
+    if map_txt:
+        extras.append(f"🗺 {map_txt}")
+    if _custom_round_sets(meta):
+        extras.append("自定义回合")
+    bans = [label_b for key, label_b in i18n.FLAG_LABELS if meta.get(key)]
+    if bans:
+        extras.append("禁用：" + "、".join(bans))
+    extras_html = (
+        f"<div class='bdual-extras'>{util._esc('；'.join(extras))}</div>" if extras else ""
+    )
+
+    mod_lines = textfmt.bloon_mod_lines(meta.get("_bloonModifiers"))
+    modifier_chips = ""
+    if mod_lines:
+        mod_chips = "".join(
+            f"<div class='bdual-rule-chip'>{util._esc(line)}</div>" for line in mod_lines)
+        modifier_chips = f"<div class='bdual-rule-chips'>{mod_chips}</div>"
+
+    panel = (
+        "<div class='bdual-panel'>"
+        f"<div class='bdual-panel-head standard'>{util._esc(v['issue'])}</div>"
+        "<div class='bdual-panel-body'>"
+        f"{_boss_dual_meta_chips(v, daily=True)}"
+        "<div class='bdual-sec-label'>规则调节</div>"
+        f"{_boss_dual_rule_chips(meta)}"
+        f"{modifier_chips}"
+        f"{extras_html}"
+        "<div class='bdual-sec-label'>可用猴子</div>"
+        f"{grid_html}"
+        "</div></div>")
+    chips = _boss_dual_rule_chip_count(meta) + len(mod_lines)
+    chip_rows = max(1, -(-chips // 3))
+    panel_h = 42 + 78 + 36 + 34 + chip_rows * 36 + 8 + rows * 120 + 8
+    return panel, panel_h
+
+
+def daily_dual_html(col: dict) -> str:
+    """每日挑战 标准+高级并排合卡：复用 Boss bdual 版式组件。
+
+    与 boss_dual_html 的差异：无 banner 图（NK 列表不提供每日横幅，且标准/高级
+    是两期不同挑战）、地图缩略图取标准期、参与人数不可得故不显示；面板自带
+    期号（标准·第N期 / 高级·第N期）与地图名，猴子区用每日全塔限制网格。
+    """
+    if col.get("empty"):
+        body = f"<div class='bdual-empty'>{util._esc(col['empty'])}</div>"
+        return common._boss_dual_shell(body, 320)
+
+    variants = col.get("variants") or []
+    primary = variants[0] if variants else {}
+    meta = primary.get("meta") or {}
+
+    panels = []
+    panel_hs = []
+    ids = []
+    for v in variants:
+        ev = v.get("ev") or {}
+        sid = str(ev.get("id") or "")
+        if "_" in sid:
+            sid = sid.split("_", 1)[1]
+        if sid:
+            ids.append(sid)
+        panel, panel_h = _daily_dual_panel(v)
+        cls = "adv" if v.get("variant") == "advanced" else "std"
+        panels.append(f"<div class='bdual-col {cls}'>{panel}</div>")
+        panel_hs.append(panel_h)
+    if not panels:
+        body = "<div class='bdual-empty'>暂无每日挑战数据</div>"
+        return common._boss_dual_shell(body, 320)
+
+    # NK 每日条目只有 createdAt（无 start/end），不渲染时间范围——缺省时
+    # _fmt_range_full 会把 0 当 epoch 输出 1970 年
+    ids_txt = f"ID: {' / '.join(ids)}" if ids else ""
+    subtitle = ids_txt
+    titlebar = (
+        "<div class='bdual-titlebar'>"
+        "<div class='bdual-title'>每日挑战情报</div>"
+        f"<div class='bdual-subtitle'>{util._esc(subtitle)}</div>"
+        "</div>")
+
+    map_cn_name = i18n.map_cn(str(meta.get("map") or "").strip())
+    map_en = str(meta.get("map") or "").strip()
+    map_title = f"{map_cn_name} ({map_en})" if map_en and map_cn_name != map_en else (map_cn_name or map_en or "?")
+    map_img = col.get("map_img") or ""
+    map_thumb = (
+        f"<img src='{util._esc(map_img)}' alt='{util._esc(map_title)}'/>"
+        if map_img
+        else "<div class='bdual-map-thumb-fallback'>🗺</div>"
+    )
+    mapbar = (
+        "<div class='bdual-mapbar'>"
+        f"<div class='bdual-map-thumb'>{map_thumb}</div>"
+        "<div class='bdual-map-copy'>"
+        f"<div class='bdual-map-name'>{util._esc('标准期地图：' + map_title)}</div>"
+        "<div class='bdual-map-time'>固定种子 · 当日有效 · 高级期地图见右侧面板</div>"
+        "</div></div>")
+
+    body = titlebar + mapbar + "<div class='bdual-cols'>" + "".join(panels) + "</div>"
+    stale_note = col.get("stale_note") or ""
+    if stale_note:
+        body += f"<div class='bdual-note'>{util._esc(stale_note)}</div>"
+
+    extras_h = 22  # 可能的地图名/自定义回合/禁用行
+    col_h = max((h + extras_h for h in panel_hs), default=420)
+    frame_h = 10 + 62 + 8 + 104 + 8 + col_h + 8  # 无 banner，比 Boss 卡少一段
     return common._boss_dual_shell(body, frame_h)
 
 

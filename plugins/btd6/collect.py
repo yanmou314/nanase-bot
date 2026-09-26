@@ -373,6 +373,48 @@ def _coop_pick(items: list, now_ms: int) -> dict | None:
     return max(created, key=lambda x: _int0(x.get("createdAt")))
 
 
+async def collect_daily_dual(now_ms: int | None = None) -> dict:
+    """每日挑战 标准+高级合卡数据（bdual 模板）；选期口径与 collect_daily 一致。
+
+    variants[].issue 为面板标签（标准·第N期 / 高级·第N期）；announce 供推送文案使用。
+    """
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
+    items = await nkapi.fetch_body(nkapi.URL_DAILY)
+    if not isinstance(items, list):  # 非 list 响应按空数据处理，走既有失败文案
+        items = []
+    variants = []
+    for ev, variant, adv in (
+        (_daily_pick(items, "Standard", now), "standard", False),
+        (_daily_pick(items, "Advanced", now), "advanced", True),
+    ):
+        if not ev:
+            continue
+        meta_url = ev.get("metadata")
+        meta = await nkapi.fetch_body(meta_url) if meta_url else None
+        meta = meta if isinstance(meta, dict) else {}
+        issue = _daily_prefix(str(ev.get("name") or ""), adv).replace("每日", "", 1)
+        variants.append({
+            "variant": variant,
+            "label": "高级" if adv else "标准",
+            "issue": issue,
+            "meta": meta,
+            "ev": ev,
+            "map_img": await _challenge_map_img(meta, f"daily_map_{variant}"),
+        })
+    if not variants:
+        return {"empty": "暂无每日挑战数据"}
+    return {
+        "variants": variants,
+        "ev": variants[0]["ev"],
+        "meta": variants[0]["meta"],
+        "map_img": variants[0]["map_img"],
+        "side_img": "",
+        "prefix": "每日挑战",
+        "announce": " / ".join(v["issue"] for v in variants),
+        "stale_note": nkapi._stale_warn(nkapi.URL_DAILY, str(variants[0]["ev"].get("metadata") or "")),
+    }
+
+
 async def collect_daily_coop() -> dict:
     """Co-op 挑战：与每日挑战共用 /btd6/challenges/filter/daily 接口（name 以 "coop - " 开头）。
 

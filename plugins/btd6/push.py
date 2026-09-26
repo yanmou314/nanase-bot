@@ -600,16 +600,13 @@ async def _render_kind_payload(kind: str, ev: dict, label: str,
                 return None
             return {"overview": path, "announce": text, "label": label, "details": details}
         if kind == "daily":
-            details = []
-            for adv in (False, True):
-                col = await collect._safe(collect.collect_daily(adv), "daily_push")
-                if not col or col.get("empty"):
-                    continue
-                p = await cards._render_card(
-                    "btd6dailya" if adv else "btd6daily", lambda c=col: cards.rules_html(c))
-                t = f"📅 每日挑战已刷新·{col.get('prefix') or collect._daily_prefix(label, adv)}"
-                details.append((t, p))
-            return {"overview": None, "announce": "", "label": label, "details": details} if details else None
+            # 标准+高级合并为一张 bdual 风格卡（参考 Boss 双面板版式）
+            col = await collect._safe(collect.collect_daily_dual(), "daily_push")
+            if not col or col.get("empty"):
+                return None
+            p = await cards._render_card("btd6daily", lambda c=col: cards.daily_dual_html(c))
+            t = f"📅 每日挑战已刷新·{col.get('announce') or '标准+高级'}"
+            return {"overview": None, "announce": "", "label": label, "details": [(t, p)]}
         if kind == "coop":
             col = await collect._safe(collect.collect_daily_coop(), "coop_push")
             if not col or col.get("empty"):
