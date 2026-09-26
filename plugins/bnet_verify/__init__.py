@@ -126,6 +126,9 @@ _STARTED_AT = time.time()  # 进程启动时刻：区分重启前遗留的在途
 _restore_verify_state()
 
 
+_interrupted_reported = False  # 本进程已提醒过一次：bot 重连（多账号/断线重连）不重复私聊
+
+
 @get_driver().on_bot_connect
 async def _report_interrupted_verifies(bot: Bot) -> None:
     """重启导致中断的在途验证：连接建立后通知主人去客户端查看（记录仍保留，可 .同意）。
@@ -133,7 +136,8 @@ async def _report_interrupted_verifies(bot: Bot) -> None:
     必须挂 on_bot_connect：on_startup 阶段没有任何 Bot 连接，get_bot() 必抛异常，
     通知永远发不出（且此前内联 sleep(60) 会卡住整个启动流程）。
     """
-    if not _verify_active:
+    global _interrupted_reported
+    if not _verify_active or _interrupted_reported:
         return
     # 只算重启前遗留的（ts 早于本次启动）：启动后新发起且仍在途的不算中断
     interrupted = {qq: rec for qq, rec in _verify_active.items()
@@ -156,6 +160,7 @@ async def _report_interrupted_verifies(bot: Bot) -> None:
     # 通知即完结：清理已提醒的遗留记录，避免之后每次重启都重复提醒
     for qq in interrupted:
         _verify_active.pop(qq, None)
+    _interrupted_reported = True
     await _save_verify_state()
 
 

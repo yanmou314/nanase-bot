@@ -2558,3 +2558,44 @@ def test_flush_retry_requeues_then_gives_up(monkeypatch, tmp_path):
     assert "odyssey" not in btd6.push._pending_batch  # 超上限：放弃
     assert btd6.push._last_pushed().get("odyssey") != "ody-x"  # 未误标成功
     btd6.push._batch_retries.pop(("odyssey", "ody-x"), None)
+
+
+def test_flush_give_up_clears_overview_skip(monkeypatch, tmp_path):
+    """回归：纯总览类（race）部分群失败时——重试轮必须重发总览（不能跳过），
+    give-up 后必须清 _overview_already_sent，否则该类后续所有期次被永久静默。"""
+    monkeypatch.setattr(btd6.push, "BTD6_PUSH_STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(btd6.push, "_push_groups", lambda: {100, 200})
+
+    sent_groups = []
+
+    class _Bot:
+        async def send_group_msg(self, group_id=None, message=None, **kw):
+            if group_id == 200:
+                raise RuntimeError("broken group")
+            sent_groups.append(group_id)
+
+    async def fake_render(prefix, html_fn):
+        return str(tmp_path / f"{prefix}.png")
+
+    async def fake_overview():
+        return {"now": 0, "races": [], "bosses": [], "cts": [], "odysseys": [],
+                "rush": [], "socials": [], "collectables": []}
+
+    monkeypatch.setattr(btd6.push, "get_bot", lambda: _Bot())
+    monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
+    monkeypatch.setattr(btd6.push.collect, "collect_overview", fake_overview)
+    monkeypatch.setattr(btd6.push, "_PUSH_BATCH_DELAY_S", 0.0)
+    with btd6.push._batch_lock:
+        btd6.push._pending_batch.clear()
+    btd6.push._overview_already_sent.clear()
+    btd6.push._batch_retries.clear()
+    btd6.push._pending_batch["race"] = ({"id": "r1", "name": "RaceX"}, "r1", "RaceX")
+
+    for _ in range(4):  # 3 轮预算 + 第 4 轮触发 give-up
+        asyncio.run(btd6.push._flush_push_batch())
+    assert "race" not in btd6.push._pending_batch  # 超限放弃
+    assert "race" not in btd6.push._overview_already_sent  # 标记已清，后续期次可正常推
+    assert btd6.push._last_pushed().get("race") != "r1"  # 未误标成功
+    # 健康群 100 每轮都收到总览（重复可接受），坏群 200 永远发不出
+    assert sent_groups.count(100) == 4 and 200 not in sent_groups
+    btd6.push._batch_retries.pop(("race", "r1"), None)

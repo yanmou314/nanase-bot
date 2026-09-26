@@ -836,8 +836,10 @@ async def _flush_push_batch() -> None:
                     to_give_up.append(kind)
                 else:
                     to_retry.append(kind)
-                # 总览已发出但本类未完成：标记 skip，重试只补详情
-                if result.get("overview_ok") and kind in _OVERVIEW_KINDS:
+                # 总览已发出且本类还有详情可补：标记 skip，重试只补详情。
+                # 纯总览类（race/rush）无详情，重试必须重发总览——否则重试轮
+                # messages 为空恒判失败直至 give-up，且标记滞留会让后续期次永久静默。
+                if result.get("overview_ok") and kind in _OVERVIEW_KINDS and payload.get("details"):
                     _overview_already_sent.add(kind)
         for kind, ev_id in to_mark:
             await asyncio.to_thread(_set_last_pushed, kind, ev_id)
@@ -846,6 +848,9 @@ async def _flush_push_batch() -> None:
             _batch_retries.pop((kind, ev_id), None)
             _detail_delivered.pop((kind, ev_id), None)
         if to_give_up:
+            for kind in to_give_up:
+                # 放弃本期必须清总览跳过标记：否则纯总览类下一期被永久跳过且无详情可补
+                _overview_already_sent.discard(kind)
             _logger.error(
                 "BTD6 批量推送连续 %d 轮未完整送达，本轮放弃 kinds=%s"
                 "（多半是某个订阅群已不可达；可用 .btd6推送检查 手动补推）",
@@ -863,14 +868,14 @@ async def _flush_push_batch() -> None:
                 ",".join(f"{k}={i}" for k, i in to_mark), len(groups))
     finally:
         _flush_in_progress = False
-    # flush 期间新入队/失败回填的条目：再挂一轮防抖
-    with _batch_lock:
-        leftover = bool(_pending_batch)
-    if leftover and _PUSH_BATCH_DELAY_S > 0:
-        try:
-            _batch_flush_task = asyncio.get_running_loop().create_task(_delayed_flush())
-        except RuntimeError:
-            pass
+        # flush 期间新入队/失败回填的条目：再挂一轮防抖（放 finally：异常路径也必须补挂）
+        with _batch_lock:
+            leftover = bool(_pending_batch)
+        if leftover and _PUSH_BATCH_DELAY_S > 0:
+            try:
+                _batch_flush_task = asyncio.get_running_loop().create_task(_delayed_flush())
+            except RuntimeError:
+                pass
 
 
 async def _btd6_push_single(kind: str, ev: dict, ev_id: str, label: str, groups: set[int], *, mark_global: bool = True) -> None:
