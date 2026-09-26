@@ -670,6 +670,8 @@ body {{ width: {BOSS_DUAL_CARD_W}px; height: {h}px; color: #ffffff;
 .bdual-pmap-copy {{ display: table-cell; vertical-align: middle; padding: 0 10px;
                    color: #e8f2fc; font-size: 18px; line-height: 24px; font-weight: 800; }}
 
+.bdual-chip.sm {{ font-size: 15px; line-height: 20px; padding: 6px 8px; }}
+
 .bdual-cols {{ display: table; width: 100%; table-layout: fixed; }}
 .bdual-col {{ display: table-cell; width: 50%; vertical-align: top; }}
 .bdual-col.std {{ padding: 0 6px 0 0; }}
