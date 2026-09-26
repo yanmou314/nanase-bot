@@ -2624,7 +2624,6 @@ def test_daily_dual_html_smoke():
     assert "每日挑战情报" in html
     assert "标准·第2954期" in html and "高级·第2941期" in html
     assert "Co-op 挑战" in html  # coop 全宽面板
-    assert "最大生命" in html  # daily 专属 chip
     assert "Tree Stump" in html  # 面板自带地图名
     assert "stale!" in html
 

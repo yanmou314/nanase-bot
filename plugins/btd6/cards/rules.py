@@ -659,10 +659,19 @@ def boss_dual_html(col: dict) -> str:
     return common._boss_dual_shell(body, frame_h)
 
 
-def _daily_meta_chip_rows(variant_col: dict) -> str:
-    """每日面板元信息 chips：固定两行（行内不换行），保证三面板纵向对齐。
+_BDUAL_COL_W = 330  # 三列布局下面板内容可用宽度（1220 画布三等分减内边距/缝隙）
 
-    行1 难度/模式/回合；行2 资金/生命/最大生命。
+
+def _bdual_chip_text_w(text: str) -> int:
+    """compact chips 文本估算宽：CJK≈15px，数字/字母/符号≈8px。"""
+    return sum(15 if ord(ch) > 0x2000 else 8 for ch in text)
+
+
+def _daily_meta_chip_html(variant_col: dict) -> str:
+    """每日面板元信息 chips：固定两行结构（行1 难度/模式/回合，行2 资金/生命）。
+
+    每行最坏文本宽度 ≈ 313px < 可用宽度，行数与当天数据无关，三面板天然等高；
+    「最大生命」按需求移除。
     """
     meta = variant_col["meta"]
     diff_raw = str(meta.get("difficulty") or "")
@@ -672,39 +681,70 @@ def _daily_meta_chip_rows(variant_col: dict) -> str:
     end_r = int(meta.get("endRound") or 0)
     cash = int(meta.get("startingCash") or 0)
     lives = int(meta.get("lives") or 0)
-    max_lives = int(meta.get("maxLives") or 0)
 
-    def chip(icon, fallback, label, value):
-        img_html = common._race_ui_img(icon, fallback, "bdual-chip-icon") if icon else ""
-        return (f"<span class='bdual-chip' style='white-space:nowrap'>{img_html}"
+    def chip(label, value):
+        return (f"<span class='bdual-chip sm' style='white-space:nowrap'>"
                 f"{util._esc(label)} <b>{util._esc(value)}</b></span>")
 
-    diff_icon = _difficulty_ui_icon(diff_raw)
     row1 = ("<div class='bdual-chip-row'>"
-            + chip(diff_icon, "★", "难度", diff or "?")
-            + chip("RaceIcon.png", "🏁", "模式", mode or "?")
-            + chip("start-round.png", "▶", "回合", f"{start_r}–{end_r}")
+            + chip("难度", diff or "?")
+            + chip("模式", mode or "?")
+            + chip("回合", f"{start_r}–{end_r}")
             + "</div>")
     row2 = ("<div class='bdual-chip-row'>"
-            + chip("cash.png", "🪙", "资金", f"{cash:,}")
-            + chip("heart.png", "❤", "生命", f"{lives:,}")
-            + chip("heart.png", "❤", "最大生命", f"{max_lives:,}")
+            + chip("资金", f"{cash:,}")
+            + chip("生命", f"{lives:,}")
             + "</div>")
     return row1 + row2
 
 
-def _daily_dual_panel(v: dict, cols: int = 5, head_cls: str = "standard",
-                      meta_h: int = 175, rule_h: int = 200) -> tuple[str, int]:
-    """每日 bdual 单面板：返回 (html, 网格行数)。
+def _daily_rule_chips(meta: dict) -> str:
+    """规则调节 chips：限制塔数/限制模范 + 气球强化全量（官方图标，含增/减向）。"""
+    mt = int(meta.get("maxTowers") or 0)
+    towers_cap = "无限制" if mt >= 9999 or mt <= 0 else f"{mt:,}"
+    paragon = int(meta.get("maxParagons") or 0)
 
-    与 Boss 面板共用元信息 chips/规则调节 chips 版式，猴子区改用每日全塔限制网格；
-    面板自带地图缩略图与名称（标准/高级/Coop 地图各不相同），气球强化以 chips
-    形式并入规则调节。
-    """
+    def chip(icon, fallback, label, value):
+        img_html = common._race_ui_img(icon, fallback, "bdual-rule-icon")
+        return (f"<div class='bdual-rule-chip'>{img_html}{util._esc(label)} "
+                f"<b>{util._esc(value)}</b></div>")
+
+    chips = [chip("monkey-cap.png", "🐒", "限制塔数", towers_cap),
+             chip("paragon.png", "◉", "限制模范", str(paragon))]
+    for label, value, icon in common._race_modifier_items(meta.get("_bloonModifiers")):
+        chips.append(chip(icon, "⚡", label, value))
+    return "".join(chips)
+
+
+def _daily_panel_metrics(v: dict) -> tuple[int, int, bool]:
+    """规则调节行数 / 猴子网格行数 / 是否有 extras——纯计数，供对齐与画布高度。"""
+    meta = v["meta"]
+    mt = int(meta.get("maxTowers") or 0)
+    towers_cap = "无限制" if mt >= 9999 or mt <= 0 else f"{mt:,}"
+    widths = [_bdual_chip_text_w("限制塔数 " + towers_cap) + 50,
+              _bdual_chip_text_w("限制模范 " + str(int(meta.get("maxParagons") or 0))) + 50]
+    for label, value, _icon in common._race_modifier_items(meta.get("_bloonModifiers")):
+        widths.append(_bdual_chip_text_w(f"{label} {value}") + 50)
+    rule_rows, cur = 1, 0
+    for w in widths:
+        if cur and cur + w > _BDUAL_COL_W:
+            rule_rows += 1
+            cur = w
+        else:
+            cur += w
+    grid_rows = max(1, -(-len(_daily_monkey_cells(meta)) // 3))
+    has_extras = bool(_custom_round_sets(meta)) or any(
+        meta.get(key) for key, _lb in i18n.FLAG_LABELS)
+    return rule_rows, grid_rows, has_extras
+
+
+def _daily_dual_panel(v: dict, head_cls: str = "standard", rule_h: int = 0,
+                      grid_rows: int = 1) -> str:
+    """每日 bdual 单面板。分区高度：元信息固定 88px；规则调节区按三面板最大
+    行数预留（rule_h，由 daily_dual_html 统一下传）——「可用猴子」三列对齐。"""
     meta = v["meta"]
     grid_cells = _daily_monkey_cells(meta)
-    rows = max(1, -(-max(len(grid_cells), 1) // cols))
-    grid_html = _bdual_grid_table(grid_cells, cols)
+    grid_html = _bdual_grid_table(grid_cells, 3)
 
     map_raw = str(meta.get("map") or "").strip()
     map_cn = i18n.map_cn(map_raw)
@@ -716,67 +756,44 @@ def _daily_dual_panel(v: dict, cols: int = 5, head_cls: str = "standard",
             f"{map_thumb}</div>"
             f"<div class='bdual-pmap-copy'>{util._esc(map_txt)}</div></div>")
 
-    extras = []
+    rule_chips = _daily_rule_chips(meta)
     if _custom_round_sets(meta):
-        extras.append("自定义回合")
+        rule_chips += "<div class='bdual-extras'>自定义回合</div>"
     bans = [label_b for key, label_b in i18n.FLAG_LABELS if meta.get(key)]
     if bans:
-        extras.append("禁用：" + "、".join(bans))
-    extras_html = (
-        f"<div class='bdual-extras'>{util._esc('；'.join(extras))}</div>" if extras else ""
-    )
-
-    mod_lines = textfmt.bloon_mod_lines(meta.get("_bloonModifiers"))
-    modifier_chips = ""
-    if mod_lines:
-        mod_chips = "".join(
-            f"<div class='bdual-rule-chip'>{util._esc(line)}</div>" for line in mod_lines)
-        modifier_chips = f"<div class='bdual-rule-chips'>{mod_chips}</div>"
-
-    # 规则调节区整体（标签+chips+气球强化+extras）包固定高度：
-    # 三面板以 max 预留，chips 少的面板留白，保证「可用猴子」纵向对齐
+        rule_chips += f"<div class='bdual-extras'>{util._esc('禁用：' + '、'.join(bans))}</div>"
     rule_zone = (f"<div style='min-height:{rule_h}px'>"
                  "<div class='bdual-sec-label'>规则调节</div>"
-                 f"{_boss_dual_rule_chips(meta)}{modifier_chips}{extras_html}</div>")
-    panel = (
+                 f"{rule_chips}</div>")
+
+    return (
         "<div class='bdual-panel'>"
         f"<div class='bdual-panel-head {head_cls}'>{util._esc(v['issue'])}</div>"
         "<div class='bdual-panel-body'>"
         f"{pmap}"
-        f"<div style='min-height:{meta_h}px'>{_daily_meta_chip_rows(v)}</div>"
+        "<div style='min-height:88px'>"
+        "<div class='bdual-chip-row'>" + _daily_meta_chip_html(v) + "</div>"
+        "</div>"
         f"{rule_zone}"
         "<div class='bdual-sec-label'>可用猴子</div>"
         f"{grid_html}"
         "</div></div>")
-    panel_h = 42 + 78 + meta_h + rule_h + 34 + rows * 120 + 22 + 60
-    return panel, panel_h
 
 
 def daily_dual_html(col: dict) -> str:
-    """每日挑战 标准+高级并排合卡：复用 Boss bdual 版式组件。
+    """每日挑战 标准/高级/Coop 三面板平行合卡（Boss bdual 版式）。
 
-    与 boss_dual_html 的差异：无 banner 图（NK 列表不提供每日横幅，且标准/高级
-    是两期不同挑战）、地图缩略图取标准期、参与人数不可得故不显示；面板自带
-    期号（标准·第N期 / 高级·第N期）与地图名，猴子区用每日全塔限制网格。
+    高度自适应：规则调节行数、猴子网格行数按当天活动数据计算（宽度估算法，
+    与实际换行口径一致），画布高度随内容变化，无需手工标定常数。
     """
     if col.get("empty"):
         body = f"<div class='bdual-empty'>{util._esc(col['empty'])}</div>"
         return common._boss_dual_shell(body, 320)
 
-    variants = col.get('variants') or []
+    variants = col.get("variants") or []
     ids = []
-    main_rows = []  # 标准/高级/Coop 三面板平行
+    panels = []
     panel_hs = []
-    # 规则调节区高度：按三面板中 chips 文本量最多者预留（对齐可用猴子标签）
-    rule_h = 0
-    for v in variants:
-        meta_v = v["meta"]
-        mt = int(meta_v.get("maxTowers") or 0)
-        towers_cap_txt = "无限制" if mt >= 9999 or mt <= 0 else f"{mt:,}"
-        chars = len("限制塔数 " + towers_cap_txt) + len("限制模范 " + str(int(meta_v.get("maxParagons") or 0)))
-        chars += sum(len(line) for line in textfmt.bloon_mod_lines(meta_v.get("_bloonModifiers")))
-        rows_v = max(1, -(-chars // 16))  # 估算每行约 16 个全角字符宽
-        rule_h = max(rule_h, 34 + 8 + rows_v * 36 + 8 + 24, 200)  # 标签 + chips + extras 余量；下限按实测标定
     for v in variants:
         ev = v.get("ev") or {}
         sid = str(ev.get("id") or "")
@@ -785,17 +802,14 @@ def daily_dual_html(col: dict) -> str:
         if sid:
             ids.append(sid)
         variant = v.get("variant")
-        # 三面板平行：每列 3 列猴子网格；列间留 4px 缝，末列不留右侧缝
-        gutter = "padding:0;" if len(main_rows) == 2 else "padding:0 4px 0 0;" if not main_rows else "padding:0 4px;"
-        head_cls = {"advanced": "elite", "coop": "standard"}.get(variant, "standard")
-        panel, panel_h = _daily_dual_panel(v, cols=3, head_cls=head_cls, meta_h=175, rule_h=rule_h)
-        main_rows.append(
-            f"<div class='bdual-col {('eli' if variant == 'advanced' else 'std')}'"
-            f" style='width:33.3%;{gutter}'>{panel}</div>")
-        panel_hs.append(panel_h)
-    if not main_rows:
-        body = "<div class='bdual-empty'>暂无每日挑战数据</div>"
-        return common._boss_dual_shell(body, 320)
+        rule_rows, grid_rows, has_extras = _daily_panel_metrics(v)
+        rule_h = rule_rows * 36 + 10 + (22 if has_extras else 0)
+        head_cls = {"advanced": "elite"}.get(variant, "standard")
+        panel = _daily_dual_panel(v, head_cls=head_cls, rule_h=rule_h, grid_rows=grid_rows)
+        cls = "eli" if variant == "advanced" else "std"
+        panels.append(f"<div class='bdual-col {cls}' style='width:33.3%'>{panel}</div>")
+        panel_hs.append(42 + 68 + 88 + rule_h + 34 + grid_rows * 120 + 20)
+        _ = v  # noqa: B018
 
     ids_txt = f"ID: {' / '.join(ids)}" if ids else ""
     titlebar = (
@@ -803,17 +817,12 @@ def daily_dual_html(col: dict) -> str:
         "<div class='bdual-title'>每日挑战情报</div>"
         f"<div class='bdual-subtitle'>{util._esc(ids_txt)}</div>"
         "</div>")
-
-    body = titlebar
-    if main_rows:
-        body += f"<div class='bdual-cols'>{''.join(main_rows)}</div>"
+    body = titlebar + f"<div class='bdual-cols'>{''.join(panels)}</div>"
     stale_note = col.get("stale_note") or ""
     if stale_note:
         body += f"<div class='bdual-note'>{util._esc(stale_note)}</div>"
 
-    extras_h = 22  # 可能的自定义回合/禁用行
-    col_h = max((h + extras_h for h in panel_hs), default=420)
-    frame_h = 10 + 62 + 8 + col_h + 8
+    frame_h = 10 + 62 + 8 + max(panel_hs, default=420) + 8
     return common._boss_dual_shell(body, frame_h)
 
 
