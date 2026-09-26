@@ -659,23 +659,29 @@ def boss_dual_html(col: dict) -> str:
     return common._boss_dual_shell(body, frame_h)
 
 
-def _daily_dual_panel(v: dict) -> tuple[str, int]:
+def _daily_dual_panel(v: dict, cols: int = 5) -> tuple[str, int]:
     """每日 bdual 单面板：返回 (html, 网格行数)。
 
     与 Boss 面板共用元信息 chips/规则调节 chips 版式，猴子区改用每日全塔限制网格；
-    面板自带地图名（标准/高级可能不同图），气球强化以 chips 形式并入规则调节。
+    面板自带地图缩略图与名称（标准/高级/Coop 地图各不相同），气球强化以 chips
+    形式并入规则调节。
     """
     meta = v["meta"]
     grid_cells = _daily_monkey_cells(meta)
-    rows = max(1, -(-max(len(grid_cells), 1) // 5))
-    grid_html = _bdual_grid_table(grid_cells)
+    rows = max(1, -(-max(len(grid_cells), 1) // cols))
+    grid_html = _bdual_grid_table(grid_cells, cols)
 
-    extras = []
     map_raw = str(meta.get("map") or "").strip()
     map_cn = i18n.map_cn(map_raw)
-    map_txt = f"{map_cn} ({map_raw})" if map_raw and map_cn != map_raw else (map_cn or map_raw or "")
-    if map_txt:
-        extras.append(f"🗺 {map_txt}")
+    map_txt = f"{map_cn} ({map_raw})" if map_raw and map_cn != map_raw else (map_cn or map_raw or "?")
+    map_img = v.get("map_img") or ""
+    map_thumb = (f"<img src='{util._esc(map_img)}' alt='{util._esc(map_txt)}'/>"
+                 if map_img else "<div class='bdual-pmap-fallback'>🗺</div>")
+    pmap = ("<div class='bdual-pmap'><div class='bdual-pmap-thumb'>"
+            f"{map_thumb}</div>"
+            f"<div class='bdual-pmap-copy'>{util._esc(map_txt)}</div></div>")
+
+    extras = []
     if _custom_round_sets(meta):
         extras.append("自定义回合")
     bans = [label_b for key, label_b in i18n.FLAG_LABELS if meta.get(key)]
@@ -696,6 +702,7 @@ def _daily_dual_panel(v: dict) -> tuple[str, int]:
         "<div class='bdual-panel'>"
         f"<div class='bdual-panel-head standard'>{util._esc(v['issue'])}</div>"
         "<div class='bdual-panel-body'>"
+        f"{pmap}"
         f"{_boss_dual_meta_chips(v, daily=True)}"
         "<div class='bdual-sec-label'>规则调节</div>"
         f"{_boss_dual_rule_chips(meta)}"
@@ -706,7 +713,7 @@ def _daily_dual_panel(v: dict) -> tuple[str, int]:
         "</div></div>")
     chips = _boss_dual_rule_chip_count(meta) + len(mod_lines)
     chip_rows = max(1, -(-chips // 3))
-    panel_h = 42 + 78 + 36 + 34 + chip_rows * 36 + 8 + rows * 120 + 8
+    panel_h = 142 + 78 + 68 + 36 + 34 + chip_rows * 36 + 8 + rows * 120 + 8  # +68: 面板地图行
     return panel, panel_h
 
 
@@ -721,13 +728,12 @@ def daily_dual_html(col: dict) -> str:
         body = f"<div class='bdual-empty'>{util._esc(col['empty'])}</div>"
         return common._boss_dual_shell(body, 320)
 
-    variants = col.get("variants") or []
-    primary = variants[0] if variants else {}
-    meta = primary.get("meta") or {}
-
-    panels = []
-    panel_hs = []
+    variants = col.get('variants') or []
     ids = []
+    main_rows = []  # (panel_html, h) 标准/高级
+    panel_hs = []
+    coop_html = None
+    coop_h = 0
     for v in variants:
         ev = v.get("ev") or {}
         sid = str(ev.get("id") or "")
@@ -735,49 +741,41 @@ def daily_dual_html(col: dict) -> str:
             sid = sid.split("_", 1)[1]
         if sid:
             ids.append(sid)
-        panel, panel_h = _daily_dual_panel(v)
-        cls = "adv" if v.get("variant") == "advanced" else "std"
-        panels.append(f"<div class='bdual-col {cls}'>{panel}</div>")
-        panel_hs.append(panel_h)
-    if not panels:
+        is_coop = v.get("variant") == "coop"
+        if is_coop:
+            panel, panel_h = _daily_dual_panel(v, cols=10)  # 全宽行：10 列网格
+            coop_html = f"<div style='margin-top:8px'>{panel}</div>"
+            coop_h = panel_h
+        else:
+            panel, panel_h = _daily_dual_panel(v)
+            cls = "adv" if v.get("variant") == "advanced" else "std"
+            main_rows.append(f"<div class='bdual-col {cls}'>{panel}</div>")
+            panel_hs.append(panel_h)
+    if not main_rows and coop_html is None:
         body = "<div class='bdual-empty'>暂无每日挑战数据</div>"
         return common._boss_dual_shell(body, 320)
 
-    # NK 每日条目只有 createdAt（无 start/end），不渲染时间范围——缺省时
-    # _fmt_range_full 会把 0 当 epoch 输出 1970 年
     ids_txt = f"ID: {' / '.join(ids)}" if ids else ""
-    subtitle = ids_txt
     titlebar = (
         "<div class='bdual-titlebar'>"
         "<div class='bdual-title'>每日挑战情报</div>"
-        f"<div class='bdual-subtitle'>{util._esc(subtitle)}</div>"
+        f"<div class='bdual-subtitle'>{util._esc(ids_txt)}</div>"
         "</div>")
 
-    map_cn_name = i18n.map_cn(str(meta.get("map") or "").strip())
-    map_en = str(meta.get("map") or "").strip()
-    map_title = f"{map_cn_name} ({map_en})" if map_en and map_cn_name != map_en else (map_cn_name or map_en or "?")
-    map_img = col.get("map_img") or ""
-    map_thumb = (
-        f"<img src='{util._esc(map_img)}' alt='{util._esc(map_title)}'/>"
-        if map_img
-        else "<div class='bdual-map-thumb-fallback'>🗺</div>"
-    )
-    mapbar = (
-        "<div class='bdual-mapbar'>"
-        f"<div class='bdual-map-thumb'>{map_thumb}</div>"
-        "<div class='bdual-map-copy'>"
-        f"<div class='bdual-map-name'>{util._esc('标准期地图：' + map_title)}</div>"
-        "<div class='bdual-map-time'>固定种子 · 当日有效 · 高级期地图见右侧面板</div>"
-        "</div></div>")
-
-    body = titlebar + mapbar + "<div class='bdual-cols'>" + "".join(panels) + "</div>"
+    body = titlebar
+    if main_rows:
+        body += f"<div class='bdual-cols'>{''.join(main_rows)}</div>"
+    if coop_html:
+        body += coop_html
     stale_note = col.get("stale_note") or ""
     if stale_note:
         body += f"<div class='bdual-note'>{util._esc(stale_note)}</div>"
 
-    extras_h = 22  # 可能的地图名/自定义回合/禁用行
-    col_h = max((h + extras_h for h in panel_hs), default=420)
-    frame_h = 10 + 62 + 8 + 104 + 8 + col_h + 8  # 无 banner，比 Boss 卡少一段
+    extras_h = 22  # 可能的自定义回合/禁用行
+    col_h = max((h + extras_h for h in panel_hs), default=0)
+    frame_h = 10 + 62 + 8 + col_h + 8 + coop_h + 8
+    if not col_h:
+        frame_h = 10 + 62 + 8 + coop_h + 8
     return common._boss_dual_shell(body, frame_h)
 
 

@@ -401,6 +401,19 @@ async def collect_daily_dual(now_ms: int | None = None) -> dict:
             "ev": ev,
             "map_img": await _challenge_map_img(meta, f"daily_map_{variant}"),
         })
+    coop_ev = _coop_pick(items, now)
+    if coop_ev:
+        meta_url = coop_ev.get("metadata")
+        meta = await nkapi.fetch_body(meta_url) if meta_url else None
+        meta = meta if isinstance(meta, dict) else {}
+        variants.append({
+            "variant": "coop",
+            "label": "Co-op",
+            "issue": "Co-op 挑战",
+            "meta": meta,
+            "ev": coop_ev,
+            "map_img": await _challenge_map_img(meta, "daily_map_coop"),
+        })
     if not variants:
         return {"empty": "暂无每日挑战数据"}
     return {

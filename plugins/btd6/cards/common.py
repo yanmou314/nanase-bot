@@ -659,6 +659,17 @@ body {{ width: {BOSS_DUAL_CARD_W}px; height: {h}px; color: #ffffff;
                     white-space: nowrap;
                     text-shadow: 0 1px 0 rgba(4,16,30,.55); }}
 
+.bdual-pmap {{ display: table; width: 100%; table-layout: fixed; margin-bottom: 8px;
+              background: #16324e; border: 1px solid #4d7aa8; border-radius: 10px; }}
+.bdual-pmap-thumb {{ display: table-cell; width: 96px; vertical-align: middle; padding: 6px 0 6px 8px; }}
+.bdual-pmap-thumb img {{ width: 80px; height: 56px; object-fit: cover; border-radius: 8px;
+                        border: 1px solid #699bd9; background: #0f2740; }}
+.bdual-pmap-fallback {{ width: 80px; height: 56px; line-height: 56px; text-align: center;
+                       border-radius: 8px; border: 1px solid #699bd9; background: #0f2740;
+                       color: #9ec9ef; font-size: 26px; }}
+.bdual-pmap-copy {{ display: table-cell; vertical-align: middle; padding: 0 10px;
+                   color: #e8f2fc; font-size: 18px; line-height: 24px; font-weight: 800; }}
+
 .bdual-cols {{ display: table; width: 100%; table-layout: fixed; }}
 .bdual-col {{ display: table-cell; width: 50%; vertical-align: top; }}
 .bdual-col.std {{ padding: 0 6px 0 0; }}
