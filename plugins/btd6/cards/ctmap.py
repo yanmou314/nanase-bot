@@ -9,6 +9,7 @@ gametypes（类型着色+模式图标）、maps（地图贴图+回合数）、he
 英雄头像+回合数），渲染规则与站点 renderPresets/updateCTBackground 一致。
 """
 import base64
+import hashlib
 import io
 import math
 from collections import Counter
@@ -121,7 +122,16 @@ def _render_board(col: dict, view: str | None = None, badge: bool = False) -> tu
     +英雄头像+回合数。渲染规则与站点 renderPresets 一致。
     """
     ev_id = str((col.get("ev") or {}).get("id") or "")
-    cache_key = (ev_id, view, badge)
+    # 缓存键掺入棋盘数据指纹：活动期内社区数据集修正（增删格子/改类型）时不返回旧图；
+    # 仅 hash 元数据字段（id/type/地图/模式/遗物），不含缩略图大对象，开销可忽略
+    tile_sig = "|".join(
+        f"{tid}:{t.get('TileType') or ''}:{t.get('RelicType') or ''}:"
+        f"{(t.get('GameData') or {}).get('selectedMap') or ''}:"
+        f"{(t.get('GameData') or {}).get('subGameType') or ''}"
+        for tid, t in sorted((col.get("ct_tiles") or {}).items())
+    )
+    sig = hashlib.md5(tile_sig.encode("utf-8")).hexdigest()[:10]
+    cache_key = (ev_id, view, badge, sig)
     cached = _BOARD_CACHE.get(cache_key)
     if cached:
         return cached
@@ -337,8 +347,9 @@ def _render_board(col: dict, view: str | None = None, badge: bool = False) -> tu
         for _im in decor_cache.values():
             if _im is not None:
                 _im.close()
-    if len(_BOARD_CACHE) > 24:
-        _BOARD_CACHE.clear()
+    while len(_BOARD_CACHE) >= 24:
+        # 逐出最旧而非 clear() 全清：多期活动/预设卡连续渲染时避免整批重建卡顿
+        _BOARD_CACHE.pop(next(iter(_BOARD_CACHE)), None)
     _BOARD_CACHE[cache_key] = (data_url, css_w, css_h)
     return data_url, css_w, css_h
 
@@ -443,8 +454,11 @@ def _board_html(col: dict, view: str | None = None, badge: bool = False,
         if relic_url:
             legend_cells.append(f"<div class='ct-lg'><img src='{relic_url}'/>遗物 {n_relic}</div>")
 
-        powers = "、".join(i18n._odyssey_power_name(str(p)) for p in (col.get("daily_powers") or [])[:7])
-        relics_pool = "、".join(i18n.relic_cn(str(r)) for r in (col.get("event_relics") or []))
+        # 力量/遗物译名未命中翻译表时回退 API 原文（外部数据）：必须转义后进 HTML
+        powers = "、".join(util._esc(i18n._odyssey_power_name(str(p)))
+                           for p in (col.get("daily_powers") or [])[:7])
+        relics_pool = "、".join(util._esc(i18n.relic_cn(str(r)))
+                                for r in (col.get("event_relics") or []))
         n_regular = type_cnt.get("Regular", 0) + type_cnt.get("TeamFirstCapture", 0)
         mode_line = " · ".join(f"{label} {mode_cnt.get(sub, 0)}"
                                for sub, label in ((8, "最少现金"), (9, "最少层数"), (2, "竞速"), (4, "Boss"))

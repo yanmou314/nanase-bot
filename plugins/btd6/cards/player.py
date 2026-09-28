@@ -39,7 +39,7 @@ def player_html(col: dict) -> str:
         )
     head = (lb_badge + f"<div class='panel'>{banner}"
             f"<div class='phead'>{avatar}"
-            f"<div class='ptext'><div class='big'>{util._esc(p.get('displayName'))}</div>"
+            f"<div class='ptext'><div class='big'>{util._esc(p.get('displayName') or '未知玩家')}</div>"
             f"<div class='sub'>等级 {rank}{vr_txt} · 粉丝 {followers}"
             f" · 最常用猴 {most_used}</div></div></div></div>")
 

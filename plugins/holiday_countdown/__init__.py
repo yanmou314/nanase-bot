@@ -14,7 +14,7 @@ from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageEvent, Me
 from nonebot_plugin_apscheduler import scheduler
 from PIL import Image, ImageDraw, ImageFont
 
-from common import FONTS, RENDER_SEM, RENDER_TOTAL_TIMEOUT, cleanup_cache, is_owner, load_json_state, save_json_state
+from common import FONTS, RENDER_SEM, RENDER_TOTAL_TIMEOUT, cleanup_cache, is_owner, load_json_state, save_json_state, run_in_render_executor
 
 
 _logger = logging.getLogger(__name__)
@@ -393,7 +393,7 @@ async def _build_image_message() -> MessageSegment | str:
         # 与全站渲染一致：经 RENDER_SEM 串行化 + 看门狗超时
         async with RENDER_SEM:
             path = await asyncio.wait_for(
-                asyncio.to_thread(_render_card, now), timeout=RENDER_TOTAL_TIMEOUT)
+                run_in_render_executor(_render_card, now), timeout=RENDER_TOTAL_TIMEOUT)
         return MessageSegment.image("file://" + path)
     except Exception:
         _logger.warning("倒计时卡片渲染失败，回退文本消息", exc_info=True)

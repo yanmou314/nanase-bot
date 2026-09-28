@@ -483,7 +483,9 @@ async def _send_daily() -> bool:
         try:
             text = await _build_message(_sh_today())
         except Exception:
+            # 与发送失败路径对称：安排当日一次性重试（生成多为瞬时故障如上游超时）
             _logger.exception("晨报内容生成失败")
+            _schedule_push_retry(today)
             return False
         try:
             bot = get_bot()

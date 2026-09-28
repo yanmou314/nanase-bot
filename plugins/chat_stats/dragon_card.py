@@ -7,7 +7,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 
-from common import RENDER_SEM, RENDER_TOTAL_TIMEOUT, get_http_client, gradient_background, render_html_to_png
+from common import RENDER_SEM, RENDER_TOTAL_TIMEOUT, get_http_client, gradient_background, render_html_to_png, run_in_render_executor
 
 _logger = logging.getLogger(__name__)
 
@@ -118,4 +118,4 @@ async def build_card_async(rows: list) -> str:
     # wait_for 看门狗保证挂死渲染会释放 RENDER_SEM，不致永久占住全站唯一渲染槽
     async with RENDER_SEM:
         return await asyncio.wait_for(
-            asyncio.to_thread(_render, rows, avatars), timeout=RENDER_TOTAL_TIMEOUT)
+            run_in_render_executor(_render, rows, avatars), timeout=RENDER_TOTAL_TIMEOUT)

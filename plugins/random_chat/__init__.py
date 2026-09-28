@@ -102,7 +102,8 @@ def _record(gid: int, sender: str, text: str) -> None:
             _last_interject.pop(stale, None)
             _last_seen.pop(stale, None)
         buf = _buffers[gid] = deque(maxlen=GROUP_CONTEXT_SIZE)
-    buf.append(f"{sender}: {text}")
+    # 正文与昵称同样消毒（去控制符/换行）：多行消息可伪造 "昵称： 内容" 转写行
+    buf.append(f"{sender}: {' '.join(str(text).split())}")
 
 
 def _auto_chat_mod():

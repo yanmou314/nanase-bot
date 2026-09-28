@@ -170,28 +170,3 @@ def leaderboard_html(col: dict) -> str:
             f"<div class='lb-panel'>{rows_html}</div>")
     h = 20 + 56 + 90 + max(len(rows), 1) * 56 + 40
     return common._list_shell(body, h)
-
-
-def maps_html(col: dict) -> str:
-    """自制地图：保持原列表布局。"""
-    entries = col["entries"]
-    label = col["label"]
-    header = f"<div class='lb-head'><div class='lb-title'>自制地图 · {util._esc(label)} Top{len(entries)}</div></div>"
-    if not entries:
-        return common._list_shell(header + "<div class='lb-panel'><div class='lb-empty'>（暂无地图数据）</div></div>", 190)
-    rows = []
-    for i, name, created, img, plays, upvotes in entries:
-        thumb = (f"<img class='ody-map-img' src='{util._esc(img)}' alt=''/>" if img else "<div class='ody-map-empty'>🗺</div>")
-        rows.append(
-            f"<div class='map-row'><div class='map-img-cell'>{thumb}</div>"
-            f"<div class='map-info'>"
-            f"<div class='map-name'>#{i:02d} {util._esc(name)}</div>"
-            f"<div class='map-meta'>"
-            f"<div class='map-meta-item'>▶ 游玩 {plays:,}</div>"
-            f"<div class='map-meta-item'>♥ 点赞 {upvotes:,}</div>"
-            f"<div class='map-meta-item'>{util._esc(created)}</div>"
-            f"</div></div></div>"
-        )
-    body = header + f"<div class='map-panel'>{''.join(rows)}</div>"
-    h = 24 + 56 + max(len(entries), 1) * 126 + 56
-    return common._list_shell(body, min(h, 2600))

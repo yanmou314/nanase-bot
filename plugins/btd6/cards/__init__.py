@@ -52,7 +52,6 @@ from .ctmap import (  # noqa: F401
 from .leaderboard import (  # noqa: F401
     _MEDAL_COLOR,
     leaderboard_html,
-    maps_html,
 )
 
 from .odyssey import (  # noqa: F401
@@ -175,6 +174,13 @@ def _render_card_sync(prefix: str, html: str) -> str:
     render_dir = os.path.join(assets.CACHE_DIR, ".render")
     os.makedirs(render_dir, exist_ok=True)
     tmp = render_html_to_png(html, prefix, render_dir, max_age=CARD_MAX_AGE, dpi=CARD_DPI)
+    if prefix.split("_", 1)[0] == "btd6ody":
+        # 远征卡高度留了自适应余量：落盘前按内容裁掉底部空白，
+        # 预热与首查共用同一份裁剪后的缓存
+        try:
+            odyssey.trim_odyssey_png(tmp)
+        except Exception:
+            _logger.warning("BTD6 远征卡裁剪失败，保留完整画布", exc_info=True)
     os.replace(tmp, path)
     if persistent:
         assets._prune_cache_files(card_dir, ".png", PERSISTENT_CARD_FILES, PERSISTENT_CARD_BYTES, {path})
@@ -297,7 +303,6 @@ __all__ = [
     'help_html',
     'leaderboard',
     'leaderboard_html',
-    'maps_html',
     'odyssey',
     'odyssey_diff_html',
     'odyssey_html',

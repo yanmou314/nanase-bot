@@ -34,7 +34,7 @@ def _race_time_line(ev: dict | None) -> str:
     if not ev:
         return ""
     try:
-        start, end = int(ev.get("start") or 0), int(ev.get("end") or 0)
+        start, end = util._num0(ev.get("start")), util._num0(ev.get("end"))
         if start <= 0 or end <= start:
             return ""
     except (TypeError, ValueError):
@@ -119,7 +119,7 @@ def _path_max_txt(blocked: dict) -> str:
     """路径限制 → 3-2-3（每条路可升到的最高层数，BTD6 每路满级 5 层）。
     封锁值 -1 表示整路禁用 → 显示 0（与游戏/BTD6 API Explorer 一致）。"""
     def cap(p: int) -> str:
-        n = int(blocked.get(p, 0) or 0)
+        n = util._num0(blocked.get(p, 0))
         return "0" if n == -1 else str(max(0, 5 - n))
     return "-".join(cap(p) for p in (1, 2, 3))
 
@@ -159,7 +159,7 @@ def _monkey_grid(towers: list) -> str:
             continue  # 禁用：直接不显示
         blocked = {
             p: n for p in (1, 2, 3)
-            if (n := int(t.get(f"path{p}NumBlockedTiers") or 0)) != 0
+            if (n := util._num0(t.get(f"path{p}NumBlockedTiers"))) != 0
         }
         is_hero = bool(t.get("isHero"))
         limited = isinstance(mx, (int, float)) and 0 < mx < 99
@@ -263,7 +263,7 @@ def _race_monkey_cell(tower: dict) -> str:
     limited = max_num is not None and 0 < max_num < 99
     blocked = {
         p: n for p in (1, 2, 3)
-        if (n := int(tower.get(f"path{p}NumBlockedTiers") or 0)) != 0
+        if (n := util._num0(tower.get(f"path{p}NumBlockedTiers"))) != 0
     }
     tags = []
     if limited:
@@ -302,7 +302,7 @@ def _heroes_all_available(towers: list) -> bool:
             mx = None
         if mx is not None and (mx == 0 or mx > 1):
             return False
-        if any(int(t.get(f"path{p}NumBlockedTiers") or 0) != 0 for p in (1, 2, 3)):
+        if any(util._num0(t.get(f"path{p}NumBlockedTiers")) != 0 for p in (1, 2, 3)):
             return False
     return True
 
@@ -361,8 +361,11 @@ def _fmt_range_full(ev: dict) -> str:
     from datetime import datetime
 
     from ..util import _SH
-    s = datetime.fromtimestamp(int(ev.get("start") or 0) / 1000, tz=_SH)
-    e = datetime.fromtimestamp(int(ev.get("end") or 0) / 1000, tz=_SH)
+    start, end = util._num0(ev.get("start")), util._num0(ev.get("end"))
+    if not start or not end:
+        return ""  # 缺时间戳（如探针/空 ev）时不显示 1970 占位
+    s = datetime.fromtimestamp(start / 1000, tz=_SH)
+    e = datetime.fromtimestamp(end / 1000, tz=_SH)
     return (
         f"{s.year}/{s.month:02d}/{s.day:02d} {s.hour:02d}:{s.minute:02d}:{s.second:02d}"
         f" ~ "
@@ -372,9 +375,9 @@ def _fmt_range_full(ev: dict) -> str:
 
 def _boss_dual_rule_chips(meta: dict) -> str:
     """规则调节 chips：限制塔数 / 限制模范 / MOAB速度 / BOSS速度 / BOSS血量。"""
-    max_towers = int(meta.get("maxTowers") or 0)
+    max_towers = util._num0(meta.get("maxTowers"))
     towers_cap = "无限制" if max_towers >= 9999 or max_towers <= 0 else f"{max_towers:,}"
-    paragon_limit = int(meta.get("maxParagons") or 0)
+    paragon_limit = util._num0(meta.get("maxParagons"))
     mods = meta.get("_bloonModifiers") or {}
 
     def chip(icon: str, fallback: str, label: str, value: str) -> str:
@@ -435,10 +438,10 @@ def _boss_dual_meta_chips(variant_col: dict, daily: bool = False) -> str:
     diff = i18n.cn(diff_raw, i18n.DIFFICULTY_CN)
     mode = i18n.mode_cn(meta.get("mode"))
     scoring = variant_col.get("scoring_cn") or ""
-    start_r = int(meta.get("startRound") or 0)
-    end_r = int(meta.get("endRound") or 0)
-    cash = int(meta.get("startingCash") or 0)
-    lives = int(meta.get("lives") or 0)
+    start_r = util._num0(meta.get("startRound"))
+    end_r = util._num0(meta.get("endRound"))
+    cash = util._num0(meta.get("startingCash"))
+    lives = util._num0(meta.get("lives"))
 
     def chip(icon: str, fallback: str, label: str, value: str) -> str:
         icon_html = common._race_ui_img(icon, fallback, "bdual-chip-icon") if icon else ""
@@ -460,7 +463,7 @@ def _boss_dual_meta_chips(variant_col: dict, daily: bool = False) -> str:
         "<div class='bdual-chip-row'>"
         + chip("cash.png", "🪙", "资金", f"{cash:,}")
         + chip("heart.png", "❤", "生命", f"{lives:,}")
-        + (chip("heart.png", "❤", "最大生命", f"{int(meta.get('maxLives') or 0):,}") if daily else "")
+        + (chip("heart.png", "❤", "最大生命", f"{util._num0(meta.get('maxLives')):,}") if daily else "")
         + "</div>"
     )
     return row1 + row2
@@ -549,7 +552,7 @@ def _boss_dual_panel_h(v: dict) -> int:
     chips = _boss_dual_rule_chip_count(meta_v)
     # head + meta 两行 + 规则标题/chips（按每行约 3 个估换行）+ 可用猴子标题 + 网格
     chip_rows = max(1, -(-chips // 3))
-    return 42 + 78 + 36 + 34 + chip_rows * 36 + 8 + grid_rows * 120 + 8
+    return 50 + 78 + 40 + 34 + chip_rows * 44 + 10 + grid_rows * 122 + 30
 
 
 def _boss_dual_panel(variant_col: dict) -> str:
@@ -601,7 +604,10 @@ def boss_dual_html(col: dict) -> str:
     if "_" in short_id:
         short_id = short_id.split("_", 1)[1]
     time_range = _fmt_range_full(ev)
-    subtitle = f"ID: {util._esc(short_id)} | {util._esc(time_range)}" if short_id else util._esc(time_range)
+    # 时间缺失（探针/空 ev）时不留 "ID: xxx | " 尾随分隔符；id 为外部数据必须转义
+    subtitle = " | ".join(part for part in
+                          (f"ID: {util._esc(short_id)}" if short_id else "",
+                           util._esc(time_range)) if part)
 
     side_img = col.get("side_img") or ""
     banner_inner = (
@@ -624,8 +630,8 @@ def boss_dual_html(col: dict) -> str:
         if map_img
         else "<div class='bdual-map-thumb-fallback'>🗺</div>"
     )
-    n_std = int(ev.get("totalScores_standard") or 0)
-    n_elite = int(ev.get("totalScores_elite") or 0)
+    n_std = util._num0(ev.get("totalScores_standard"))
+    n_elite = util._num0(ev.get("totalScores_elite"))
     mapbar = (
         "<div class='bdual-mapbar'>"
         f"<div class='bdual-map-thumb'>{map_thumb}</div>"
@@ -680,10 +686,10 @@ def _daily_meta_chip_html(variant_col: dict) -> str:
     diff_raw = str(meta.get("difficulty") or "")
     diff = i18n.cn(diff_raw, i18n.DIFFICULTY_CN)
     mode = i18n.mode_cn(meta.get("mode"))
-    start_r = int(meta.get("startRound") or 0)
-    end_r = int(meta.get("endRound") or 0)
-    cash = int(meta.get("startingCash") or 0)
-    lives = int(meta.get("lives") or 0)
+    start_r = util._num0(meta.get("startRound"))
+    end_r = util._num0(meta.get("endRound"))
+    cash = util._num0(meta.get("startingCash"))
+    lives = util._num0(meta.get("lives"))
 
     def chip(icon, fallback, label, value):
         img_html = common._race_ui_img(icon, fallback, "bdual-chip-icon")
@@ -705,9 +711,9 @@ def _daily_meta_chip_html(variant_col: dict) -> str:
 
 def _daily_rule_chips(meta: dict) -> str:
     """规则调节 chips：限制塔数/限制模范 + 气球强化全量（官方图标，含增/减向）。"""
-    mt = int(meta.get("maxTowers") or 0)
+    mt = util._num0(meta.get("maxTowers"))
     towers_cap = "无限制" if mt >= 9999 or mt <= 0 else f"{mt:,}"
-    paragon = int(meta.get("maxParagons") or 0)
+    paragon = util._num0(meta.get("maxParagons"))
 
     def chip(icon, fallback, label, value):
         img_html = common._race_ui_img(icon, fallback, "bdual-rule-icon")
@@ -838,12 +844,14 @@ def daily_dual_html(col: dict) -> str:
     # ---- 两遍渲染定高：宽松探针 → 实测内容底部 → 正式尺寸 ----
     import os
 
-    from common import render_html_to_png  # 顶层 common（cards/common 不含渲染管线）
-
     cache_dir = os.path.join(os.path.dirname(__file__), "cache")
     probe_dpi = 60
     need_css = rough + 120  # 探针失败（如环境缺 pdftoppm/字体）时的兜底估算
     try:
+        # 顶层 common（cards/common 不含渲染管线）；import 留在 try 内：
+        # 管线缺失时走下方 except 的估算兜底，不让 ImportError 毁掉整卡
+        from common import render_html_to_png
+
         probe_png = render_html_to_png(
             common._boss_dual_shell(body, rough + 600), "btd6dailyprobe", cache_dir,
             max_age=120, dpi=probe_dpi)
@@ -880,9 +888,9 @@ def rules_html(col: dict) -> str:
     side_img = col.get("side_img") or ""
     ev = col.get("ev")
     map_img = col.get("map_img") or ""
-    max_towers = int(meta.get("maxTowers") or 0)
-    towers_cap = "无限制" if max_towers >= 9999 else f"{max_towers:,}"
-    paragon_limit = int(meta.get("maxParagons") or 0)
+    max_towers = util._num0(meta.get("maxTowers"))
+    towers_cap = "无限制" if max_towers >= 9999 or max_towers <= 0 else f"{max_towers:,}"
+    paragon_limit = util._num0(meta.get("maxParagons"))
     boss_label = "首领事件" if side_img else "竞速事件"
     if is_daily:
         boss_label = "每日挑战"
@@ -905,13 +913,13 @@ def rules_html(col: dict) -> str:
     else:
         event_icon = boss_asset or "RaceIcon.png"
     left_stats = [
-        stat("cash.png", "🪙", "初始资金", f"{int(meta.get('startingCash') or 0):,}"),
-        stat("heart.png", "❤", "初始生命", f"{int(meta.get('lives') or 0):,}"),
-        stat("heart.png", "❤", "最大生命", f"{int(meta.get('maxLives') or 0):,}"),
+        stat("cash.png", "🪙", "初始资金", f"{util._num0(meta.get('startingCash')):,}"),
+        stat("heart.png", "❤", "初始生命", f"{util._num0(meta.get('lives')):,}"),
+        stat("heart.png", "❤", "最大生命", f"{util._num0(meta.get('maxLives')):,}"),
     ]
     right_stats = [
-        stat("start-round.png", "▶", "开始回合", str(int(meta.get('startRound') or 0))),
-        stat("end-round.png", "⏭", "结束回合", str(int(meta.get('endRound') or 0))),
+        stat("start-round.png", "▶", "开始回合", str(util._num0(meta.get('startRound')))),
+        stat("end-round.png", "⏭", "结束回合", str(util._num0(meta.get('endRound')))),
         stat("monkey-cap.png", "🐒", "最大猴子", towers_cap),
     ]
     if not is_daily:
@@ -1021,8 +1029,8 @@ def _rules_compat_html(meta: dict, prefix: str, scoring: str, ev: dict | None) -
     """保留旧卡片中的中文可检索信息，不改变新卡片的视觉布局。"""
     lines = [
         "猴子限制",
-        f"初始资金 {int(meta.get('startingCash') or 0):,}",
-        f"初始生命 {int(meta.get('lives') or 0):,}",
+        f"初始资金 {util._num0(meta.get('startingCash')):,}",
+        f"初始生命 {util._num0(meta.get('lives')):,}",
         f"最快用时 {scoring or '—'}",
         "气球强化 " + ("；".join(textfmt.bloon_mod_lines(meta.get("_bloonModifiers"))) or "默认"),
         "禁用项 " + ("、".join(label for key, label in i18n.FLAG_LABELS if meta.get(key)) or "无"),
@@ -1039,7 +1047,7 @@ def _rules_compat_html(meta: dict, prefix: str, scoring: str, ev: dict | None) -
             tags.append(f"×{int(max_num)}")
         blocked = {
             p: n for p in (1, 2, 3)
-            if (n := int(tower.get(f"path{p}NumBlockedTiers") or 0)) != 0
+            if (n := util._num0(tower.get(f"path{p}NumBlockedTiers"))) != 0
         }
         if blocked:
             tags.append(_path_max_txt(blocked))

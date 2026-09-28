@@ -619,23 +619,10 @@ def test_cooldown_is_scoped_and_rejects_repeated_request():
 def test_help_html_lists_all_commands():
     html = btd6.help_html()
     for cmd in (".btd6活动", ".btd6竞速", ".btd6排行", ".btd6每日", ".btd6远征",
-                ".btd6玩家", ".btd6地图"):
+                ".btd6玩家"):
         assert cmd in html
     assert "活动" in html and "排行与档案" in html
     assert "chip" in html and "hdesc" in html
-
-
-def test_handler_maps(monkeypatch):
-    items = [
-        {"name": f"Map{i}", "createdAt": 1787000000000 + i} for i in range(5)
-    ]
-    bodies = {btd6.URL_MAP_FILTER.format("trending"): items}
-    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(bodies))
-    with pytest.raises(FinishedException):
-        asyncio.run(btd6.maps_cmd.handlers[0](_ev(".btd6地图 热门 3")))
-    text = str(btd6.maps_cmd.finished[-1])
-    assert "自制地图 · 热门 Top3" in text
-    assert "Map0" in text and "Map2" in text and "Map3" not in text
 
 
 # ---------------- 图片卡片 ----------------
@@ -868,8 +855,8 @@ def test_odyssey_card_height():
     meta = {"startingHealth": 150, "_availableTowers": [{"tower": "DartMonkey", "max": 1}],
             "_availablePowers": [{"power": "CashDrop", "max": 4}]}
     base = btd6._odyssey_card_height(meta, 1)
-    # 地图越多卡片越高（每张 130px）
-    assert btd6._odyssey_card_height(meta, 3) == base + 2 * 140
+    # 地图越多卡片越高（每张 168px，估高余量由 trim 收尾）
+    assert btd6._odyssey_card_height(meta, 3) == base + 2 * 168
     # 极限模式徽章：当前高度公式不再单独加成（渲染后有 trim 兜底）
     ext = dict(meta, isExtreme=True)
     assert btd6._odyssey_card_height(ext, 1) == base
@@ -913,6 +900,8 @@ def test_odyssey_html_renders_difficulties():
     assert "简单" in html  # 难度标题渲染为「简单 / 标准」
     assert "猴币×100" not in html  # 奖励改为图标 + 数值
     assert "现金掉落" in html and "ody-power-tile" in html
+    # IAP 紫色力量不在 availablePowers 也始终渲染（紫色座、无数量角标）
+    assert "战斗猫" in html and "ody-power-iap" in html
     assert "Odyssey Map 1" in html and "M1" in html  # 地图缩略图
     assert "金钱限制" in html and "≤4,000" in html  # 岛屿金钱限制（leastCashUsed）
     assert "升级限制" in html and "≤15" in html  # 岛屿升级限制（leastTiersUsed）
@@ -1066,26 +1055,6 @@ def test_odyssey_text_includes_island_limits():
     text = btd6.odyssey_text(col)
     assert "Odyssey Map 1（金钱限制≤4,000）" in text
     assert "Odyssey Map 2（升级限制≤15）" in text
-
-
-def test_maps_html_rows_and_escape():
-    html = btd6.maps_html({
-        "label": "最新",
-        "entries": [(1, "Map<A>", "2026-08-25", "", 1234, 56)],
-    })
-    assert "自制地图 · 最新 Top1" in html
-    assert "Map&lt;A&gt;" in html
-    assert "2026-08-25" in html
-    assert "游玩 1,234" in html and "点赞 56" in html
-    assert "ody-map-empty" in html  # 无缩略图占位（游戏风格）
-
-
-def test_maps_html_with_thumbnails():
-    html = btd6.maps_html({
-        "label": "热门",
-        "entries": [(1, "PrettyMap", "2026-08-25", "data:image/jpg;base64,THUMB", 10, 2)],
-    })
-    assert "<img class='ody-map-img'" in html and "THUMB" in html
 
 
 # ---------------- 渲染缓存 / 素材缓存 / 预热 ----------------
@@ -1644,8 +1613,6 @@ def test_text_stale_note_appended_without_crash():
               "entries": [(1, "a", "1:00.000")], "stale_note": note}
     text = btd6.leaderboard_text(lb_col)
     assert note in text and text.endswith(note)
-    maps_col = {"label": "最新", "entries": [(1, "MapA", "2026-08-25")], "stale_note": note}
-    assert note in btd6.maps_text(maps_col)
     p = {"displayName": "ISAB", "rank": 1, "bloonsPopped": {}, "gameplay": {}}
     assert note in btd6.player_text({"p": p, "stale_note": note})
 
@@ -2572,8 +2539,9 @@ def test_flush_retry_requeues_then_gives_up(monkeypatch, tmp_path):
 
 
 def test_flush_give_up_clears_overview_skip(monkeypatch, tmp_path):
-    """回归：纯总览类（race）部分群失败时——重试轮必须重发总览（不能跳过），
-    give-up 后必须清 _overview_already_sent，否则该类后续所有期次被永久静默。"""
+    """回归：纯总览类（race）部分群失败时——M3 按群记账后重试轮跳过已送达的
+    健康群（不再重复收总览），坏群持续重试；give-up 后必须清 _overview_already_sent，
+    否则该类后续所有期次被永久静默。"""
     monkeypatch.setattr(btd6.push, "BTD6_PUSH_STATE_FILE", str(tmp_path / "state.json"))
     monkeypatch.setattr(btd6.push, "_push_groups", lambda: {100, 200})
 
@@ -2607,8 +2575,8 @@ def test_flush_give_up_clears_overview_skip(monkeypatch, tmp_path):
     assert "race" not in btd6.push._pending_batch  # 超限放弃
     assert "race" not in btd6.push._overview_already_sent  # 标记已清，后续期次可正常推
     assert btd6.push._last_pushed().get("race") != "r1"  # 未误标成功
-    # 健康群 100 每轮都收到总览（重复可接受），坏群 200 永远发不出
-    assert sent_groups.count(100) == 4 and 200 not in sent_groups
+    # 健康群 100 首轮收到总览后，重试轮按群记账跳过（不再重复收）；坏群 200 永远发不出
+    assert sent_groups.count(100) == 1 and 200 not in sent_groups
     btd6.push._batch_retries.pop(("race", "r1"), None)
 
 
@@ -2659,3 +2627,134 @@ def test_boss_dual_title_cn_and_hero_no_badge():
     assert "Bloonarius 300" not in html  # 英文原名+数字不再出现
     assert "昆西 · ×1" not in html  # 英雄 max=1 不打角标
     assert "飞镖猴 · ×1" in html  # 非英雄限购（max=1）仍显示 ×1
+
+# ---------------- 2026-09-27 审查修复回归 ----------------
+
+def test_push_kind_catchup_pushes_unpushed_ongoing(monkeypatch, tmp_path):
+    """H1 回归：错过 12 分钟刷新窗口的未推送新活动，后续采样必须补推，
+    不得被 last_pushed 里的旧期 id 短路（旧行为导致整期漏推）。"""
+    monkeypatch.setattr(btd6.push, "BTD6_PUSH_STATE_FILE", str(tmp_path / "state.json"))
+    btd6.push._set_last_pushed("race", "old_event_id")
+
+    now = int(time.time() * 1000)
+    ev = {"id": "new_event_id", "name": "New Race", "type": "race",
+          "start": now - 2 * 3600 * 1000, "end": now + 3 * 86400 * 1000}
+
+    async def fake_fetch(kind, now_ms, real_now):
+        return ev
+
+    async def fake_enqueue(kind, ev_arg, ev_id, label):
+        enqueued.append((kind, ev_id))
+
+    enqueued = []
+    monkeypatch.setattr(btd6.push, "_fetch_push_event", fake_fetch)
+    monkeypatch.setattr(btd6.push, "_push_groups", lambda: {100})
+    monkeypatch.setattr(btd6.push, "get_bot", lambda: object())
+    monkeypatch.setattr(btd6.push, "_enqueue_push", fake_enqueue)
+    asyncio.run(btd6.push._btd6_push_kind("race"))
+    assert enqueued == [("race", "new_event_id")]
+
+
+def test_push_kind_window_no_dup_for_same_id(monkeypatch, tmp_path):
+    """同 id 已推送在窗口外仍被去重（不因 H1 修复引入重推）。"""
+    monkeypatch.setattr(btd6.push, "BTD6_PUSH_STATE_FILE", str(tmp_path / "state.json"))
+    now = int(time.time() * 1000)
+    ev = {"id": "same_id", "name": "R", "start": now - 3600 * 1000,
+          "end": now + 86400 * 1000}
+    btd6.push._set_last_pushed("race", "same_id")
+
+    async def fake_fetch(kind, now_ms, real_now):
+        return ev
+
+    enqueued = []
+    async def fake_enqueue(kind, ev_arg, ev_id, label):
+        enqueued.append(ev_id)
+
+    monkeypatch.setattr(btd6.push, "_fetch_push_event", fake_fetch)
+    monkeypatch.setattr(btd6.push, "_push_groups", lambda: {100})
+    monkeypatch.setattr(btd6.push, "_enqueue_push", fake_enqueue)
+    asyncio.run(btd6.push._btd6_push_kind("race"))
+    assert enqueued == []
+
+
+def test_parse_rows_huge_digit_token():
+    """M9 回归：超长数字 token 触发 int() 位数上限时忽略该参数，不崩。"""
+    assert btd6.parse_rows(["5" * 5000]) == btd6.nkapi.DEFAULT_ROWS
+    assert btd6.parse_rows(["3", "5" * 5000]) == 3
+
+
+def test_collect_daily_meta_not_dict(monkeypatch):
+    """M7 回归：metadata 拉到非 dict 时降级空 meta，不再 AttributeError。"""
+    bodies = {
+        btd6.URL_DAILY: [{"id": "Standard20240101", "name": "Standard 20240101",
+                          "metadata": "https://x.test/meta"}],
+        "https://x.test/meta": ["not", "a", "dict"],
+    }
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", _fake_fetch_factory(bodies))
+    col = asyncio.run(btd6.collect_daily(False, now_ms=1790000000000))
+    assert col.get("meta") == {}
+    assert "map_img" in col
+
+
+def test_shell_css_no_double_brace():
+    """M5 回归：_shell 输出的 CSS 不得包含 {{（四重花括号曾致 13 条规则失效）。"""
+    assert "{{" not in btd6.help_html()
+
+
+def test_leaderboard_boss_kind_routes_to_explorer_layout():
+    """接线：collect 返回 kind=boss 后 Boss 榜走 Explorer 版式（原为死路由）。"""
+    col = {"kind": "boss", "variant": "standard", "head": "h", "status": "s",
+           "entries": [(1, "PlayerA", "1:00.000")], "img": "", "stale_note": ""}
+    html = btd6.leaderboard_html(col)
+    assert "<table class='exlb-table'>" in html and "PlayerA" in html  # Explorer 表格版式
+    html2 = btd6.leaderboard_html({"kind": "race", "head": "h2", "status": "s2",
+                                   "entries": [(1, "a", "1:00")]})
+    assert "<table class='exlb-table'>" not in html2 and "<div class='lb-row'>" in html2  # 非 Boss 保持紧凑布局
+
+
+def test_odyssey_power_dirty_max_no_crash():
+    """L 回归：availablePowers.max 为非数字字符串时不炸卡（含 IAP 紫色力量渲染）。"""
+    meta = {"startingHealth": 150,
+            "_availableTowers": [{"tower": "DartMonkey", "max": 1}],
+            "_availablePowers": [{"power": "CashDrop", "max": "abc"}],
+            "_rewards": []}
+    html = btd6._odyssey_available_html(meta)
+    assert "ody-power-tile" in html
+
+
+def test_prewarm_once_returns_bool(monkeypatch, tmp_path):
+    """L 回归：_prewarm_once 返回是否真执行（供手动预热如实回执）。"""
+    monkeypatch.setattr(btd6.push, "_prewarm_running", True)
+    assert asyncio.run(btd6.push._prewarm_once()) is False
+
+def test_send_push_batch_overview_accounting(monkeypatch, tmp_path):
+    """M3 回归：总览按群记账写入 delivered["__ov__"] 并在重试轮生效——
+    健康群不重复收总览，坏群补收（原修复漏了写回，记账恒为空）。"""
+    card = tmp_path / "ov.png"
+    card.write_bytes(b"PNG")
+    payloads = [("race", "ev1", {"overview": str(card), "announce": "已刷新",
+                                  "label": "竞赛", "details": []})]
+
+    class _Bot:
+        def __init__(self, fail_gids):
+            self.fail_gids = fail_gids
+            self.sent = {}
+
+        async def send_group_msg(self, group_id=None, message=None, **kw):
+            self.sent[group_id] = self.sent.get(group_id, 0) + 1
+            if group_id in self.fail_gids:
+                raise RuntimeError("send fail")
+
+    bot1 = _Bot(fail_gids={2})
+    monkeypatch.setattr(btd6.push, "get_bot", lambda: bot1)
+    delivered: dict = {}
+    result = asyncio.run(btd6.push._send_push_batch(payloads, {1, 2}, delivered))
+    assert result["overview_ok"] is True and result["overview_all"] is False
+    assert delivered["__ov__"] == {1}  # 关键断言：记账已写回
+
+    bot2 = _Bot(fail_gids=set())
+    monkeypatch.setattr(btd6.push, "get_bot", lambda: bot2)
+    result2 = asyncio.run(btd6.push._send_push_batch(payloads, {1, 2}, delivered))
+    assert result2["overview_all"] is True
+    assert bot2.sent.get(1, 0) == 0  # 健康群跳过，不再重收
+    assert bot2.sent.get(2, 0) == 1  # 坏群补收

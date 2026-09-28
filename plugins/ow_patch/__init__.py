@@ -57,7 +57,8 @@ _FETCH_TIMEOUT = 20  # 补丁页抓取超时（秒）
 _IMG_TIMEOUT = 15  # 单张官图下载超时（秒）
 _MAX_IMG_COUNT = 80  # 单个补丁最多内嵌官图数（9月刊实测55张；文件/页数/内存三道闸还在）
 _MAX_IMG_BYTES = 2 * 1024 * 1024  # 单张官图下载上限
-_IMG_DISPLAY_WIDTH = 720  # 内嵌图压到的显示宽度
+_IMG_DISPLAY_WIDTH = 720
+_MAX_IMG_PIXELS = 24_000_000  # 官图解码像素总量上限  # 内嵌图压到的显示宽度
 _RENDER_TIMEOUT = 150  # 单次渲染硬上限（秒）
 _JOB_DEADLINE = 480  # 整轮推送死线（秒）
 _MAX_PDF_PAGES = 25  # PDF 超此页数不拼长图，直接分块
@@ -341,6 +342,11 @@ def _jpeg_bytes(data: bytes) -> bytes | None:
         from PIL import Image
 
         with Image.open(io.BytesIO(data)) as im:
+            # 解压炸弹防护：2MB 压缩体可承载上亿像素，全量解码峰值可打爆 1.6G 内存。
+            # Pillow 默认仅在 89M 像素告警，这里显式收紧到 24M（官图最宽 ~2000px 量级）
+            if im.width * im.height > _MAX_IMG_PIXELS:
+                _logger.warning("ow补丁官图像素超限 %dx%d，放弃解码", im.width, im.height)
+                return None
             im = im.convert("RGB")
             w, h = im.size
             if w > _IMG_DISPLAY_WIDTH:
@@ -693,7 +699,9 @@ async def _render_chunked_images(patch: dict, data_uris: list) -> list[str]:
             pages = await _render_html_pages(html, workdir, f"c{i}")
             if len(pages) > 6:
                 _logger.warning("ow补丁分块 %d 共 %d 页，仅拼前 6 页", i, len(pages))
-            dests.append(await asyncio.to_thread(_stitch_pngs, pages[:6], dest))
+            # 拼合是大像素操作，与长图路径一致纳入 RENDER_SEM（审查 L14）
+            async with RENDER_SEM:
+                dests.append(await asyncio.to_thread(_stitch_pngs, pages[:6], dest))
         except _TooBig:
             _logger.warning("ow补丁分块 %d 仍超限，跳过该块", i)
         except Exception:
@@ -839,6 +847,8 @@ def _select_push_list(fresh: list[dict], seen: dict) -> list[dict]:
 # ---------------- 推送 ----------------
 
 _push_running = False
+_redelivery: dict[str, dict] = {}  # patch key -> {"groups": [...], "paths": [...], "attempts": int}
+_MAX_REDAILY_ATTEMPTS = 3
 
 
 async def _send_images(bot: Bot, groups: list[str], paths: list[str],
@@ -901,6 +911,24 @@ async def _push_patch(bot: Bot, groups: list[str], patch: dict, attempts: int,
     sent = await _send_images(bot, groups, paths, force=force)
     if not sent:
         return False
+    # 部分群失败不再直接记已读了事：记入补投队列，下一小时轮询对未送达群补发，
+    # 连续 _MAX_REDAILY_ATTEMPTS 轮仍失败才放弃（审查 D4：失败群永久漏推）
+    targets = [g for g in groups if force or g not in _RELAY_SKIP]
+    missing = [g for g in targets if g not in sent]
+    if missing and not force:
+        st = _redelivery.get(patch["key"]) or {"attempts": 0}
+        attempts_done = st["attempts"] + 1
+        if attempts_done >= _MAX_REDAILY_ATTEMPTS:
+            _redelivery.pop(patch["key"], None)
+            _logger.error("ow补丁补投 %d 轮仍有群未送达，放弃 groups=%s key=%s",
+                          attempts_done, missing, patch["key"])
+        else:
+            _redelivery[patch["key"]] = {"groups": missing, "paths": list(paths),
+                                         "attempts": attempts_done}
+            _logger.warning("ow补丁部分群未送达 groups=%s，下轮补投（第 %d/%d 次）",
+                            missing, attempts_done, _MAX_REDAILY_ATTEMPTS)
+    else:
+        _redelivery.pop(patch["key"], None)
     if _SEND_SOURCE_LINK:
         # 官网直链：QQ 会展开成官方链接卡片（标题+摘要+头图），算“官方搬运”的一部分
         for gid in sent:
@@ -987,7 +1015,25 @@ async def _poll_once() -> str:
         if not groups:
             for p in fresh:
                 await _mark_seen(p)  # 无订阅群：只记已读，避免攒一堆待推
+            _redelivery.clear()  # 无订阅群：无处补投，直接放弃
             return "empty"
+        # 补投上一轮部分失败的补丁（缓存图仍在，按群补发；不占用本轮新补丁配额）
+        for key, st in list(_redelivery.items()):
+            sent = await _send_images(bot, st["groups"], st["paths"])
+            missing = [g for g in st["groups"] if g not in sent]
+            if not missing:
+                _redelivery.pop(key, None)
+                _logger.info("ow补丁补投完成 key=%s groups=%s", key, sent)
+                continue
+            st["attempts"] += 1
+            st["groups"] = missing
+            if st["attempts"] >= _MAX_REDAILY_ATTEMPTS:
+                _redelivery.pop(key, None)
+                _logger.error("ow补丁补投 %d 轮仍失败，放弃 key=%s groups=%s",
+                              st["attempts"], key, missing)
+            else:
+                _logger.warning("ow补丁补投第 %d 轮后仍未送达 groups=%s",
+                                st["attempts"], missing)
         selected = _select_push_list(fresh, seen)
         selected_keys = {p["key"] for p in selected}
         if len(selected) != len(fresh):
@@ -1117,19 +1163,28 @@ async def _test(event: MessageEvent):
         await sub_test_cmd.finish("当前月份暂无补丁说明")
         return
     patch = sections[-1]
-    try:
-        bot = get_bot()
-    except Exception:
-        await sub_test_cmd.finish("拿不到 Bot 实例，请稍后再试")
+    # 与小时轮询双向互斥（global 声明必须先于任何使用）：并发会写同一缓存图
+    global _push_running
+    if _push_running:
+        await sub_test_cmd.finish("⏳ 补丁轮询推送正在进行，请稍后再试（避免并发写同一缓存图）")
         return
-    # 先回一句，避免 20~60 秒渲染期间用户以为没反应重复刷命令
+    _push_running = True
     try:
-        await sub_test_cmd.send("🛠️ 正在抓取并生成补丁长图，请稍候…")
-    except Exception:
-        pass
-    # 手动测试是明确的人工指令，不受中继群过滤限制；自动推送仍跳过中继群
-    ok = await _push_patch(bot, [str(event.group_id)], patch, attempts=1, force=True)
-    if not ok:
-        await sub_test_cmd.finish("测试推送失败，详情见日志/主人私聊告警")
-        return
-    # 测试只发图不记已读：正式推送不受影响
+        try:
+            bot = get_bot()
+        except Exception:
+            await sub_test_cmd.finish("拿不到 Bot 实例，请稍后再试")
+            return
+        # 先回一句，避免 20~60 秒渲染期间用户以为没反应重复刷命令
+        try:
+            await sub_test_cmd.send("🛠️ 正在抓取并生成补丁长图，请稍候…")
+        except Exception:
+            pass
+        # 手动测试是明确的人工指令，不受中继群过滤限制；自动推送仍跳过中继群
+        ok = await _push_patch(bot, [str(event.group_id)], patch, attempts=1, force=True)
+        if not ok:
+            await sub_test_cmd.finish("测试推送失败，详情见日志/主人私聊告警")
+            return
+        # 测试只发图不记已读：正式推送不受影响
+    finally:
+        _push_running = False

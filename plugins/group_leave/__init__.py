@@ -207,13 +207,16 @@ async def handle(bot: Bot, event: GroupDecreaseNoticeEvent):
         return
     if sub not in ("leave", "kick"):
         return  # 未知 sub_type 不弹出记录，避免误丢逗留时长数据
-    name = await _get_name(bot, uid)
-
+    # 先弹出逗留记录再做网络查询：退群后立刻被拉回时，欢迎 handler 写入的
+    # 新记录不会被本 handler 的旧弹窗误删（审查 C2）
     ts = _pop_join(gid, uid)
     if ts is not None:
         dur = _format_duration(time.time() - ts)
-        await _save_state_async()
 
+    name = await _get_name(bot, uid)
+
+    if ts is not None:
+        await _save_state_async()
     if sub == "leave":
         msg = f"👋 {name}（{uid}）退群了"
         if ts is not None:

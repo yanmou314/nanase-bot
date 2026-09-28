@@ -115,6 +115,8 @@ async def collect_leaderboard(kind: str, variant: str, rows: int) -> dict:
             events = await nkapi.fetch_body(nkapi.URL_EVENTS)
             rush_list = [e for e in events if isinstance(e, dict) and e.get("type") == "bossRush"]
         except Exception:
+            # 取数失败不能伪装成"当前没有活动"而不留痕迹：记日志便于排查
+            _logger.warning("BTD6 Boss Rush 活动列表拉取失败", exc_info=True)
             rush_list = []
         ev = util.pick_active(rush_list, now) or util.fallback_latest(rush_list)
         if not ev:
@@ -141,6 +143,7 @@ async def collect_leaderboard(kind: str, variant: str, rows: int) -> dict:
         for i, e in enumerate(top, 1)
     ]
     return {
+        "kind": kind, "variant": variant,
         "head": head, "status": util.event_status_line(ev, now), "entries": rows_out,
         "img": img, "stale_note": nkapi._stale_warn(*stale_urls),
     }
@@ -253,39 +256,6 @@ async def collect_boss_dual() -> dict:
     }
 
 
-# ---------------- 自制地图 ----------------
-
-MAP_FILTERS = {
-    "最新": "newest", "newest": "newest",
-    "热门": "trending", "trending": "trending",
-    "点赞": "mostLiked", "mostliked": "mostLiked", "mostLiked": "mostLiked",
-}
-FILTER_LABEL = {"newest": "最新", "trending": "热门", "mostLiked": "最多点赞"}
-
-
-async def collect_maps(filt: str, rows: int) -> dict:
-    items = await nkapi.fetch_body(nkapi.URL_MAP_FILTER.format(filt))
-    if not isinstance(items, list):  # 非 list 响应按空数据处理，走既有空态文案
-        items = []
-    top = list(items or [])[:rows]
-
-    async def detail(m: dict) -> tuple[str, int, int]:
-        meta = await _safe(nkapi.fetch_body(m["metadata"]), "map_meta") if m.get("metadata") else None
-        if not meta:
-            return "", 0, 0
-        img = await _safe(assets._asset_data_url(meta.get("mapURL")), "map_img") if meta.get("mapURL") else ""
-        return img or "", int(meta.get("plays") or 0), int(meta.get("upvotes") or 0)
-
-    details = await asyncio.gather(*(detail(m) for m in top)) if top else []
-    entries = [
-        (i, str(m.get("name") or "?").strip(), util.fmt_date(m.get("createdAt")),
-         img, plays, upvotes)
-        for i, (m, (img, plays, upvotes)) in enumerate(zip(top, details, strict=True), 1)
-    ]
-    return {"label": FILTER_LABEL[filt], "entries": entries,
-            "stale_note": nkapi._stale_warn(nkapi.URL_MAP_FILTER.format(filt))}
-
-
 def _daily_prefix(label: str, advanced: bool) -> str:
     """'Standard 2936: Shadow's Challenge' → '每日标准·第2936期'。"""
     issue = str(label or "").split(":")[0].replace("Advanced", "").replace("Standard", "").strip()
@@ -357,6 +327,7 @@ async def collect_daily(advanced: bool, now_ms: int | None = None) -> dict:
         return {"empty": "暂无每日挑战数据"}
     meta_url = ev.get("metadata")
     meta = await nkapi.fetch_body(meta_url) if meta_url else None
+    meta = meta if isinstance(meta, dict) else {}  # metadata 缺失/异常时降级，不炸取图
     return {
         "prefix": _daily_prefix(str(ev.get("name") or ""), advanced),
         "meta": meta, "map_img": await _challenge_map_img(meta, "daily_map"),
@@ -446,6 +417,7 @@ async def collect_daily_coop() -> dict:
         return {"empty": "暂无 Co-op 挑战数据"}
     meta_url = ev.get("metadata")
     meta = await nkapi.fetch_body(meta_url) if meta_url else None
+    meta = meta if isinstance(meta, dict) else {}
     return {
         "prefix": "Co-op 挑战", "meta": meta,
         "map_img": await _challenge_map_img(meta, "coop_map"),
@@ -499,7 +471,8 @@ async def collect_odyssey() -> dict:
         if maps_url:
             mres = await _safe(nkapi.fetch_body(maps_url))
             if isinstance(mres, dict):
-                maps = mres.get("body") or []
+                body = mres.get("body")
+                maps = body if isinstance(body, list) else []
             elif isinstance(mres, list):
                 maps = mres
 
@@ -515,13 +488,13 @@ async def collect_odyssey() -> dict:
                 "img": img or "",
                 "difficulty": str(mp.get("difficulty") or "").strip(),
                 "mode": str(mp.get("mode") or "").strip(),
-                "startingCash": int(mp.get("startingCash") or 0),
-                "startRound": int(mp.get("startRound") or 0),
-                "endRound": int(mp.get("endRound") or 0),
-                "lives": int(mp.get("lives") or 0),
-                "maxLives": int(mp.get("maxLives") or 0),
-                "maxTowers": int(mp.get("maxTowers") or 0),
-                "maxParagons": int(mp.get("maxParagons") or 0),
+                "startingCash": util._num0(mp.get("startingCash")),
+                "startRound": util._num0(mp.get("startRound")),
+                "endRound": util._num0(mp.get("endRound")),
+                "lives": util._num0(mp.get("lives")),
+                "maxLives": util._num0(mp.get("maxLives")),
+                "maxTowers": util._num0(mp.get("maxTowers")),
+                "maxParagons": util._num0(mp.get("maxParagons")),
                 # 岛屿特殊限制：金钱（leastCashUsed）/ 升级（leastTiersUsed）；-1 或缺失表示无限制
                 "leastCashUsed": int(mp["leastCashUsed"]) if isinstance(mp.get("leastCashUsed"), (int, float)) else -1,
                 "leastTiersUsed": int(mp["leastTiersUsed"]) if isinstance(mp.get("leastTiersUsed"), (int, float)) else -1,
@@ -535,7 +508,7 @@ async def collect_odyssey() -> dict:
                 "disableDoubleCash": bool(mp.get("disableDoubleCash")),
             }
 
-        entries = await asyncio.gather(*(map_entry(mp) for mp in maps[:5]))
+        entries = await asyncio.gather(*(map_entry(mp) for mp in maps[:5] if isinstance(mp, dict)))
         return d, {"meta": meta, "maps": entries}
 
     collected = await asyncio.gather(*(collect_diff(d) for d, _label in i18n._ODYSSEY_DIFFS))
@@ -966,6 +939,10 @@ def profile_rank_info(save: dict):
     if xp >= 180000000:
         return (155, None, None)
     table = (site_data().get("rankTable") or {})
+    if not table:
+        # site_data.json 缺失/损坏：不要静默把所有玩家判成满级
+        _logger.warning("rankTable 为空，玩家等级按 xp/5520000 粗估")
+        return (max(1, min(155, xp * 155 // 180_000_000)), None, None)
     prev = 0
     for a in sorted(table):
         if xp < table[a]:
@@ -1059,6 +1036,7 @@ async def collect_leaderboard_page(kind: str, variant: str, page: int) -> dict:
         for i, e in enumerate(entries)
     ]
     return {
+        "kind": kind, "variant": variant,
         "head": head, "status": util.event_status_line(ev, now), "entries": rows_out,
         "img": img, "page": page, "stale_note": nkapi._stale_warn(*stale_urls),
     }

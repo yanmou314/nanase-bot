@@ -292,13 +292,14 @@ def _odyssey_available_html(meta: dict, diffs: dict | None = None) -> str:
             avail[str(p.get("power") or "").strip()] = p.get("max")
     power_html = []
     for raw, default_kind in _POWER_CATALOG:
-        if raw not in avail:
-            # 未列入本期 availablePowers 的力量（IAP 付费类）：API 无上限数据，
-            # 渲染无数量的块会误导（2026-09-27 用户反馈），整体跳过
-            continue
-        if avail[raw] is None or int(avail[raw] or 0) == 0:
-            continue
         kind = _POWER_KIND.get(raw, default_kind)
+        if raw not in avail:
+            # IAP 紫色力量（战斗猫/She Ra/Skeletor/力量之剑）不在本期 availablePowers：
+            # API 不返回其上限数据，仍渲染（紫色座、无数量角标）保持目录完整
+            if kind != "iap":
+                continue
+        elif util._num0(avail[raw]) == 0:
+            continue
         bg = assets._game_asset_data_url(_POWER_BG[kind])
         icon = _odyssey_power_icon(raw)
         name = i18n._odyssey_power_name(raw)
@@ -397,10 +398,10 @@ def _odyssey_diff_box(key: str, meta: dict | None) -> str:
     if not meta:
         body = "<div class='ody-diff-stat'>（数据缺失）</div>"
     else:
-        lives = int(meta.get("startingHealth") or 0)
-        seats = int(meta.get("maxMonkeySeats") or 0)
-        cap = int(meta.get("maxMonkeysOnBoat") or 0)
-        pslots = int(meta.get("maxPowerSlots") or 0)
+        lives = util._num0(meta.get("startingHealth"))
+        seats = util._num0(meta.get("maxMonkeySeats"))
+        cap = util._num0(meta.get("maxMonkeysOnBoat"))
+        pslots = util._num0(meta.get("maxPowerSlots"))
 
         def row(kind: str, text: str, fallback: str) -> str:
             icon = _odyssey_top_icon(kind)
@@ -610,8 +611,8 @@ def _odyssey_map_row_html(mp: dict, col: dict) -> str:
     thumb = (f"<img class='ody-map-img' src='{util._esc(mp['img'])}' alt='{util._esc(mp.get('map') or mp.get('name') or '')}'/>"
              if mp.get("img") else "<div class='ody-map-empty'>暂无地图图像</div>")
     mode = i18n.mode_cn(mp.get("mode")) or "标准"
-    start_round = int(mp.get("startRound") or 0)
-    end_round = int(mp.get("endRound") or 0)
+    start_round = util._num0(mp.get("startRound"))
+    end_round = util._num0(mp.get("endRound"))
     rounds = f"{start_round}/{end_round}" if start_round or end_round else "—"
     plain_rule = _odyssey_map_rule_text(mp)
     coin_img = _odyssey_img(icons.get("coin", ""), "ody-mini-icon", "🪙", "金币")
@@ -626,7 +627,7 @@ def _odyssey_map_row_html(mp: dict, col: dict) -> str:
         f"<div class='ody-map-img-cell'>{thumb}</div>"
         "<div class='ody-map-info'>"
         "<div class='ody-map-meta ody-map-meta-line'>"
-        f"<span class='ody-map-meta-item'>{coin_img}{int(mp.get('startingCash') or 0):,}</span>"
+        f"<span class='ody-map-meta-item'>{coin_img}{util._num0(mp.get('startingCash')):,}</span>"
         f"<span class='ody-map-meta-item'>{play_img}{util._esc(rounds)}</span>"
         f"<span class='ody-map-meta-item'>{mode_ico}{util._esc(mode)}</span>"
         "</div>"
@@ -700,40 +701,72 @@ def _odyssey_layout_stats(meta: dict | None) -> dict:
           if isinstance(t, dict) and t.get("max") != 0]
     heroes = sum(1 for t in at if t.get("isHero"))
     regular = len(at) - heroes
-    # 力量按目录全量渲染（max==0 跳过），与 _available_html 同口径
+    # 力量按目录全量渲染（max==0 跳过；IAP 紫色力量无数据也渲染），与 _available_html 同口径
     avail = {
         str(p.get("power") or "").strip(): p.get("max")
         for p in meta.get("_availablePowers") or []
         if isinstance(p, dict) and str(p.get("power") or "").strip()
     }
-    power_count = sum(1 for raw, _k in _POWER_CATALOG
-                      if raw in avail and avail[raw] is not None and int(avail[raw] or 0) > 0)
-    # 栏宽约 20% / 42% / 38%（800px 卡）：英雄 2/行、猴子 5/行、力量 5/行
+    power_count = 0
+    for raw, default_kind in _POWER_CATALOG:
+        if raw in avail:
+            if util._num0(avail[raw]) > 0:
+                power_count += 1
+        elif _POWER_KIND.get(raw, default_kind) == "iap":
+            power_count += 1
+    # 栏宽约 20% / 42% / 38%（800px 卡）：实测英雄 2/行、猴子 4/行、力量 4/行
     h_rows = max(1, -(-heroes // 2))
-    t_rows = max(1, -(-regular // 5))
-    p_rows = max(1, -(-power_count // 5))
+    t_rows = max(1, -(-regular // 4))
+    p_rows = max(1, -(-power_count // 4))
     av_rows = max(h_rows, t_rows, p_rows)
     return {"heroes": heroes, "regular": regular, "powers": power_count,
             "av_rows": av_rows}
+
+
+def _odyssey_map_row_est(mp: dict) -> int:
+    """单岛行高估算：缩略图 111 + 行内边距约 33 → 基线 144（实测行高）；
+    强化/限制 chips 每行约放 4 个，折行时每多一行加 64。
+    与其估矮裁掉岛（溢出内容流入 PDF 第 2 页被静默丢弃），宁可估高交给 trim 收尾。
+    所有常数取 4 的倍数，保证总高天然对齐 4px（渲染无页底白行）。"""
+    chips = 0
+    if not _odyssey_map_rule_text(mp):
+        chips = (len(common._race_modifier_items(mp.get("_bloonModifiers")))
+                 + len(_odyssey_island_limits(mp)))
+        chips += sum(1 for key, _label in i18n.FLAG_LABELS if mp.get(key))
+        if any(str(x).casefold() != "default" for x in mp.get("roundSets") or []):
+            chips += 1
+    lines = max(1, -(-chips // 4)) if chips else 1
+    return 144 + (lines - 1) * 64
 
 
 def _odyssey_card_height(col: dict | None, maps_count: int = 0) -> int:
     """统一远征卡片高度：按真实内容行数估算，避免大片底部空白。
 
     maps_count 传困难地图张数；兼容旧签名 (meta, maps_count)。
-    渲染后仍可用 trim_odyssey_png 裁掉多余底边（游戏更新增塔/力量时兜底）。
+    高度刻意留出余量（约 120px），渲染后由 trim_odyssey_png 按像素裁掉多余底边，
+    实现「内容自适应」：任何数据形态都不会裁掉最后一个岛。
     """
     # 兼容旧调用：第一参数是 meta dict
     if isinstance(col, dict) and "diffs" not in col and "ev" not in col:
         st = _odyssey_layout_stats(col)
-        return int(28 + 64 + 168 + 36 + st["av_rows"] * 86 + 48
-                   + max(1, maps_count) * 140 + 96 + 28)
+        # 全部常数取 4 的倍数：总高天然对齐 4px，且保持对 maps_count 线性
+        return int(708 + st["av_rows"] * 88 + max(1, maps_count) * 168)
 
     if not isinstance(col, dict) or not col:
         return 320
     diffs = col.get("diffs") or {}
-    hard_maps = (diffs.get("hard") or {}).get("maps") or []
-    n_maps = maps_count if maps_count > 0 else len(hard_maps)
+    # 与 odyssey_html 同口径的主展示地图列表：hard 缺失则 medium → easy
+    primary_maps = []
+    for k in ("hard", "medium", "easy"):
+        maps = (diffs.get(k) or {}).get("maps") or []
+        if maps:
+            primary_maps = maps
+            break
+    if primary_maps:
+        maps_h = sum(_odyssey_map_row_est(mp) for mp in primary_maps)
+    else:
+        n_maps = maps_count if maps_count > 0 else len((diffs.get("hard") or {}).get("maps") or [])
+        maps_h = max(1, n_maps) * 170
     meta = None
     for k in _DIFF_KEY_ORDER:
         m = (diffs.get(k) or {}).get("meta")
@@ -747,11 +780,10 @@ def _odyssey_card_height(col: dict | None, maps_count: int = 0) -> int:
                 meta = m
                 break
     st = _odyssey_layout_stats(meta)
-    # 嵌套难度圈额外高度：三道描边 + easy/medium/hard padding（原先漏算会裁掉第 5 张图）
-    nest_h = 96
-    # 页边距 + 标题 + 三难度框 + 可用区 + 岛屿标题 + 地图行 + 页脚小字
-    return int(28 + 64 + 168 + 36 + st["av_rows"] * 86 + 48
-               + max(1, n_maps) * 140 + nest_h + 28)
+    # 常数部分 = 页边距28 + 标题64 + 三难度框252 + 横幅间距36 + 可用区48
+    #           + 嵌套难度圈112 + 岛屿标题/页脚48 + 自适应余量120 = 708。
+    # 全部取 4 的倍数：120dpi 下 4px=5px 整数缩放，pdftoppm 不会在页底留未上色白行
+    return int(708 + st["av_rows"] * 88 + maps_h)
 
 
 def trim_odyssey_png(path: str, pad: int = 24) -> str:
@@ -768,21 +800,28 @@ def trim_odyssey_png(path: str, pad: int = 24) -> str:
     if h < 40 or w < 40:
         return path
     bg = (228, 208, 188)  # _odyssey_shell tan 页面色
-    last = h - 1
-    step = max(1, h // 200)
-    for y in range(h - 1, -1, -step):
+
+    def _row_empty(y: int) -> bool:
+        """整行均为 tan 或纯白（pdftoppm 亚像素取整可能在页底留未上色白行）视为空。"""
         n = 0
         for x in range(8, w - 8, 6):
             c = im.getpixel((x, y))
+            if c[0] >= 250 and c[1] >= 250 and c[2] >= 250:
+                continue
             if abs(c[0] - bg[0]) + abs(c[1] - bg[1]) + abs(c[2] - bg[2]) > 36:
                 n += 1
                 if n >= 3:
-                    break
-        if n >= 3:
+                    return False
+        return True
+
+    last = h - 1
+    step = max(1, h // 400)  # 步长足够细，页脚 16px 小字不会被跳过
+    for y in range(h - 1, -1, -step):
+        if not _row_empty(y):
             last = y
             break
     new_h = min(h, last + pad)
-    if new_h < h * 0.55:  # 异常过矮时放弃裁剪，避免误伤
+    if new_h < h * 0.45:  # 异常过矮时放弃裁剪，避免误伤
         return path
     if h - new_h < 12:
         return path

@@ -21,7 +21,11 @@ OWNER_ID = 10000  # conftest 固定的 QQBOT_OWNER
 
 
 @pytest.fixture(autouse=True)
-def _isolate_pending():
+def _isolate_pending(monkeypatch, tmp_path):
+    # 隔离生产 pending_requests.json：以 root 跑测试会把该文件改成 root 属主，
+    # 叠加 chmod 的 ACL mask 后 qqbot 进程读不了（2026-09-28 线上告警）
+    monkeypatch.setattr(request_manager, "_PENDING_FILE", str(tmp_path / "pending_requests.json"))
+    monkeypatch.setattr(request_manager, "_pending_loaded", False)
     request_manager._pending.clear()
     request_manager._notify_index.clear()
     yield
