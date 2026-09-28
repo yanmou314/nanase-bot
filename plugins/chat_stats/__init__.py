@@ -22,6 +22,7 @@ from common import (
     get_member_name,
     is_owner,
     load_json_state,
+    run_in_render_executor,
     save_json_state,
 )
 from .db_pg import exec, iter_rows, wait_writes_drained, write as db_write
@@ -194,6 +195,10 @@ async def record(event: GroupMessageEvent):
 # 昵称获取统一走 common.get_member_name（带 TTL 的跨插件共享 LRU 缓存）
 
 
+_wordcloud_stat_sem = asyncio.Semaphore(1)  # 词云取数+分词单飞：流式游标在连接签出状态下
+                                            # 跑 jieba，并发触发会耗尽 5 连接池挤占写路径
+
+
 async def _build_word_image(group_id: int, n: int) -> str | None:
     # 词云窗口：昨天 00:00 至今天 00:00（按上海时区计算，不依赖数据库时区）
     today = _sh_today()
@@ -227,12 +232,13 @@ async def _build_word_image(group_id: int, n: int) -> str | None:
 
     # 流式逐行消费：活跃大群的全天文本不再一次性载入内存；
     # aclosing 保证循环体异常时也能立即释放游标与池连接
-    async with aclosing(iter_rows(sql, args)) as rows:
-        async for (text,) in rows:
-            batch.append(text)
-            if len(batch) >= BATCH_SIZE:
-                await _flush_batch()
-    await _flush_batch()
+    async with _wordcloud_stat_sem:
+        async with aclosing(iter_rows(sql, args)) as rows:
+            async for (text,) in rows:
+                batch.append(text)
+                if len(batch) >= BATCH_SIZE:
+                    await _flush_batch()
+        await _flush_batch()
     if not counter:
         return None
     # 被重复 ≥2 次的短语最多取 3 条，与常规词一起渲染
@@ -241,7 +247,7 @@ async def _build_word_image(group_id: int, n: int) -> str | None:
     from .wordcloud_card import _render as render_cloud
     # PIL 渲染经全局渲染信号量串行化，避免小机器上并发渲染打爆内存
     async with RENDER_SEM:
-        return await asyncio.to_thread(
+        return await run_in_render_executor(
             render_cloud, counter, min(n, len(counter)), normal_message_count, phrases
         )
 
@@ -282,19 +288,24 @@ async def dragon(bot: Bot, event: GroupMessageEvent):
     names = {uid: name for (uid, _), name in zip(rows, name_list, strict=False)}
     data = [(uid, names[uid], cnt) for uid, cnt in rows]
     from .dragon_card import build_card_async
-    path = await build_card_async(data)
+    try:
+        path = await build_card_async(data)
+    except Exception:
+        # 渲染管线异常/看门狗超时：与其他失败路径一致给出反馈，不让用户零响应
+        _logger.exception("龙王卡片渲染失败")
+        await dragon_cmd.finish("⚠️ 龙王卡片生成失败，请稍后再试～")
     await dragon_cmd.finish(MessageSegment.image("file://" + path))
 
 
 # ---------------- 词频推送状态 ----------------
 
-def _words_groups() -> list[str]:
+async def _words_groups() -> list[str]:
     data = load_json_state(WORDS_STATE, _state_lock)
-    # 旧格式 {"group_id": "xxx"} 自动迁移到多群格式
+    # 旧格式 {"group_id": "xxx"} 自动迁移到多群格式（迁移写走线程池）
     if "groups" not in data and data.get("group_id"):
         data["groups"] = [str(data["group_id"])]
         data.pop("group_id", None)
-        save_json_state(WORDS_STATE, data, _state_lock)
+        await asyncio.to_thread(save_json_state, WORDS_STATE, data, _state_lock)
     return [str(g) for g in (data.get("groups") or []) if str(g)]
 
 
@@ -347,7 +358,7 @@ async def words_off(event: GroupMessageEvent):
 async def words_status(event: GroupMessageEvent):
     if not is_owner(event):
         await words_status_cmd.finish("❌ 你没有权限使用此功能")
-    groups = _words_groups()
+    groups = await _words_groups()
     if groups:
         await words_status_cmd.finish(f"📊 每日词云推送已开启于 {len(groups)} 个群（每天凌晨发送）：\n{'、'.join(groups)}")
     await words_status_cmd.finish("📊 每日词云推送：未开启")
@@ -385,7 +396,7 @@ async def daily_words_job():
         return
     if _last_push_date() >= _sh_today().isoformat():
         return  # 今日已推送（如启动补发已执行过），防重复
-    groups = _words_groups()
+    groups = await _words_groups()
     if not groups:
         return
     _words_push_running = True
@@ -404,12 +415,16 @@ async def daily_words_job():
                 path = await _build_word_image(int(gid), 40)
                 if not path:
                     continue
-                await bot.send_group_msg(group_id=int(gid), message=MessageSegment.image("file://" + path))
+                # NapCat 不回包时适配器默认无限等：60s 超时转成普通发送失败，
+                # 完成标志才能在 finally 复位（否则每日推送永久停摆）
+                await asyncio.wait_for(
+                    bot.send_group_msg(group_id=int(gid), message=MessageSegment.image("file://" + path)), 60)
                 sent += 1
             except Exception:
                 _logger.exception("每日词云推送到群 %s 失败", gid)
         if sent:
-            _mark_pushed(_sh_today())  # 有群成功送达才记录，全失败保留补发机会
+            # fsync 写盘移出事件循环（与 cmd_stats 的 _mark_reported_async 同姿势）
+            await asyncio.to_thread(_mark_pushed, _sh_today())
     finally:
         _words_push_running = False
 

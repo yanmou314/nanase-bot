@@ -244,6 +244,14 @@ def _esc(value) -> str:
     return html_mod.escape(str(value), quote=True)
 
 
+def _num0(value) -> int:
+    """API 数值字段安全转 int：None/缺失回退 0，非数字字符串（脏数据）也回退 0 不抛错。"""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _state_of(ev: dict, now_ms: int) -> str:
     start, end = int(ev.get("start") or 0), int(ev.get("end") or 0)
     if now_ms < start:

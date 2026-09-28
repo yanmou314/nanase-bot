@@ -70,7 +70,11 @@ def parse_rows(tokens: list[str]) -> int:
     rows = nkapi.DEFAULT_ROWS
     for t in tokens:
         if t.isdigit():
-            rows = max(1, min(int(t), nkapi.MAX_ROWS))
+            try:
+                rows = max(1, min(int(t), nkapi.MAX_ROWS))
+            except ValueError:
+                # 超长数字串触发 CPython 3.11+ 的 int() 位数上限，忽略该参数
+                continue
     return rows
 
 
@@ -117,7 +121,7 @@ def parse_lb_rank(tokens: list[str]) -> int | None:
 
 # ---------------- 命令处理 ----------------
 
-help_cmd = on_command("btd6", priority=5, block=True)
+help_cmd = on_command("btd6", aliases={"btd"}, priority=5, block=True)
 help_alias_cmd = on_command("btd6帮助", priority=5, block=True)
 events_cmd = on_command("btd6活动", priority=5, block=True)
 ct_cmd = on_command("btd6ct", priority=5, block=True)
@@ -126,7 +130,6 @@ collect_cmd = on_command("btd6收集", priority=5, block=True)
 lb_cmd = on_command("btd6排行", priority=4, block=True)
 rules_cmd = on_command("btd6竞速", priority=5, block=True)
 boss_cmd = on_command("btd6boss", priority=5, block=True)
-maps_cmd = on_command("btd6地图", priority=5, block=True)
 daily_cmd = on_command("btd6每日", priority=5, block=True)
 odyssey_cmd = on_command("btd6远征", priority=5, block=True)
 player_cmd = on_command("btd6玩家", priority=5, block=True)
@@ -140,9 +143,9 @@ prewarm_cmd = on_command("btd6预热", priority=5, block=True)
 @help_cmd.handle()
 async def handle_help(event: MessageEvent):
     await nkapi._enforce_cooldown(help_cmd, event, "help")
-    # 兼容 ".btd6 CT" / "btd6 ct"（含空格）直接查看争夺领土/活动总览
+    # 兼容 ".btd6 CT" / ".btd CT" / "btd6 ct"（含空格）直接查看争夺领土/活动总览
     _plain = event.get_plaintext().strip().lower()
-    _m = re.match(r"^\.?\s*btd6\s+(.*)$", _plain, re.DOTALL)
+    _m = re.match(r"^\.?\s*btd6?\s+(.*)$", _plain, re.DOTALL)
     _arg = _m.group(1).strip() if _m else ""
     if _arg in {"ct", "领土", "争夺", "争夺领土"}:
         try:
@@ -223,9 +226,10 @@ async def handle_ct(event: MessageEvent):
                                    lambda t=tile_id: textfmt.ct_tile_text(col, t))
         return
     valid = "、".join(f"{n}({lbl})" for n, lbl in cards_mod.CT_PRESET_CARDS)
-    await ct_cmd.finish(
+    # arg 是用户原文（防 CQ 码自注入）：整段经 MessageSegment.text 发送
+    await ct_cmd.finish(MessageSegment.text(
         f"⚠️ 未知参数：{arg}\n预设：{valid}\n"
-        f"或格子 id（例：DAA / AAA，共 {len(grid['tiles']) + 6} 个）")
+        f"或格子 id（例：DAA / AAA，共 {len(grid['tiles']) + 6} 个）"))
 
 
 @rush_cmd.handle()
@@ -462,25 +466,6 @@ async def handle_rules(event: MessageEvent):
     await cards_mod._send_card(rules_cmd, "btd6rule", lambda: cards_mod.rules_html(col), lambda: textfmt.rules_text(col))
 
 
-@maps_cmd.handle()
-async def handle_maps(event: MessageEvent):
-    await nkapi._enforce_cooldown(maps_cmd, event, "maps", "heavy")
-    tokens = event.get_plaintext().split()[1:]
-    filt = "newest"
-    for t in tokens:
-        mapped = collect.MAP_FILTERS.get(t.lower())
-        if mapped:
-            filt = mapped
-    rows = min(parse_rows(tokens), 20)
-    try:
-        col = await collect.collect_maps(filt, rows)
-    except Exception:
-        nkapi._release_cooldown(event, "maps")
-        _logger.exception("BTD6 地图列表获取失败")
-        await maps_cmd.finish("⚠️ 获取 BTD6 自制地图失败，请稍后再试")
-    await cards_mod._send_card(maps_cmd, "btd6map", lambda: cards_mod.maps_html(col), lambda: textfmt.maps_text(col))
-
-
 @daily_cmd.handle()
 async def handle_daily(event: MessageEvent):
     await nkapi._enforce_cooldown(daily_cmd, event, "daily")
@@ -573,8 +558,8 @@ async def handle_push_off(event: MessageEvent):
 async def handle_push_status(event: MessageEvent):
     if not is_owner(event):
         await push_status_cmd.finish("❌ 仅机器人主人可查看推送状态")
-    groups = push._push_groups()
-    last = push._last_pushed()
+    # state.json 读取含磁盘 IO 与 threading 锁：放线程池，避免卡事件循环
+    groups, last = await asyncio.to_thread(lambda: (push._push_groups(), push._last_pushed()))
     lines = ["📋 BTD6 推送状态"]
     lines.append(f"推送群数：{len(groups)}" + (f"（{', '.join(str(g) for g in sorted(groups))}）" if groups else "（未配置）"))
     if last:
@@ -649,7 +634,7 @@ async def handle_prewarm(event: MessageEvent):
         await prewarm_cmd.finish("⏳ 预热已在进行中，请稍候")
     await prewarm_cmd.send("⏳ 开始手动预热（活动/榜单/素材）...")
     try:
-        await push._prewarm_once()
+        ran = await push._prewarm_once()
         await cards_mod._render_card("btd6help", cards_mod.help_html)
     except Exception as e:
         from nonebot.exception import FinishedException
@@ -659,4 +644,7 @@ async def handle_prewarm(event: MessageEvent):
         # 异常信息含外部输入内容（防 CQ 码注入）：经 MessageSegment.text 发送
         await prewarm_cmd.finish(MessageSegment.text(f"⚠️ 预热失败: {e}"))
         return
+    if not ran:
+        # 发起瞬间恰逢定时预热先置位：如实告知，不回假成功
+        await prewarm_cmd.finish("⏳ 预热已被定时任务抢先开始，本次未重复执行")
     await prewarm_cmd.finish("✅ 预热完成（活动已归档，热门榜单/帮助已刷新）")

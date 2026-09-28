@@ -19,7 +19,7 @@ from nonebot.adapters.onebot.v11 import (
 )
 from nonebot.rule import to_me
 
-from common import RELAY_GROUP_ID, get_http_client, load_json_state, save_json_state
+from common import RELAY_GROUP_ID, get_http_client, load_json_state, save_json_state, get_member_name
 
 # OW 任务中继群：本插件保持静默，避免吃掉查询机器人消息 / 产生 AI 噪音
 
@@ -158,8 +158,11 @@ def _check_daily_budget() -> None:
         )
     _daily_usage["count"] += 1
     try:
-        asyncio.get_running_loop().create_task(
+        # 持有引用防 GC 中途丢弃（asyncio 文档明确要求）；异常记录不静默
+        global _usage_save_task
+        _usage_save_task = asyncio.get_running_loop().create_task(
             asyncio.to_thread(save_json_state, _USAGE_FILE, dict(_daily_usage)))
+        _usage_save_task.add_done_callback(_log_bg_task_exc)
     except RuntimeError:
         pass  # 无事件循环：放弃本次落盘，下次调用再写
 
@@ -262,13 +265,18 @@ def _sender_name(event: MessageEvent) -> str:
     return "".join(ch for ch in name[:20] if ch not in "「」:：\n\r\t")
 
 
+def _log_bg_task_exc(task: "asyncio.Task") -> None:
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("auto_chat 后台落盘任务失败", exc_info=task.exception())
+
+
 async def _sender_name_by_id(bot: Bot, uid: int, gid: int) -> str:
     """按 QQ 号查显示名（群名片 > 昵称 > QQ 号），供通知类事件使用；查询失败退回 QQ 号。"""
     try:
         if gid:
-            info = await bot.get_group_member_info(group_id=gid, user_id=uid)
-        else:
-            info = await bot.get_stranger_info(user_id=uid)
+            # NapCat 卡死时裸 await 会永久挂住 handler：走 common 封装（10s 超时 + 共享缓存）
+            return (await get_member_name(bot, gid, uid))[:20]
+        info = await bot.get_stranger_info(user_id=uid)
         name = ((info.get("card") or info.get("nickname") or "") if isinstance(info, dict) else "").strip()
         return (name or str(uid))[:20]
     except Exception:
@@ -428,11 +436,11 @@ async def chat(bot: Bot, event: MessageEvent):
         except httpx.TimeoutException as e:
             # 覆盖 connect/read/write/pool 四类超时：代理失效时最常见的是
             # ConnectTimeout（继承 ConnectError + TimeoutException），捕 ReadTimeout 会漏掉
-            logger.warning(f"auto_chat AI 请求超时（{e!r}），{_MAX_ATTEMPTS} 次尝试均失败，本次不回复")
+            logger.warning(f"auto_chat AI 请求超时（{e!r}），本次不回复")
             await _notify_owner_timeout(bot)
             return
         except Exception as e:
-            logger.warning(f"auto_chat AI 生成失败（{e!r}），{_MAX_ATTEMPTS} 次尝试均失败，本次不回复")
+            logger.warning(f"auto_chat AI 生成失败（{e!r}），本次不回复")
             # 走到这里都是持续性故障：4xx（key 失效/欠费）、重试耗尽或预算熔断，
             # 只写日志主人无感知，按 10 分钟限频私发一条告警
             await _notify_owner_ai_failure(bot, e)

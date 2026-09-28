@@ -11,7 +11,7 @@ from . import ctmap, i18n, instagen, util
 def _single_event_text(ev: dict, kind: str, now_ms: int) -> list[str]:
     """单场活动的文本行（三段式总览的统一出口，race/boss/ct/odyssey/rush/social/collectable）。"""
     if kind == "race":
-        total = int(ev.get("totalScores") or 0)
+        total = util._num0(ev.get("totalScores"))
         return [
             f"🏁 每周竞赛「{(ev.get('name') or '').strip()}」",
             f"   {util.event_status_line(ev, now_ms)}",
@@ -25,8 +25,8 @@ def _single_event_text(ev: dict, kind: str, now_ms: int) -> list[str]:
             title += f"（{bt}）"
         std = i18n.SCORING_CN.get(str(ev.get("normalScoringType") or ""), str(ev.get("normalScoringType") or ""))
         elite = i18n.SCORING_CN.get(str(ev.get("eliteScoringType") or ""), str(ev.get("eliteScoringType") or ""))
-        n_std = int(ev.get("totalScores_standard") or 0)
-        n_elite = int(ev.get("totalScores_elite") or 0)
+        n_std = util._num0(ev.get("totalScores_standard"))
+        n_elite = util._num0(ev.get("totalScores_elite"))
         return [
             title,
             f"   {util.event_status_line(ev, now_ms)}",
@@ -54,8 +54,8 @@ def _single_event_text(ev: dict, kind: str, now_ms: int) -> list[str]:
             f"   {util.event_status_line(ev, now_ms)}",
         ]
     if kind == "ct":
-        n_player = int(ev.get("totalScores_player") or 0)
-        n_team = int(ev.get("totalScores_team") or 0)
+        n_player = util._num0(ev.get("totalScores_player"))
+        n_team = util._num0(ev.get("totalScores_team"))
         return [
             "🏰 争夺领土（CT）",
             f"   {util.event_status_line(ev, now_ms)}",
@@ -259,11 +259,11 @@ def _rules_lines(meta: dict, prefix: str) -> list[str]:
     mode = i18n.mode_cn(meta.get("mode"))
     # 地图名经 MAP_CN 译为中文，查不到回退原始内部名（如 ThreeMinesAround）
     map_name = i18n.map_cn(str(meta.get("map") or "").strip()) or "?"
-    cash = int(meta.get("startingCash") or 0)
-    lives = int(meta.get("lives") or 0)
-    rounds = f"{int(meta.get('startRound') or 0)}–{int(meta.get('endRound') or 0)}"
-    max_towers = int(meta.get("maxTowers") or 0)
-    max_paragons = int(meta.get("maxParagons") or 0)
+    cash = util._num0(meta.get("startingCash"))
+    lives = util._num0(meta.get("lives"))
+    rounds = f"{util._num0(meta.get('startRound'))}–{util._num0(meta.get('endRound'))}"
+    max_towers = util._num0(meta.get("maxTowers"))
+    max_paragons = util._num0(meta.get("maxParagons"))
 
     lines = [f"{prefix}「{(meta.get('name') or '').strip()}」规则"]
     lines.append(f"🗺 地图：{map_name}｜难度：{diff}" + (f"｜模式：{mode}" if mode else ""))
@@ -309,18 +309,6 @@ def rules_text(col: dict) -> str:
     return f"{text}\n{note}" if note else text
 
 
-def maps_text(col: dict) -> str:
-    lines = [f"自制地图 · {col['label']} Top{len(col['entries'])}", ""]
-    if not col["entries"]:
-        lines.append("（暂无地图数据）")
-    for i, name, created, *_rest in col["entries"]:
-        lines.append(f"{i}. {name}（{created}）")
-    note = col.get("stale_note") or ""
-    if note:
-        lines.extend(["", note])
-    return "\n".join(lines)
-
-
 def _reward_txt(rewards: list) -> str:
     out = []
     for r in rewards or []:
@@ -342,7 +330,7 @@ def _odyssey_meta_lines(meta: dict | None) -> list[str]:
     powers = meta.get("_availablePowers") or []
     usable_powers = [p.get("power") for p in powers if isinstance(p, dict) and p.get("max")]
     towers = meta.get("_availableTowers") or []
-    lines = [f"初始生命 {int(meta.get('startingHealth') or 0):,}"]
+    lines = [f"初始生命 {util._num0(meta.get('startingHealth')):,}"]
     if meta.get("isExtreme"):
         lines.append("极限模式")
     if towers:
@@ -492,9 +480,9 @@ def collectevent_text(col: dict) -> str:
     if col.get("empty"):
         return col["empty"]
     ev, gen = col["ev"], col["gen"]
-    now = int(col.get("now") or 0)
-    cur = int(col.get("cur") or 0)
-    start, end = int(ev.get("start") or 0), int(ev.get("end") or 0)
+    now = util._num0(col.get("now"))
+    cur = util._num0(col.get("cur"))
+    start, end = util._num0(ev.get("start")), util._num0(ev.get("end"))
     rotations: dict = gen.get("rotations") or {}
     total = len(rotations)
     if now < start:
@@ -531,17 +519,17 @@ def ct_text(col: dict) -> str:
     if col.get("empty"):
         return col["empty"]
     ev = col["ev"]
-    number = int(col.get("number") or 0)
-    now = int(col.get("now") or 0)
+    number = util._num0(col.get("number"))
+    now = util._num0(col.get("now"))
     state = util._STATE_TXT[util._state_of(ev, now)]
     lines = [
         f"🏴 争夺领土 #{number or '?'}（{state}）",
-        f"{util._fmt_range(ev)} · 个人 {int(ev.get('totalScores_player') or 0):,} · 战队 {int(ev.get('totalScores_team') or 0):,}",
+        f"{util._fmt_range(ev)} · 个人 {util._num0(ev.get('totalScores_player')):,} · 战队 {util._num0(ev.get('totalScores_team')):,}",
     ]
     if state == "on":
-        lines[0] += f" 剩余 {util.fmt_remaining(int(ev.get('end') or 0) - now)}"
+        lines[0] += f" 剩余 {util.fmt_remaining(util._num0(ev.get('end')) - now)}"
     elif state == "up":
-        lines[0] += f" {util.fmt_remaining(int(ev.get('start') or 0) - now)}后开始"
+        lines[0] += f" {util.fmt_remaining(util._num0(ev.get('start')) - now)}后开始"
     nk_tiles = col.get("nk_tiles") or []
     ct_tiles = col.get("ct_tiles") or {}
     if nk_tiles:
@@ -576,7 +564,7 @@ _CT_PRESET_CN = {"default": "默认", "gametypes": "游戏类型", "maps": "地�
 def ct_preset_text(col: dict, name: str) -> str:
     """CT 显示预设卡的文本兜底（图片发送失败时）。"""
     ct_tiles = col.get("ct_tiles") or {}
-    number = int(col.get("number") or 0)
+    number = util._num0(col.get("number"))
     label = _CT_PRESET_CN.get(name, name)
     lines = [f"🏴 争夺领土 #{number or '?'} · {label} 预设（Display Presets）"]
     if name == "gametypes":

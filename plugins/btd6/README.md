@@ -16,8 +16,8 @@ nkapi(取数层) ─┼─→ assets(素材) ─→ collect(采集) ─→ textf
 | `nkapi.py` | 取数层：URL 常量、`_validate_url`、`_http_get`、`fetch_body`、`_refresh_url`、缓存/`_stale_*`/`_lb_next_cache`、字节预算、`fetch_leaderboard_paginated`、`REQUEST_LIMIT`、冷却表（`_enforce_cooldown`/`_release_cooldown`）、日志 OAK 脱敏（`_mask_url`） |
 | `i18n.py` | 全部中文语料：BOSS_CN/TOWER_CN/HERO_CN + `_*_CN_FLAT` 归一化查找、`relic_cn`、`_EVENT_NAME_CN`、`_ODYSSEY_DIFFS`、HELP/LB 文案；查表未命中按"类别:名称"去重告警一次（`_warn_unknown`，提醒同步语料表） |
 | `assets.py` | 素材层：CDN 图/本地立绘/UI 图标/site 站点风素材（OAK 档案页 `_site_asset_data_url`）→ data: URL，内存+落盘缓存与字节预算、`_tower_icon`/`_boss_event_asset` 等映射；每日挑战用官方 DailyChallengeBtn 图标（取自 BTD6 API Explorer） |
-| `collect.py` | 采集层：`collect_overview/daily/daily_coop/rules/maps/odyssey/player/player_oak/rush/collectevent/ct/leaderboard(_page)`、`site_data()` 与 `profile_*`（OAK 档案页的网站口径统计）、`_coop_pick`（Co-op 选期：createdAt ≤ 当前取最新）、`_challenge_map_img`、`fetch_leaderboard_page`、`fetch_rank_entry`、`_safe` |
-| `textfmt.py` | 文本渲染：`build_overview`、`_single_event_text`、`format_rules`、排行/地图/远征/玩家/rush/收集活动/CT 文本；`odyssey_text(only=)` 支持只输出部分难度（部分卡片渲染失败时的回退） |
+| `collect.py` | 采集层：`collect_overview/daily/daily_coop/rules/odyssey/player/player_oak/rush/collectevent/ct/leaderboard(_page)`、`site_data()` 与 `profile_*`（OAK 档案页的网站口径统计）、`_coop_pick`（Co-op 选期：createdAt ≤ 当前取最新）、`_challenge_map_img`、`fetch_leaderboard_page`、`fetch_rank_entry`、`_safe` |
+| `textfmt.py` | 文本渲染：`build_overview`、`_single_event_text`、`format_rules`、排行/远征/玩家/rush/收集活动/CT 文本；`odyssey_text(only=)` 支持只输出部分难度（部分卡片渲染失败时的回退） |
 | `cards/` | 渲染层：`common`(外壳 CSS)/`overview`/`leaderboard`/`odyssey`/`rules`/`rush`/`player`/`collectevent`/`ctmap`/`help`；`__init__` 为渲染管线（`_render_card`/`_send_card`/`_finish_multi_cards`，内容哈希缓存）并统一再导出 |
 | `push.py` | 后台任务：history.json 归档、`_prewarm_once` 预热（含每小时榜单/每日/Co-op）、活动刷新精准推送（race/boss/ct/odyssey/daily/coop/rush/social 八类）。采样命中后进入 `_pending_batch` 防抖缓冲（70s），统一 `_flush_push_batch`：先共享渲染一张总览，各类详情全部渲完后再发送（总览只发一次且在详情之前）；社季每小时采样、纯文本推送 |
 | `handlers.py` | 18 个 nonebot matcher/命令 handler 与参数解析（`parse_kind` 等）；规则命令已拆分：`.btd6竞速`（竞赛规则）与 `.btd6boss`（Boss 标准+精英双卡）；`.btd6每日` 一次并发取标准+高级+Coop 三卡；命令参数词表在此 |

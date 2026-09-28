@@ -145,8 +145,14 @@ def parse_tag(arg: str) -> str:
     return tag if "#" in tag else ""
 
 
+from zoneinfo import ZoneInfo
+
+_SH_TZ = ZoneInfo("Asia/Shanghai")
+
+
 def now_str(fmt: str = "%m-%d %H:%M") -> str:
-    return datetime.now().strftime(fmt)
+    # 显式上海时区：通知时间戳不得随服务器 TZ 漂移（与各插件的 ZoneInfo 口径一致）
+    return datetime.now(_SH_TZ).strftime(fmt)
 
 
 def cleanup_cache(cache_dir: str, max_age: int = 3600) -> int:
@@ -191,38 +197,78 @@ RELAY_BOT_QQ = 3889045090
 
 # ---------------- JSON 状态文件读写（统一模式：RLock + tmp + fsync + os.replace） ----------------
 
+# path -> 最近一次读取失败原因（成功读取/缺失后清除）。save 侧可据此拒绝用空数据覆盖。
+_json_load_errors: dict[str, str] = {}
+
+
+def json_load_had_error(path: str) -> bool:
+    """该状态文件最近一次 load_json_state 是否以读取失败告终。"""
+    return path in _json_load_errors
+
+
 def load_json_state(path: str, lock=None) -> dict:
     """读取 JSON 状态文件；缺失/非对象返回 {}；损坏/不可读时先备份留档再返回 {}。"""
     with (lock or _NULL_LOCK):
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
+            _json_load_errors.pop(path, None)
             return data if isinstance(data, dict) else {}
         except FileNotFoundError:
+            _json_load_errors.pop(path, None)
             return {}
         except json.JSONDecodeError:
             _backup_corrupt(path)
             return {}
-        except OSError:
+        except OSError as e:
             # 与 corrupt 备份防护对等：文件存在但读不了（权限/IO 错误）时先留档，
             # 否则后续 save 会把真实状态覆盖为空且无从排查
-            _logger.warning("状态文件读取失败: %s", path, exc_info=True)
-            _backup_unreadable(path)
+            err = f"{type(e).__name__}: {e}"
+            _json_load_errors[path] = err
+            _logger.warning("状态文件读取失败: %s（%s）", path, err, exc_info=True)
+            _backup_unreadable(path, err)
             return {}
 
 
-def _backup_unreadable(path: str) -> None:
+def _stat_owner(path: str) -> str:
+    try:
+        st = os.stat(path)
+        import pwd
+
+        try:
+            user = pwd.getpwuid(st.st_uid).pw_name
+        except KeyError:
+            user = str(st.st_uid)
+        return f"{user}:{st.st_gid} mode={oct(st.st_mode & 0o777)}"
+    except OSError as e:
+        return f"stat失败:{e}"
+
+
+def _backup_unreadable(path: str, err: str = "") -> None:
     """不可读的状态文件在文件仍存在时先留档（.unreadable-<ts>）再放弃。"""
     import shutil
 
     if not os.path.isfile(path):
         return
     backup = f"{path}.unreadable-{int(time.time())}"
+    owner = _stat_owner(path)
     try:
         shutil.copy2(path, backup)
-        _logger.warning("状态文件不可读，已备份为 %s", backup)
-    except OSError:
-        _logger.warning("状态文件不可读且备份失败: %s", path, exc_info=True)
+        _logger.warning("状态文件不可读，已备份为 %s（%s）", backup, owner)
+        return
+    except OSError as e:
+        err = f"{err}; 备份copy2:{type(e).__name__}: {e}"
+    # copy2 会复制元数据；失败时退化为仅拷内容，避免 copystat/ACL 导致整份留档失败
+    try:
+        shutil.copyfile(path, backup)
+        _logger.warning("状态文件不可读，已仅备份内容为 %s（%s）", backup, owner)
+        return
+    except OSError as e:
+        err = f"{err}; 备份copyfile:{type(e).__name__}: {e}"
+    _logger.warning(
+        "状态文件不可读且备份失败: %s（%s）（%s）",
+        path, owner, err or "未知错误", exc_info=True,
+    )
 
 
 def _backup_corrupt(path: str) -> None:
@@ -230,11 +276,40 @@ def _backup_corrupt(path: str) -> None:
     import shutil
 
     backup = f"{path}.corrupt-{int(time.time())}"
+    owner = _stat_owner(path)
     try:
         shutil.copy2(path, backup)
-        _logger.warning("状态文件损坏，已备份为 %s", backup)
+        _logger.warning("状态文件损坏，已备份为 %s（%s）", backup, owner)
+    except OSError as e:
+        try:
+            shutil.copyfile(path, backup)
+            _logger.warning("状态文件损坏，已仅备份内容为 %s（%s）", backup, owner)
+        except OSError as e2:
+            _logger.warning(
+                "状态文件损坏且备份失败: %s（%s）（copy2:%s; copyfile:%s）",
+                path, owner, e, e2, exc_info=True,
+            )
+
+
+def _chmod_keep_acl(path: str, mode: int) -> None:
+    """chmod 后恢复 POSIX ACL mask，避免 named user（setfacl u:qqbot）被收成有效位 ---。"""
+    try:
+        os.chmod(path, mode)
     except OSError:
-        _logger.warning("状态文件损坏且备份失败: %s", path, exc_info=True)
+        return
+    # Linux chmod 会把 ACL mask 设为 group 位：mode=600 → mask ---，
+    # root 写入、qqbot 读取的场景（测试/运维）会 Permission denied。
+    try:
+        import subprocess
+
+        subprocess.run(
+            ["setfacl", "-n", "-m", "m::rw-", path],
+            check=False,
+            capture_output=True,
+            timeout=2,
+        )
+    except Exception:
+        pass
 
 
 def save_json_state(path: str, data: dict, lock=None) -> None:
@@ -261,10 +336,7 @@ def save_json_state(path: str, data: dict, lock=None) -> None:
                 json.dump(data, f, ensure_ascii=False, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
-            try:
-                os.chmod(tmp, mode)
-            except OSError:
-                pass
+            _chmod_keep_acl(tmp, mode)
             os.replace(tmp, path)
         except BaseException:
             if fd is not None:
@@ -383,6 +455,16 @@ def render_html_to_png(html: str, prefix: str, cache_dir: str, max_age: int = 24
 RENDER_TOTAL_TIMEOUT = 180
 
 
+async def run_in_render_executor(fn, /, *args):
+    """在渲染专用线程池执行重 CPU 任务（PIL 画图/jieba 之外的像素操作等）。
+
+    与 render_html_to_png_async 共用 _RENDER_EXECUTOR（max_workers=2，有界）：
+    看门狗超时放弃等待后，残留线程占的是专用池而非全进程默认 executor，
+    不会把所有插件的 to_thread（JSON 落盘等）一起拖死。配合 RENDER_SEM 使用。"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_RENDER_EXECUTOR, fn, *args)
+
+
 async def render_html_to_png_async(html: str, prefix: str, cache_dir: str,
                                     max_age: int = 24 * 60 * 60, dpi: int = 144) -> str:
     """render_html_to_png 的异步封装：经 RENDER_SEM 全局串行化后在专用渲染线程池执行。
@@ -436,7 +518,9 @@ def get_http_client(timeout: float = 30.0):
         _http_clients.pop(timeout, None)
         client = None
     if client is None:
-        new_client = httpx.AsyncClient(timeout=timeout)
+        # 显式不跟随重定向：SSRF 白名单（如 btd6 的 _validate_url）只校验首跳，
+        # 依赖 httpx 默认值不够稳，白名单主机 302 到内网必须直接拒绝
+        new_client = httpx.AsyncClient(timeout=timeout, follow_redirects=False)
         existing = _http_clients.setdefault(timeout, new_client)
         if existing is new_client:
             client = new_client

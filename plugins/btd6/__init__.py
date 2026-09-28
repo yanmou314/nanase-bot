@@ -1,4 +1,4 @@
-"""BTD6（Bloons TD 6）情报站：当前活动总览、活动排行榜、活动规则、自制地图查询。
+"""BTD6（Bloons TD 6）情报站：当前活动总览、活动排行榜、活动规则。
 
 数据源：Ninja Kiwi 官方开放数据 API（https://data.ninjakiwi.com/btd6），无需鉴权。
 查询结果渲染为图片卡片（weasyprint），地图图 / Boss 头像等游戏素材取自官方静态
@@ -86,7 +86,6 @@ from .nkapi import (  # noqa: F401
     URL_DAILY,
     URL_EVENTS,
     URL_HOSTS,
-    URL_MAP_FILTER,
     URL_ODYSSEY,
     URL_RACES,
     URL_RUSH,
@@ -202,8 +201,6 @@ from .assets import (  # noqa: F401
 )
 
 from .collect import (  # noqa: F401
-    FILTER_LABEL,
-    MAP_FILTERS,
     _ODYSSEY_TROPHY,
     _ODYSSEY_TROPHY_DEFAULT,
     _PLAYER_ID_RE,
@@ -223,7 +220,6 @@ from .collect import (  # noqa: F401
     collect_daily_coop,
     collect_leaderboard,
     collect_leaderboard_page,
-    collect_maps,
     collect_odyssey,
     collect_overview,
     collect_player,
@@ -278,7 +274,6 @@ from .textfmt import (  # noqa: F401
     ct_tile_text,
     format_rules,
     leaderboard_text,
-    maps_text,
     odyssey_text,
     overview_text,
     player_text,
@@ -367,7 +362,6 @@ from .cards import (  # noqa: F401
     ct_tile_html,
     help_html,
     leaderboard_html,
-    maps_html,
     odyssey_diff_html,
     odyssey_html,
     overview_html,
@@ -432,7 +426,6 @@ from .handlers import (  # noqa: F401
     help_cmd,
     hist_cmd,
     lb_cmd,
-    maps_cmd,
     odyssey_cmd,
     parse_kind,
     parse_lb_page,
@@ -476,7 +469,6 @@ __all__ = [
     'DIFFICULTY_CN',
     'ELITE_WORDS',
     'ENDED_SHOW',
-    'FILTER_LABEL',
     'FLAG_LABELS',
     'GAME_ASSET_DIR',
     'HELP_GROUPS',
@@ -491,7 +483,6 @@ __all__ = [
     'LB_PAGE_SIZES',
     'LB_USAGE',
     'MAP_CN',
-    'MAP_FILTERS',
     'MAX_ASSET_BYTES',
     'MAX_ASSET_FILES',
     'MAX_ASSET_MEM_BYTES',
@@ -531,7 +522,6 @@ __all__ = [
     'URL_DAILY',
     'URL_EVENTS',
     'URL_HOSTS',
-    'URL_MAP_FILTER',
     'URL_ODYSSEY',
     'URL_RACES',
     'URL_RUSH',
@@ -742,7 +732,6 @@ __all__ = [
     'collect_daily_coop',
     'collect_leaderboard',
     'collect_leaderboard_page',
-    'collect_maps',
     'collect_odyssey',
     'collect_overview',
     'collect_player',
@@ -793,9 +782,6 @@ __all__ = [
     'leaderboard_html',
     'leaderboard_text',
     'map_cn',
-    'maps_cmd',
-    'maps_html',
-    'maps_text',
     'nkapi',
     'odyssey_cmd',
     'odyssey_diff_html',

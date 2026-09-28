@@ -248,15 +248,16 @@ async def _write_loop() -> None:
                 await _write_batch(batch)
             except Exception:
                 _logger.exception("批量写入消息失败，将在稍后重试")
-                # get() 已取出的任务必须先结算，再重新入队；否则 unfinished_tasks 会不断累加，
-                # 数据库短暂异常后 shutdown 时 queue.join() 可能永远无法完成。
-                for _ in batch:
-                    queue.task_done()
+                # 回插必须先于 task_done：put 先 +1、done 再 -1，unfinished 计数在
+                # 重试批次落库前不会归零——旧序（先 done 后 put）有 join() 提前
+                # 误判"已刷完"的窗口，关停路径会静默丢一小批（审查 L3）。
                 # 写循环是队列唯一的消费者：await put() 在队列满时会把自己永久挂死，
                 # 只能用非阻塞回插，插不回去的只能丢弃。
+                requeued = 0
                 for item in batch:
                     try:
                         queue.put_nowait(item)
+                        requeued += 1
                     except asyncio.QueueFull:
                         # cmd 条目 ("cmd", group_id, user_id, ...) 与消息条目
                         # (group_id, user_id, ...) 字段位置不同，按 item[0] 区分取字段
@@ -264,7 +265,8 @@ async def _write_loop() -> None:
                             _log_queue_full(f"重试指令记录被丢弃 (group={item[1]} user={item[2]})")
                         else:
                             _log_queue_full(f"重试消息被丢弃 (group={item[0]} user={item[1]})")
-                await asyncio.sleep(1)
+                for _ in batch:
+                    queue.task_done()
             else:
                 for _ in batch:
                     queue.task_done()

@@ -106,23 +106,23 @@ def _shell(body: str, h: int) -> str:
 /* 数字：Luckiest Guy 仅 400 字重；禁止伪加粗，用黑描边代替（Explorer .black-outline） */
 .lg-num, .exlb-gametime, .exlb-rank, .exlb-rank-medal, .exlb-tiers,
 .exlb-time-abs, .exlb-time-rel, .lb-rank span, .pf-topnum, .pf-medal .n,
-.pf-lvon, .pf-mval, .pf-curnum, .pf-foln {{{{
+.pf-lvon, .pf-mval, .pf-curnum, .pf-foln {{
   font-weight: 400 !important;
   letter-spacing: 0 !important;
   -webkit-text-stroke: 0 !important;
 }}}}
-.pf-topnum {{{{ text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; font-size:22px; }}}}
-.pf-medal .n {{{{ text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; font-size:17px; }}}}
-.pf-lvon {{{{ text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; font-size:32px; }}}}
-.pf-mval {{{{ color:#38e1ff; text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; }}}}
-.pf-curnum {{{{ text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; }}}}
-.pf-foln {{{{ text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; font-size:24px; }}}}
-.exlb-gametime {{{{ color:#fff; text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; font-size:32px; }}}}
-.exlb-rank, .exlb-rank-medal {{{{ text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; }}}}
-.exlb-tiers {{{{ text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; }}}}
-.exlb-time-abs {{{{ text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; }}}}
-.exlb-time-rel {{{{ color:#ffe566; text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; }}}}
-.lb-rank span {{{{ text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; }}}}
+.pf-topnum {{ text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; font-size:22px; }}
+.pf-medal .n {{ text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; font-size:17px; }}
+.pf-lvon {{ text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; font-size:32px; }}
+.pf-mval {{ color:#38e1ff; text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; }}
+.pf-curnum {{ text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; }}
+.pf-foln {{ text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; font-size:24px; }}
+.exlb-gametime {{ color:#fff; text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; font-size:32px; }}
+.exlb-rank, .exlb-rank-medal {{ text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; }}
+.exlb-tiers {{ text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; }}
+.exlb-time-abs {{ text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; }}
+.exlb-time-rel {{ color:#ffe566; text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; }}
+.lb-rank span {{ text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,1px 1px 0 #000,-1px -1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,1px 2px 0 #000,-1px 2px 0 #000; }}
 
 @page {{ size: {CARD_W}px {h}px; margin: 0; background: linear-gradient(180deg, #46c8f1 0%, #129ed0 56%, #087eaf 100%); }}
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
@@ -921,15 +921,15 @@ body {{ width: {RACE_CARD_W}px; height: {h}px; color: #ffffff;
 
 
 def _race_ui_img(fname: str, fallback: str, cls: str) -> str:
-    # 兼容调用方直接传 data: URL（如已解析的素材）；文件名才走本地素材解析
-    url = fname if fname.startswith("data:") else assets._ui_asset_data_url(fname)
+    # 兼容调用方直接传 data: URL（如已解析的素材）；仅放行图片类，文件名走本地素材解析
+    url = fname if fname.startswith("data:image/") else assets._ui_asset_data_url(fname)
     if url:
-        return f"<img class='{cls}' src='{util._esc(url)}'/>"
+        return f"<img class='{util._esc(cls)}' src='{util._esc(url)}'/>"
     fallback_class = {
         "race-stat-icon": "race-stat-fallback",
         "race-rule-icon-img": "race-rule-fallback",
     }.get(cls, f"{cls}-fallback")
-    return f"<span class='{fallback_class}'>{util._esc(fallback)}</span>"
+    return f"<span class='{util._esc(fallback_class)}'>{util._esc(fallback)}</span>"
 
 
 def _race_modifier_items(mods: dict | None) -> list[tuple[str, str, str]]:

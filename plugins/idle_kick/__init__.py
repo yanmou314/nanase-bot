@@ -209,6 +209,13 @@ def select_kick_targets(
         role = str(m.get("role") or "").lower()
         if role in ("owner", "admin"):
             continue
+        # 截止点之后才入群的成员（last_sent_time=0 是常态）不得入选，防误踢新成员
+        try:
+            join_ts = float(m.get("join_time") or 0)
+        except (TypeError, ValueError):
+            join_ts = 0.0
+        if join_ts and join_ts >= cutoff:
+            continue
         if safe_last_sent(m) < cutoff:
             targets.append(m)
     targets.sort(key=safe_last_sent)
@@ -286,7 +293,7 @@ async def _bot_in_group(bot: Bot, gid: int) -> bool:
 
 
 @set_time_cmd.handle()
-async def _set_time(event: MessageEvent, arg=CommandArg()):
+async def _set_time(bot: Bot, event: MessageEvent, arg=CommandArg()):
     try:
         _require_owner(event)
         gid, rest, err = resolve_target_gid(event, arg.extract_plain_text())
@@ -302,7 +309,10 @@ async def _set_time(event: MessageEvent, arg=CommandArg()):
                         "私聊无法区分群号与 YYYYMMDD 日期，请写全：\n"
                         ".清人时间 123456789 20260901\n" + _usage_time()
                     )
-                rest, gid = gid, str(event_gid)
+                # 8 位数字同时像群号与日期：bot 确实在该群 → 按群号处理
+                # （此时需再补日期参数）；否则按日期处理当前群
+                if not await _bot_in_group(bot, int(gid)):
+                    rest, gid = gid, str(event_gid)
     except RuntimeError as e:
         await set_time_cmd.finish(str(e))
         return

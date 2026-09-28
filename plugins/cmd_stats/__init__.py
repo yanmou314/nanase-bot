@@ -14,6 +14,7 @@ from nonebot_plugin_apscheduler import scheduler
 
 from common import (
     RENDER_SEM,
+    run_in_render_executor,
     RENDER_TOTAL_TIMEOUT,
     get_member_name,
     gradient_background,
@@ -311,7 +312,7 @@ async def _run_daily() -> str:
     # weasyprint 渲染经全局渲染信号量串行化；wait_for 看门狗防挂死占住渲染槽
     async with RENDER_SEM:
         return await asyncio.wait_for(
-            asyncio.to_thread(_render, _day_label(day), data), timeout=RENDER_TOTAL_TIMEOUT)
+            run_in_render_executor(_render, _day_label(day), data), timeout=RENDER_TOTAL_TIMEOUT)
 
 
 
@@ -370,7 +371,9 @@ async def _run_and_push_daily_inner() -> None:
     pushed_any = False
     for group_id in groups:
         try:
-            await bot.send_group_msg(group_id=group_id, message=MessageSegment.image("file://" + path))
+            # NapCat 不回包时适配器默认无限等：60s 超时转普通失败，完成标志才能复位
+            await asyncio.wait_for(
+                bot.send_group_msg(group_id=group_id, message=MessageSegment.image("file://" + path)), 60)
             pushed_any = True
         except Exception:
             _logger.exception("指令统计推送到群 %s 失败", group_id)

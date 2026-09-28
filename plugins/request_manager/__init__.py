@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import json
 import os
 import re
 import threading
@@ -20,6 +21,7 @@ from nonebot.params import CommandArg
 from common import (
     OWNER,
     is_owner,
+    json_load_had_error,
     load_json_state,
     now_str,
     save_json_state,
@@ -59,6 +61,7 @@ async def _owner_decision_rule(event: MessageEvent) -> bool:
         reply_id = _reply_message_id(event)
         return bool(reply_id) and _notify_index.get(reply_id) in _pending
     # 私聊：仅当确有待审批时才抢占，避免主人正常说「同意/拒绝」被吞
+    _load_pending_once()
     if _pending:
         return True
     try:
@@ -90,8 +93,35 @@ blk_off_cmd = on_command("解除拉黑", aliases={"进群解除拉黑"}, priorit
 blk_list_cmd = on_command("拉黑列表", aliases={"进群拉黑列表"}, priority=5, block=True)
 
 
+_guard_last_good: dict = {}
+
+
 def _load_guard() -> dict:
-    return load_json_state(GUARD_FILE, _GUARD_LOCK)
+    """读 guard 文件；仅当文件存在但损坏/不可读时回退最近可用副本（fail-closed）。
+
+    load_json_state 对损坏文件会备份+告警后返回 {}——黑名单若就此清空，
+    自动通过将对名单内用户静默放行。文件缺失属正常首启，必须返回 {}。"""
+    with _GUARD_LOCK:
+        data = load_json_state(GUARD_FILE, _GUARD_LOCK)
+        if data:
+            _guard_last_good.clear()
+            _guard_last_good.update(data)
+            return data
+        if not os.path.isfile(GUARD_FILE):
+            # 文件被删除/尚未创建：guard 状态随之消失，副本同步失效
+            _guard_last_good.clear()
+            return data
+        cached = dict(_guard_last_good)
+    try:
+        with open(GUARD_FILE, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        _logger.warning("approve_guard.json 损坏/不可读，沿用最近可用副本（fail-closed）")
+        return cached or data
+    if isinstance(raw, dict):
+        return data  # 合法空配置
+    _logger.warning("approve_guard.json 顶层不是对象，沿用最近可用副本（fail-closed）")
+    return cached or data
 
 
 def _save_guard(data: dict) -> None:
@@ -166,6 +196,38 @@ auto_show_cmd = on_command("自动通过查看", aliases={"自动同意查看"},
 auto_count_cmd = on_command("自动通过数量", aliases={"自动同意数量", "自动通过统计", "自动同意统计"}, priority=5, block=True)
 
 _pending: dict[str, dict] = {}
+_PENDING_FILE = os.path.join(os.path.dirname(__file__), "pending_requests.json")
+_pending_loaded = False
+
+
+def _save_pending() -> None:
+    """待审申请持久化（QQ 侧 flag 48h 内有效，重启后仍可决策）。"""
+    # 读失败后若继续用内存空表覆盖，会把磁盘上真实待审清空且备份也可能已失败
+    if json_load_had_error(_PENDING_FILE):
+        _logger.warning("跳过待审申请落盘：上次读取失败，避免覆盖原状态")
+        return
+    try:
+        save_json_state(_PENDING_FILE, dict(_pending), _save_lock)
+    except Exception:
+        _logger.warning("待审申请持久化失败", exc_info=True)
+
+
+def _load_pending_once() -> None:
+    """进程启动后首次触达时恢复待审申请（超 TTL 的不恢复）。"""
+    global _pending_loaded
+    # 读失败时保持可重试：否则 _pending_loaded=True 会永久放弃恢复并走上方跳过落盘
+    if _pending_loaded and not json_load_had_error(_PENDING_FILE):
+        return
+    _pending_loaded = True
+    data = load_json_state(_PENDING_FILE, _save_lock)
+    now = time.time()
+    restored = 0
+    for k, v in data.items():
+        if isinstance(v, dict) and now - v.get("ts", 0) <= _PENDING_TTL:
+            _pending.setdefault(k, v)
+            restored += 1
+    if restored:
+        _logger.info("已恢复 %d 条待审申请（进程重启前遗留）", restored)
 _notify_index: dict[str, str] = {}  # 机器人发给主人的申请通知 message_id -> pending flag
 # 可重入：_save_keywords 持锁期间会经 _load_config/save_json_state 再次申请同一把锁
 _save_lock = threading.RLock()
@@ -174,6 +236,7 @@ _PENDING_TTL = 48 * 3600  # 与 QQ 侧 flag 有效期一致
 
 def _purge_pending() -> None:
     """清理超过 TTL 的待处理申请与失效的通知索引，防止内存无限增长。"""
+    _load_pending_once()  # 先恢复持久化清单：重启后第一条申请事件不得清空旧待审
     now = time.time()
     for key in list(_pending):
         if now - _pending[key].get("ts", 0) > _PENDING_TTL:
@@ -181,6 +244,7 @@ def _purge_pending() -> None:
     for mid in list(_notify_index):
         if _notify_index[mid] not in _pending:
             _notify_index.pop(mid, None)
+    _save_pending()
 
 
 def _remember_notify(resp, flag: str) -> None:
@@ -464,12 +528,14 @@ async def handle_request(bot: Bot, event):
             "sub_type": event.sub_type, "group_id": event.group_id,
             "user_id": event.user_id, "ts": time.time(),
         }
+        _save_pending()
         msg = (
             f"🔔 有人申请进群\n"
             f"🏘 群号：{event.group_id}\n"
             f"👤 申请人：{event.user_id}（{ts}）\n"
             f"💬 附言：{event.comment or '无'}\n"
-            f"✍️ 私聊回复「同意」或「拒绝」即可处理（多个申请时请引用对应的通知消息）"
+            f"✍️ 请在本通知的私聊会话中回复「同意」或「拒绝」处理"
+            f"（多个申请时引用本条通知；群内回复无效）"
             + blocked_note
         )
     elif isinstance(event, FriendRequestEvent):
@@ -477,6 +543,7 @@ async def handle_request(bot: Bot, event):
             "kind": "friend", "flag": event.flag,
             "user_id": event.user_id, "ts": time.time(),
         }
+        _save_pending()
         msg = (
             f"🔔 好友申请\n"
             f"👤 申请人：{event.user_id}（{ts}）\n"
@@ -489,12 +556,14 @@ async def handle_request(bot: Bot, event):
             "sub_type": event.sub_type, "group_id": event.group_id,
             "user_id": event.user_id, "ts": time.time(),
         }
+        _save_pending()
         msg = (
             f"🔔 有人邀请机器人进群\n"
             f"🏘 群号：{event.group_id}\n"
             f"👤 邀请人：{event.user_id}（{ts}）\n"
             f"💬 附言：{event.comment or '无'}\n"
-            f"✍️ 私聊回复「同意」或「拒绝」即可处理（多个申请时请引用对应的通知消息）"
+            f"✍️ 请在本通知的私聊会话中回复「同意」或「拒绝」处理"
+            f"（多个申请时引用本条通知；群内回复无效）"
         )
     else:
         return
@@ -587,6 +656,7 @@ async def _process_decision(bot: Bot, event: MessageEvent, action: bool) -> None
                 return
 
     val = _pending.pop(target_key, None)
+    _save_pending()
     if val is None:
         # 两例并发「同意」时第二个会取不到目标：第一个已把它处理完
         await _send_decision_notice(bot, "⚠️ 该申请刚已被处理")
@@ -609,9 +679,14 @@ async def _process_decision(bot: Bot, event: MessageEvent, action: bool) -> None
             else:
                 await bot.set_group_add_request(flag=flag, sub_type=sub, approve=False)
                 message = f"❌ 已拒绝进群申请\n🏘 群号：{val.get('group_id')}\n👤 {who}：{val.get('user_id')}"
-        await _send_decision_notice(bot, message)
+        try:
+            await _send_decision_notice(bot, message)
+        except Exception:
+            # 通知失败不代表审批失败：已处理的申请不能被放回待审重复处理
+            _logger.warning("决策结果通知私发失败（申请已处理）", exc_info=True)
     except Exception as e:
-        _pending[target_key] = val  # 处理失败时放回待处理列表，主人可重试
+        _pending[target_key] = val  # 审批 API 本身失败：放回待处理列表，主人可重试
+        _save_pending()
         await _send_decision_notice(bot, f"⚠️ 处理失败：{e}")
 
 
@@ -630,6 +705,10 @@ async def forward_private(bot: Bot, event: MessageEvent):
         return
     uid = str(event.user_id)
     now = time.time()
+    if len(_pm_throttle) > 512:
+        # 有界：批量清理窗口已过期的记录（历史私聊用户不再永久留痕）
+        for k in [k for k, r in _pm_throttle.items() if now - r.get("window", 0) > 60]:
+            _pm_throttle.pop(k, None)
     rec = _pm_throttle.setdefault(uid, {"window": now, "n": 0})
     if now - rec["window"] > 300:
         rec["window"] = now

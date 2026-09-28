@@ -23,6 +23,8 @@ _LOCK = threading.RLock()
 # ---- 任务中继模式：本机不再直调 overstats API ----
 TASK_TIMEOUT = 180
 TASK_MAX_PENDING = 20
+_dispatch_fails: dict[int, int] = {}  # 任务 seq -> 连续派发失败次数
+_DISPATCH_MAX_FAILS = 3
 TASK_CMD_TEXT = {
     "matchrep": "/大神对局",
     "rankhist": "/历史段位",
@@ -190,8 +192,29 @@ async def _dispatch_next() -> None:
             task["task_msg_id"] = (ret or {}).get("message_id") if isinstance(ret, dict) else None
         except Exception:
             _task_current = None
+            # 派发失败计数：连续 3 次放弃该任务。无限重试会让队头卡死整条
+            # 查询管线，且请求方每分钟被骚扰一次（审查 D2）
+            fails = _dispatch_fails.get(task["seq"], 0) + 1
+            if fails >= _DISPATCH_MAX_FAILS:
+                _dispatch_fails.pop(task["seq"], None)
+                logger.error("owstats 任务 #%s 连续 %d 次派发失败，已放弃（可重新查询）",
+                             task["seq"], fails)
+                if str(task.get("group_id")) != str(RELAY_GROUP_ID):
+                    try:
+                        if task.get("group_id"):
+                            await bot.send_group_msg(
+                                group_id=int(task["group_id"]),
+                                message=MessageSegment.at(int(task["user_id"])) + MessageSegment.text(
+                                    "查询派发持续失败，已放弃本次任务，请稍后重新提交～"))
+                        else:
+                            await bot.send_private_msg(user_id=int(task["user_id"]),
+                                                       message=MessageSegment.text("查询派发持续失败，已放弃本次任务，请稍后重新提交～"))
+                    except Exception:
+                        pass
+                return
+            _dispatch_fails[task["seq"]] = fails
             _task_queue.insert(0, task)
-            logger.warning("owstats 任务派发失败", exc_info=True)
+            logger.warning("owstats 任务派发失败（第 %d 次）", fails, exc_info=True)
             if str(task.get("group_id")) == str(RELAY_GROUP_ID):
                 return
             try:
@@ -204,6 +227,7 @@ async def _dispatch_next() -> None:
             except Exception:
                 pass
             return
+        _dispatch_fails.pop(task["seq"], None)
         logger.info(f"owstats 已派发任务 #{task['seq']}（{task['kind']} {task['tag']}）")
 
 
@@ -643,7 +667,11 @@ async def _relay_result(bot: Bot, event: MessageEvent, matcher: Matcher):
         quoted_frozen = bool(reply_id) and any(
             str(reply_id) == str(ft.get("task_msg_id") or "") for ft in _frozen_tasks
         )
-        if not quoted_current and (quoted_frozen or not reply_id):
+        if not quoted_current and (
+            quoted_frozen or (not reply_id and len(_frozen_tasks) == 1)
+        ):
+            # 无引用时仅在唯一冻结任务的场景猜归属：多个冻结任务时无法区分
+            # 图片属于谁，宁可不交付（用户超时后可重查）也不把 B 的结果发给 A（审查 D1）
             segs = _strip_self_at(event.message, self_id)
             if segs and await _deliver_frozen_image(bot, segs):
                 return

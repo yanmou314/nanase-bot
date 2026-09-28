@@ -49,3 +49,7 @@ plugins/**/maintenance.json
 *.before-*
 plugins/btd6/assets/ui_backup_*/
 plugins/**/usage.json
+
+# 待审申请状态（含 QQ 号）与不可读备份
+plugins/**/pending_requests.json
+*.unreadable-*

@@ -23,7 +23,6 @@ API_ROOT = "https://data.ninjakiwi.com"
 URL_RACES = f"{API_ROOT}/btd6/races"
 URL_BOSSES = f"{API_ROOT}/btd6/bosses"
 URL_CT = f"{API_ROOT}/btd6/ct"
-URL_MAP_FILTER = API_ROOT + "/btd6/maps/filter/{}"
 URL_DAILY = f"{API_ROOT}/btd6/challenges/filter/daily"
 URL_ODYSSEY = f"{API_ROOT}/btd6/odyssey"
 URL_EVENTS = f"{API_ROOT}/btd6/events"
@@ -57,6 +56,7 @@ CACHE_TTL = util.BUCKET_PERIOD_MIN * 60     # 数据缓存与桶周期对齐，�
 
 
 MAX_JSON_BYTES = 8_000_000
+MAX_STALE_BYTES = 32_000_000   # _stale 旁路字节预算：TTL 过期条目滞留 stale 也要占账（审查 A#4）
 MAX_STALE_ITEMS = 256
 MAX_JSON_MEM_BYTES = 32_000_000   # JSON body 内存字节预算：按 _cache 键求和，超限从 _cache 最旧淘汰（连带 _stale/旁路字典）
 
@@ -133,6 +133,7 @@ _cache: OrderedDict[str, tuple[float, object]] = OrderedDict()
 _stale: OrderedDict[str, object] = OrderedDict()  # 过期旧数据：网络抖动时先返回旧值再后台刷新
 _stale_at: dict[str, float] = {}      # url → 最近一次成功写入缓存的时间（monotonic 秒），用于 _stale_age
 _cache_sizes: dict[str, int] = {}     # url → body 近似字节数（字节预算只按 _cache 键求和，见 _cache_put）
+_stale_sizes: dict[str, int] = {}     # url → body 近似字节数（_stale 旁路自身的字节预算，见 _cache_put）
 _lb_next_cache: dict[str, str | None] = {}  # url → 排行榜信封的 next 链接（随信封解析缓存，避免为读 next 重复请求同一 URL）
 _stale_served: set[str] = set()       # 本次请求实际以 stale 旧数据响应的 url（用于过期提示文案）
 _refreshing: set[str] = set()
@@ -158,6 +159,8 @@ def _evict(url: str, *, drop_cache: bool = False, drop_stale: bool = False) -> N
     if drop_cache:
         _cache.pop(url, None)
         _cache_sizes.pop(url, None)
+    if drop_stale:
+        _stale_sizes.pop(url, None)
     if drop_stale:
         _stale.pop(url, None)
         _stale_at.pop(url, None)
@@ -203,6 +206,7 @@ def _cache_put(url: str, body, size: int | None = None) -> None:
         _stale.move_to_end(url)
         _stale_at[url] = time.monotonic()
         _cache_sizes[url] = size
+        _stale_sizes[url] = size
         _stale_served.discard(url)  # 拿到新数据后不再提示过期
         # 条数驱逐（_cache）：预算只按 _cache 计，弹出即清 _cache_sizes；
         # 条目若仍在 _stale 中，旁路字典保留（SWR 仍可服务旧数据）
@@ -221,6 +225,13 @@ def _cache_put(url: str, body, size: int | None = None) -> None:
             oldest, _ = _cache.popitem(last=False)
             total -= _cache_sizes.get(oldest, 0)
             _evict(oldest, drop_cache=True, drop_stale=True)
+        # _stale 自身字节预算：TTL 过期/条数驱逐滞留的旧数据同样要占账，
+        # 否则 256 条 × 单条最大 8MB 可达 2GB（审查 A#4）
+        stale_total = sum(_stale_sizes.get(u, 0) for u in _stale)
+        while stale_total > MAX_STALE_BYTES and _stale:
+            oldest, _ = _stale.popitem(last=False)
+            stale_total -= _stale_sizes.get(oldest, 0)
+            _evict(oldest, drop_stale=True)
 
 
 async def _cache_put_async(url: str, body, *, size: int | None = None) -> None:
@@ -419,7 +430,12 @@ async def fetch_leaderboard_paginated(start_url: str, rows: int, touched: set[st
     entries: list = []
     url: str | None = start_url
     seen: set[str] = set()
-    while url and len(entries) < rows and url not in seen:
+    # 页数硬上限（防御纵深）：正常由调用方 rows clamp，这里保证单次调用
+    # 最多也只请求 LB_MAX_PAGE 页
+    hard_pages = max(LB_MAX_PAGE, -(-min(rows, 10000) // 25))
+    pages = 0
+    while url and len(entries) < rows and url not in seen and pages < hard_pages:
+        pages += 1
         seen.add(url)
         if touched is not None:
             touched.add(url)
