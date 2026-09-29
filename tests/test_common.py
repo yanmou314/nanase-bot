@@ -179,16 +179,16 @@ def test_get_http_client_replaces_closed(monkeypatch):
     monkeypatch.setattr(common, "_orphan_clients", [])
 
     c1 = common.get_http_client(7.0)
-    assert c1 is common._http_clients[7.0]
+    assert c1 is common._http_clients[(7.0, None)]
 
     # 模拟外部 close：客户端仍挂在池里但 is_closed
     class _Closed:
         is_closed = True
 
-    common._http_clients[7.0] = _Closed()
+    common._http_clients[(7.0, None)] = _Closed()
     c2 = common.get_http_client(7.0)
     assert c2 is not None
-    assert c2 is common._http_clients[7.0]
+    assert c2 is common._http_clients[(7.0, None)]
     assert not getattr(c2, "is_closed", True)
     # 替换路径不应把新 client 丢进 orphan
     assert c2 not in common._orphan_clients
