@@ -29,9 +29,26 @@ WORK_START = time(8, 0)  # 上班时间（放假/周末时倒计时到此时间�
 PUSH_TIME = time(17, 0)  # 每日推送时刻（与 daily_holiday_countdown_job 的 cron 保持一致）
 
 # 放假区间表：(名称, 放假首日, 放假末日)。
-# 2026 为国务院办公厅官方安排；2027-2030 为按近年惯例推算的基线
+# 2024-2026 为国务院办公厅官方安排；2027-2030 为按近年惯例推算的基线
 # （春节=除夕至初七、劳动节 5 天、国庆 7 天、其余 3 天连休），待官方通知发布后更新。
 HOLIDAYS: dict[int, tuple[tuple[str, date, date], ...]] = {
+    2024: (
+        ("元旦", date(2024, 1, 1), date(2024, 1, 1)),
+        ("春节", date(2024, 2, 10), date(2024, 2, 17)),
+        ("清明节", date(2024, 4, 4), date(2024, 4, 6)),
+        ("劳动节", date(2024, 5, 1), date(2024, 5, 5)),
+        ("端午节", date(2024, 6, 8), date(2024, 6, 10)),
+        ("中秋节", date(2024, 9, 15), date(2024, 9, 17)),
+        ("国庆节", date(2024, 10, 1), date(2024, 10, 7)),
+    ),
+    2025: (
+        ("元旦", date(2025, 1, 1), date(2025, 1, 1)),
+        ("春节", date(2025, 1, 28), date(2025, 2, 4)),
+        ("清明节", date(2025, 4, 4), date(2025, 4, 6)),
+        ("劳动节", date(2025, 5, 1), date(2025, 5, 5)),
+        ("端午节", date(2025, 5, 31), date(2025, 6, 2)),
+        ("国庆节·中秋", date(2025, 10, 1), date(2025, 10, 8)),
+    ),
     2026: (
         ("元旦", date(2026, 1, 1), date(2026, 1, 3)),
         ("春节", date(2026, 2, 15), date(2026, 2, 23)),
@@ -78,8 +95,24 @@ HOLIDAYS: dict[int, tuple[tuple[str, date, date], ...]] = {
     ),
 }
 
-# 调休上班的周末（官方通知中标注“上班”的周六/周日），仅 2026 有官方数据
+# 调休上班的周末（官方通知中标注“上班”的周六/周日）
 WORKDAY_OVERRIDES: dict[int, tuple[date, ...]] = {
+    2024: (
+        date(2024, 2, 4),   # 春节调休
+        date(2024, 2, 18),  # 春节调休
+        date(2024, 4, 28),  # 劳动节调休
+        date(2024, 5, 11),  # 劳动节调休
+        date(2024, 9, 14),  # 中秋调休
+        date(2024, 9, 29),  # 国庆调休
+        date(2024, 10, 12),  # 国庆调休
+    ),
+    2025: (
+        date(2025, 1, 26),  # 春节调休
+        date(2025, 2, 8),   # 春节调休
+        date(2025, 4, 27),  # 劳动节调休
+        date(2025, 9, 28),  # 国庆·中秋调休
+        date(2025, 10, 11),  # 国庆·中秋调休
+    ),
     2026: (
         date(2026, 1, 4),   # 元旦调休
         date(2026, 2, 14),  # 春节调休
@@ -199,16 +232,29 @@ def _is_rest_saturday(day: date) -> bool:
     return day not in WORKDAY_OVERRIDES.get(day.year, ())
 
 
+def _in_holiday(day: date) -> bool:
+    return any(start <= day <= end for _, start, end in _holidays(day.year))
+
+
+def _is_weekend_saturday(day: date) -> bool:
+    """周六能否作为“下一个周末”的起点：真正休息且不在法定假期内。
+
+    落在假期内的周六由节假日面板播报，周末面板若继续指向它，
+    会出现“日期标着假期中的周六、倒计时却数到几天前最后工作日下班”的错位
+    （如 2026 国庆：10-03 周六在假期内，起算点变成 9-30 周三 17:30）。
+    """
+    return _is_rest_saturday(day) and not _in_holiday(day)
+
+
 def _next_weekend(now: datetime) -> tuple[date, date, datetime]:
     weekend_day = now.date() + timedelta(days=(5 - now.weekday()) % 7)
-    # 调休上班的周六不是休息日，顺延到下一周，否则会把“周五下班”错标成周末开始
-    while not _is_rest_saturday(weekend_day):
+    while not _is_weekend_saturday(weekend_day):
         weekend_day += timedelta(days=7)
     start_day = _last_workday_before(weekend_day)
     target = _offwork_on(start_day)
     if target <= now:
         weekend_day += timedelta(days=7)
-        while not _is_rest_saturday(weekend_day):
+        while not _is_weekend_saturday(weekend_day):
             weekend_day += timedelta(days=7)
         start_day = _last_workday_before(weekend_day)
         target = _offwork_on(start_day)

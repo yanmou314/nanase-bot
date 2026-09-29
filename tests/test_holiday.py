@@ -103,6 +103,54 @@ def test_format_date_weekday_label():
     assert "周日" == holiday._format_date(date(2026, 8, 16)).split("（")[1].rstrip("）")
 
 
+# ---------------- 周末倒计时 ----------------
+
+
+def test_next_weekend_normal_week():
+    # 周二 → 本周六；起算点为周五下班
+    weekend_day, start_day, target = holiday._next_weekend(_dt(2026, 8, 11))
+    assert weekend_day == date(2026, 8, 15)
+    assert start_day == date(2026, 8, 14)
+    assert target.date() == date(2026, 8, 14)
+
+
+def test_next_weekend_skips_holiday_embedded_saturday():
+    # 2026 国庆 10-01~10-07：假期前的周二(9-29)，本周六 10-03 落在假期内，
+    # 周末面板应跳到假期后第一个普通周末 10-17，而不是显示日期与倒计时错位的 10-03
+    weekend_day, start_day, target = holiday._next_weekend(_dt(2026, 9, 29))
+    assert weekend_day == date(2026, 10, 17)
+    assert start_day == date(2026, 10, 16)
+    assert target.date() == date(2026, 10, 16)
+
+
+def test_next_weekend_during_holiday_points_after_holiday():
+    # 假期中(10-03 周六)：10-10 为调休上班周六 → 下一个普通周末是 10-17
+    weekend_day, start_day, _ = holiday._next_weekend(_dt(2026, 10, 3, 12))
+    assert weekend_day == date(2026, 10, 17)
+    assert start_day == date(2026, 10, 16)
+
+
+def test_next_weekend_after_friday_offwork_moves_to_next_week():
+    # 周五下班后本周末已开始 → 指向下周六
+    weekend_day, _, _ = holiday._next_weekend(_dt(2026, 8, 14, 18))
+    assert weekend_day == date(2026, 8, 22)
+
+
+def test_next_weekend_skips_tiaoxiu_saturday():
+    # 10-10 周六调休上班 → 该周周末面板指向 10-17
+    weekend_day, start_day, _ = holiday._next_weekend(_dt(2026, 10, 8))
+    assert weekend_day == date(2026, 10, 17)
+    assert start_day == date(2026, 10, 16)
+
+
+def test_weekend_countdown_date_matches_target_gap():
+    # 回归：周末面板的日期与倒计时目标最多差一天（周五下班 → 周六），
+    # 不得再出现“日期差 3 天、还剩 1 天”的错位
+    for day in (date(2026, 9, 28), date(2026, 9, 29), date(2026, 9, 30), date(2026, 10, 3)):
+        weekend_day, start_day, _ = holiday._next_weekend(_dt(day.year, day.month, day.day))
+        assert (weekend_day - start_day).days == 1, f"{day}: {start_day} -> {weekend_day}"
+
+
 # ---------------- 部分失败定向补发（T15） ----------------
 
 
