@@ -92,6 +92,15 @@ blk_on_cmd = on_command("进群拉黑", priority=5, block=True)
 blk_off_cmd = on_command("解除拉黑", aliases={"进群解除拉黑"}, priority=5, block=True)
 blk_list_cmd = on_command("拉黑列表", aliases={"进群拉黑列表"}, priority=5, block=True)
 
+rej_add_cmd = on_command("自动拒绝", aliases={"自动拒绝关键字", "关键字拒绝", "拒绝关键字"}, priority=5, block=True)
+rej_del_cmd = on_command("自动拒绝删除", aliases={"删除拒绝关键字", "拒绝关键字删除"}, priority=5, block=True)
+rej_off_cmd = on_command("自动拒绝关闭", aliases={"拒绝关键字关闭"}, priority=5, block=True)
+rej_show_cmd = on_command("自动拒绝查看", aliases={"自动拒绝列表", "拒绝关键字列表", "拒绝关键字查看"}, priority=5, block=True)
+rej_count_cmd = on_command("自动拒绝数量", aliases={"自动拒绝统计", "拒绝关键字数量"}, priority=5, block=True)
+rej_empty_on_cmd = on_command("自动拒绝空附言开启", aliases={"自动拒绝空附言", "拒绝空附言"}, priority=5, block=True)
+rej_empty_off_cmd = on_command("自动拒绝空附言关闭", aliases={"拒绝空附言关闭"}, priority=5, block=True)
+rej_empty_status_cmd = on_command("自动拒绝空附言状态", aliases={"拒绝空附言状态", "自动拒绝空附言查看"}, priority=5, block=True)
+
 
 _guard_last_good: dict = {}
 
@@ -189,6 +198,116 @@ async def _guard_unblacklist(nums: list[str]) -> list[str]:
             _save_guard(data)
         return removed
     return await asyncio.to_thread(_rmw)
+
+
+# ---------------- 自动拒绝关键字（按群配置；附言/验证消息命中即自动拒绝） ----------------
+# 与 .自动通过 同一套「群内 / 私聊+群号」用法；"*" 为全局（所有群 + 好友申请）。
+REJECT_FILE = os.path.join(os.path.dirname(__file__), "auto_reject.json")
+_GLOBAL_REJECT_KEY = "*"
+_REJECT_EMPTY_KEY = "__reject_empty__"  # 启用「空附言自动拒绝」的目标列表（群号 / *）
+_REJECT_RESERVED = {"关闭", "查看", "数量", "统计", "帮助", "删除"}
+
+
+def _load_reject_config() -> dict:
+    return load_json_state(REJECT_FILE, _save_lock)
+
+
+def _load_reject_keywords(group_id: int | str | None) -> list[str]:
+    """取拒绝关键字：指定群的 + 全局（*）；group_id=None 表示只取全局。"""
+    data = _load_reject_config()
+    keys = [_GLOBAL_REJECT_KEY] if group_id is None else [str(group_id), _GLOBAL_REJECT_KEY]
+    out: list[str] = []
+    seen: set[str] = set()
+    for key in keys:
+        for k in (data.get(key) or []):
+            if isinstance(k, str) and k and k not in seen:
+                seen.add(k)
+                out.append(k)
+    return out
+
+
+def _reject_empty_enabled(group_id: int | str | None) -> bool:
+    """该目标是否启用「附言为空则自动拒绝」；群号请求也会看全局（*）。"""
+    data = _load_reject_config()
+    flags = data.get(_REJECT_EMPTY_KEY)
+    if not isinstance(flags, list):
+        return False
+    flags = [str(x) for x in flags]
+    if _GLOBAL_REJECT_KEY in flags:
+        return True
+    if group_id is None:
+        return False
+    return str(group_id) in flags
+
+
+async def _set_reject_empty(group_id: int | str, enabled: bool) -> None:
+    def _rmw() -> None:
+        with _save_lock:
+            data = _load_reject_config()
+            flags = [str(x) for x in (data.get(_REJECT_EMPTY_KEY) or []) if x]
+            key = str(group_id)
+            if enabled and key not in flags:
+                flags.append(key)
+            elif not enabled and key in flags:
+                flags = [x for x in flags if x != key]
+            data[_REJECT_EMPTY_KEY] = flags
+            save_json_state(REJECT_FILE, data, _save_lock)
+    await asyncio.to_thread(_rmw)
+
+
+def _match_reject_keyword(group_id: int | None, comment: str) -> list[str]:
+    """返回命中的拒绝原因关键字；空附言且已启用时空附言规则也计入。"""
+    text = (comment or "").strip()
+    if not text:
+        return ["（空附言）"] if _reject_empty_enabled(group_id) else []
+    kws = _load_reject_keywords(group_id)
+    if not kws:
+        return []
+    comment_lower = text.lower()
+    return [k for k in kws if k.lower() in comment_lower]
+
+
+async def _save_reject_keywords(group_id: int | str, words: list[str], merge: bool = False) -> list[str]:
+    def _rmw() -> list[str]:
+        with _save_lock:
+            data = _load_reject_config()
+            keywords = [k for k in words if k]
+            if merge:
+                existing = [k for k in (data.get(str(group_id)) or []) if k]
+                keywords = list(dict.fromkeys([*existing, *keywords]))
+            else:
+                keywords = list(dict.fromkeys(keywords))
+            data[str(group_id)] = keywords
+            save_json_state(REJECT_FILE, data, _save_lock)
+            return keywords
+    return await asyncio.to_thread(_rmw)
+
+
+async def _del_reject_keywords(group_id: int | str, words: list[str]) -> list[str]:
+    def _rmw() -> list[str]:
+        with _save_lock:
+            data = _load_reject_config()
+            existing = [k for k in (data.get(str(group_id)) or []) if k]
+            removed = [w for w in words if w in existing]
+            data[str(group_id)] = [k for k in existing if k not in words]
+            save_json_state(REJECT_FILE, data, _save_lock)
+            return removed
+    return await asyncio.to_thread(_rmw)
+
+
+def _parse_reject_target(text: str) -> tuple[int | str | None, str]:
+    """解析「[群号|*] 剩余参数」；无前缀返回 (None, 原文)。"""
+    parts = text.split(None, 1)
+    if not parts:
+        return None, ""
+    head = parts[0]
+    rest = parts[1] if len(parts) > 1 else ""
+    if head == "*":
+        return _GLOBAL_REJECT_KEY, rest
+    if head.isdigit():
+        return int(head), rest
+    return None, text
+
 
 auto_on_cmd = on_command("自动通过", aliases={"自动同意"}, priority=5, block=True)
 auto_off_cmd = on_command("自动通过关闭", aliases={"自动同意关闭"}, priority=5, block=True)
@@ -288,6 +407,56 @@ async def _save_keywords(group_id: int, kw: list[str], merge: bool = False) -> l
             save_json_state(CONFIG_FILE, data, _save_lock)
             return keywords
     return await asyncio.to_thread(_rmw)
+
+
+async def _auto_reject(bot: Bot, event, comment: str) -> bool:
+    """附言/验证消息命中拒绝关键字则自动拒绝；返回 True 表示已处理（勿再走自动通过/人工）。"""
+    is_group = isinstance(event, GroupRequestEvent) and event.sub_type in ("add", "apply")
+    is_friend = isinstance(event, FriendRequestEvent)
+    if not (is_group or is_friend):
+        # 邀请机器人进群等场景不按附言自动拒绝，仍走人工
+        return False
+    gid = getattr(event, "group_id", None) if is_group else None
+    hit = _match_reject_keyword(gid, comment or "")
+    if not hit:
+        return False
+    try:
+        if is_friend:
+            await bot.set_friend_add_request(flag=event.flag, approve=False)
+        else:
+            reason = (
+                "申请未填写验证信息" if hit == ["（空附言）"]
+                else "申请附言包含违规关键字"
+            )
+            await bot.set_group_add_request(
+                flag=event.flag, sub_type=event.sub_type, approve=False,
+                reason=reason,
+            )
+    except Exception as e:
+        _logger.warning("拒绝关键字命中但自动拒绝失败", exc_info=True)
+        try:
+            await bot.send_private_msg(
+                user_id=int(OWNER),
+                message=MessageSegment.text(f"⚠️ 拒绝关键字命中但自动拒绝失败：{e}"),
+            )
+        except Exception:
+            pass
+        return False
+    kind = "好友申请" if is_friend else "进群申请"
+    try:
+        await bot.send_private_msg(
+            user_id=int(OWNER),
+            message=MessageSegment.text(
+                f"⛔ 自动拒绝{kind}（命中拒绝关键字）\n"
+                f"🏘 群号：{getattr(event, 'group_id', '—')}\n"
+                f"👤 申请人：{event.user_id}（{now_str()}）\n"
+                f"💬 附言：{comment or '无'}\n"
+                f"🔑 命中关键字：{' / '.join(hit)}"
+            ),
+        )
+    except Exception:
+        _logger.warning("自动拒绝结果通知私发失败", exc_info=True)
+    return True
 
 
 async def _auto_approve(bot: Bot, event: GroupRequestEvent, comment: str) -> bool:
@@ -456,6 +625,211 @@ async def blk_show(bot: Bot, event: MessageEvent):
     await _finish_owner_config(bot, blk_list_cmd, event, text)
 
 
+# ---------------- 自动拒绝配置（owner；群内或私聊+群号，不必进群发） ----------------
+def _reject_target_or_finish(event: MessageEvent, arg_text: str, matcher, usage: str):
+    """从指令参数解析目标群；群内省略群号，私聊必须带群号或 *。"""
+    if hasattr(event, "group_id"):
+        gid, rest = _parse_reject_target(arg_text)
+        if gid is None:
+            return event.group_id, arg_text
+        return gid, rest
+    gid, rest = _parse_reject_target(arg_text)
+    if gid is None:
+        matcher.finish(usage)
+    return gid, rest
+
+
+@rej_add_cmd.handle()
+async def rej_add(bot: Bot, event: MessageEvent, arg=CommandArg()):
+    if not is_owner(event):
+        await rej_add_cmd.finish("❌ 你没有权限使用此功能")
+    text = arg.extract_plain_text().strip()
+    usage = (
+        "用法：.自动拒绝 [群号|*] <词> [更多词...]\n"
+        "群内可省略群号；私聊带群号：.自动拒绝 123456 代练\n"
+        "全局（所有群+好友）：.自动拒绝 * 代练"
+    )
+    if not text:
+        await rej_add_cmd.finish(usage)
+    gid, rest = _reject_target_or_finish(event, text, rej_add_cmd, usage)
+    words = [k for k in re.split(r"[\s,，、]+", rest) if k]
+    words = [w for w in words if w not in _REJECT_RESERVED]
+    if not words:
+        await rej_add_cmd.finish("❌ 请提供有效关键字（不能是 关闭/查看/删除 等管理词）")
+    merged = await _save_reject_keywords(gid, words, merge=True)
+    label = "全局" if gid == _GLOBAL_REJECT_KEY else f"群 {gid}"
+    await _finish_owner_config(
+        bot, rej_add_cmd, event,
+        f"⛔ {label} 自动拒绝已更新（共 {len(merged)} 条）\n"
+        f"{' / '.join(merged)}\n"
+        f"附言或验证消息包含任一关键字将自动拒绝（不区分大小写）",
+    )
+
+
+@rej_del_cmd.handle()
+async def rej_del(bot: Bot, event: MessageEvent, arg=CommandArg()):
+    if not is_owner(event):
+        await rej_del_cmd.finish("❌ 你没有权限使用此功能")
+    text = arg.extract_plain_text().strip()
+    usage = "用法：.自动拒绝删除 [群号|*] <词> [更多词...]"
+    if not text:
+        await rej_del_cmd.finish(usage)
+    gid, rest = _reject_target_or_finish(event, text, rej_del_cmd, usage)
+    words = [k for k in re.split(r"[\s,，、]+", rest) if k]
+    if not words:
+        await rej_del_cmd.finish(usage)
+    removed = await _del_reject_keywords(gid, words)
+    if not removed:
+        await rej_del_cmd.finish("未找到要删除的自动拒绝关键字\n用 .自动拒绝查看 查看")
+    await _finish_owner_config(bot, rej_del_cmd, event, f"✅ 已删除自动拒绝关键字：{' / '.join(removed)}")
+
+
+@rej_off_cmd.handle()
+async def rej_off(bot: Bot, event: MessageEvent, arg=CommandArg()):
+    if not is_owner(event):
+        await rej_off_cmd.finish("❌ 你没有权限使用此功能")
+    text = arg.extract_plain_text().strip()
+    usage = "用法：.自动拒绝关闭 [群号|*]（群内可省略群号）"
+    if hasattr(event, "group_id") and not text:
+        gid: int | str = event.group_id
+    else:
+        parsed, rest = _parse_reject_target(text)
+        if parsed is None:
+            await rej_off_cmd.finish(usage)
+        gid = parsed
+    await _save_reject_keywords(gid, [])
+    label = "全局" if gid == _GLOBAL_REJECT_KEY else f"群 {gid}"
+    await _finish_owner_config(bot, rej_off_cmd, event, f"✅ {label} 自动拒绝已关闭")
+
+
+@rej_show_cmd.handle()
+async def rej_show(bot: Bot, event: MessageEvent, arg=CommandArg()):
+    if not is_owner(event):
+        await rej_show_cmd.finish("❌ 你没有权限使用此功能")
+    text = arg.extract_plain_text().strip()
+    data = _load_reject_config()
+    if text:
+        gid, _ = _parse_reject_target(text)
+        if gid is not None:
+            kws = [k for k in (data.get(str(gid)) or []) if k]
+            label = "全局" if gid == _GLOBAL_REJECT_KEY else f"群 {gid}"
+            if not kws:
+                await _finish_owner_config(bot, rej_show_cmd, event, f"⛔ {label} 自动拒绝为空")
+                return
+            await _finish_owner_config(bot, rej_show_cmd, event, f"⛔ {label} 自动拒绝（{len(kws)}）：\n{' / '.join(kws)}")
+            return
+    if hasattr(event, "group_id") and not text:
+        kws = _load_reject_keywords(event.group_id)
+        if kws:
+            await _finish_owner_config(bot, rej_show_cmd, event, f"⛔ 群 {event.group_id} 生效中的自动拒绝（含全局）：\n{' / '.join(kws)}")
+            return
+        await _finish_owner_config(bot, rej_show_cmd, event, f"⛔ 群 {event.group_id} 自动拒绝为空")
+        return
+    lines = ["⛔ 自动拒绝配置："]
+    for key, kws in sorted(data.items()):
+        if key == _REJECT_EMPTY_KEY or not kws:
+            continue
+        label = "全局" if key == _GLOBAL_REJECT_KEY else f"群 {key}"
+        lines.append(f"{label}：{' / '.join(kws)}")
+    if len(lines) == 1:
+        await rej_show_cmd.finish("⛔ 尚未配置任何自动拒绝关键字\n用 .自动拒绝 <词> 添加")
+    await rej_show_cmd.finish("\n".join(lines))
+
+
+@rej_count_cmd.handle()
+async def rej_count(bot: Bot, event: MessageEvent, arg=CommandArg()):
+    if not is_owner(event):
+        await rej_count_cmd.finish("❌ 你没有权限使用此功能")
+    text = arg.extract_plain_text().strip()
+    data = _load_reject_config()
+    if text:
+        gid, _ = _parse_reject_target(text)
+        if gid is not None:
+            kws = [k for k in (data.get(str(gid)) or []) if k]
+            label = "全局" if gid == _GLOBAL_REJECT_KEY else f"群 {gid}"
+            await _finish_owner_config(bot, rej_count_cmd, event, f"🔑 {label} 自动拒绝关键字：{len(kws)} 条")
+            return
+    if hasattr(event, "group_id") and not text:
+        kws = _load_reject_keywords(event.group_id)
+        await _finish_owner_config(bot, rej_count_cmd, event, f"🔑 群 {event.group_id} 生效中自动拒绝：{len(kws)} 条")
+        return
+    total = sum(
+        len([k for k in v if k])
+        for key, v in data.items()
+        if key != _REJECT_EMPTY_KEY and isinstance(v, list)
+    )
+    await rej_count_cmd.finish(f"🔑 自动拒绝关键字合计：{total} 条（覆盖 {len([1 for k, v in data.items() if k != _REJECT_EMPTY_KEY and v])} 个目标）")
+
+
+# ---------------- 空附言自动拒绝（没填验证信息/附言即拒） ----------------
+def _empty_reject_target(event: MessageEvent, text: str, matcher) -> int | str:
+    text = text.strip()
+    if text:
+        gid, _ = _parse_reject_target(text)
+        if gid is not None:
+            return gid
+        matcher.finish("用法：.自动拒绝空附言开启 [群号|*]（群内可省略群号）")
+    if hasattr(event, "group_id"):
+        return event.group_id
+    matcher.finish("私聊用法：.自动拒绝空附言开启 [群号|*]")
+
+
+@rej_empty_on_cmd.handle()
+async def rej_empty_on(bot: Bot, event: MessageEvent, arg=CommandArg()):
+    if not is_owner(event):
+        await rej_empty_on_cmd.finish("❌ 你没有权限使用此功能")
+    gid = _empty_reject_target(event, arg.extract_plain_text(), rej_empty_on_cmd)
+    await _set_reject_empty(gid, True)
+    label = "全局" if gid == _GLOBAL_REJECT_KEY else f"群 {gid}"
+    await _finish_owner_config(
+        bot, rej_empty_on_cmd, event,
+        f"⛔ {label} 已开启：附言/验证信息为空的申请将自动拒绝",
+    )
+
+
+@rej_empty_off_cmd.handle()
+async def rej_empty_off(bot: Bot, event: MessageEvent, arg=CommandArg()):
+    if not is_owner(event):
+        await rej_empty_off_cmd.finish("❌ 你没有权限使用此功能")
+    gid = _empty_reject_target(event, arg.extract_plain_text(), rej_empty_off_cmd)
+    await _set_reject_empty(gid, False)
+    label = "全局" if gid == _GLOBAL_REJECT_KEY else f"群 {gid}"
+    await _finish_owner_config(bot, rej_empty_off_cmd, event, f"✅ {label} 已关闭空附言自动拒绝")
+
+
+@rej_empty_status_cmd.handle()
+async def rej_empty_status(bot: Bot, event: MessageEvent, arg=CommandArg()):
+    if not is_owner(event):
+        await rej_empty_status_cmd.finish("❌ 你没有权限使用此功能")
+    data = _load_reject_config()
+    flags = [str(x) for x in (data.get(_REJECT_EMPTY_KEY) or []) if x]
+    text = arg.extract_plain_text().strip()
+    if text:
+        gid, _ = _parse_reject_target(text)
+        if gid is not None:
+            on = _GLOBAL_REJECT_KEY in flags if gid == _GLOBAL_REJECT_KEY else _reject_empty_enabled(gid)
+            label = "全局" if gid == _GLOBAL_REJECT_KEY else f"群 {gid}"
+            await _finish_owner_config(
+                bot, rej_empty_status_cmd, event,
+                f"⛔ {label} 空附言自动拒绝：{'开启' if on else '关闭'}",
+            )
+            return
+    if hasattr(event, "group_id") and not text:
+        on = _reject_empty_enabled(event.group_id)
+        extra = "\n（含全局 *）" if on and _GLOBAL_REJECT_KEY in flags and str(event.group_id) not in flags else ""
+        await _finish_owner_config(
+            bot, rej_empty_status_cmd, event,
+            f"⛔ 群 {event.group_id} 空附言自动拒绝：{'开启' if on else '关闭'}{extra}",
+        )
+        return
+    if not flags:
+        await rej_empty_status_cmd.finish(
+            "⛔ 空附言自动拒绝：未配置\n用 .自动拒绝空附言开启 [群号|*] 开启"
+        )
+    pretty = "、".join("全局" if x == _GLOBAL_REJECT_KEY else x for x in flags)
+    await rej_empty_status_cmd.finish(f"⛔ 已开启空附言自动拒绝：{pretty}")
+
+
 # ---------------- 好友申请 / 加群申请 ----------------
 @auto_count_cmd.handle()
 async def auto_count(bot: Bot, event: MessageEvent, arg=CommandArg()):
@@ -503,6 +877,9 @@ async def handle_request(bot: Bot, event):
         return
     _purge_pending()
     ts = now_str()
+    # 拒绝关键字优先于自动通过：附言命中即拒绝，不再进待审/放行
+    if await _auto_reject(bot, event, getattr(event, "comment", "") or ""):
+        return
     if isinstance(event, GroupRequestEvent) and event.sub_type in ("add", "apply"):
         if _is_bnet_managed(event.group_id):
             return  # 该群由战网ID验证插件（bnet_verify）全权处理，避免双重响应

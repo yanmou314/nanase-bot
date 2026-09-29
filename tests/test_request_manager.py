@@ -493,3 +493,115 @@ def test_handle_request_processes_unmanaged_groups(monkeypatch, tmp_path, guard_
     asyncio.run(request_manager.handle_request(bot, ev))
 
     assert "fy" in request_manager._pending  # 未托管群正常转人工
+
+
+# ---------------- 自动拒绝关键字 ----------------
+
+def test_reject_keyword_blocks_group_request(monkeypatch, tmp_path, guard_file):
+    monkeypatch.setattr(request_manager, "CONFIG_FILE", str(tmp_path / "auto_approve.json"))
+    monkeypatch.setattr(request_manager, "REJECT_FILE", str(tmp_path / "auto_reject.json"))
+    monkeypatch.setattr(request_manager, "_is_bnet_managed", lambda gid: False)
+    asyncio.run(request_manager._save_reject_keywords(111, ["代练"], merge=True))
+    bot = ApproveBot()
+    ev = _group_request(flag="rej1", gid=111, uid=222, comment="专业代练接单")
+    asyncio.run(request_manager.handle_request(bot, ev))
+
+    assert "rej1" not in request_manager._pending
+    assert bot.group_requests == [{"flag": "rej1", "sub_type": "add", "approve": False}]
+    assert any("自动拒绝" in str(m["message"]) for m in bot.sent_private)
+
+
+def test_reject_keyword_scoped_to_group(monkeypatch, tmp_path, guard_file):
+    monkeypatch.setattr(request_manager, "CONFIG_FILE", str(tmp_path / "auto_approve.json"))
+    monkeypatch.setattr(request_manager, "REJECT_FILE", str(tmp_path / "auto_reject.json"))
+    monkeypatch.setattr(request_manager, "_is_bnet_managed", lambda gid: False)
+    asyncio.run(request_manager._save_reject_keywords(111, ["代练"], merge=True))
+    bot = ApproveBot()
+    ev = _group_request(flag="rejA", gid=222, uid=222, comment="专业代练接单")
+    asyncio.run(request_manager.handle_request(bot, ev))
+    assert "rejA" in request_manager._pending  # 其他群不受影响
+    assert bot.group_requests == []
+
+
+def test_reject_keyword_global(monkeypatch, tmp_path, guard_file):
+    monkeypatch.setattr(request_manager, "CONFIG_FILE", str(tmp_path / "auto_approve.json"))
+    monkeypatch.setattr(request_manager, "REJECT_FILE", str(tmp_path / "auto_reject.json"))
+    monkeypatch.setattr(request_manager, "_is_bnet_managed", lambda gid: False)
+    asyncio.run(request_manager._save_reject_keywords("*", ["外挂"], merge=True))
+    bot = ApproveBot()
+    ev = _group_request(flag="rejG", gid=999, uid=222, comment="有外挂吗")
+    asyncio.run(request_manager.handle_request(bot, ev))
+    assert bot.group_requests and bot.group_requests[0]["approve"] is False
+
+
+def test_reject_keyword_priority_over_auto_approve(monkeypatch, tmp_path, guard_file):
+    monkeypatch.setattr(request_manager, "CONFIG_FILE", str(tmp_path / "auto_approve.json"))
+    monkeypatch.setattr(request_manager, "REJECT_FILE", str(tmp_path / "auto_reject.json"))
+    monkeypatch.setattr(request_manager, "_is_bnet_managed", lambda gid: False)
+    asyncio.run(request_manager._save_reject_keywords(111, ["广告"], merge=True))
+    asyncio.run(request_manager._save_keywords(111, ["暗号"], merge=True))
+    bot = ApproveBot()
+    ev = _group_request(flag="rej2", gid=111, uid=222, comment="暗号 广告推广")
+    asyncio.run(request_manager.handle_request(bot, ev))
+    assert bot.group_requests and bot.group_requests[0]["approve"] is False
+
+
+def test_reject_keyword_add_list_delete(tmp_path, monkeypatch):
+    monkeypatch.setattr(request_manager, "REJECT_FILE", str(tmp_path / "auto_reject.json"))
+    merged = asyncio.run(request_manager._save_reject_keywords(111, ["代练", "接单"], merge=True))
+    assert merged == ["代练", "接单"]
+    merged2 = asyncio.run(request_manager._save_reject_keywords(111, ["代练", "外挂"], merge=True))
+    assert merged2 == ["代练", "接单", "外挂"]
+    assert request_manager._load_reject_keywords(111) == ["代练", "接单", "外挂"]
+    removed = asyncio.run(request_manager._del_reject_keywords(111, ["接单", "不存在"]))
+    assert removed == ["接单"]
+    assert request_manager._load_reject_keywords(111) == ["代练", "外挂"]
+
+
+def test_reject_keyword_case_insensitive_match(tmp_path, monkeypatch):
+    monkeypatch.setattr(request_manager, "REJECT_FILE", str(tmp_path / "auto_reject.json"))
+    asyncio.run(request_manager._save_reject_keywords(111, ["ABC"], merge=True))
+    assert request_manager._match_reject_keyword(111, "xxabcxx") == ["ABC"]
+    assert request_manager._match_reject_keyword(111, "没有命中") == []
+    assert request_manager._match_reject_keyword(222, "abc") == []  # 其他群不命中
+
+
+def test_parse_reject_target():
+    assert request_manager._parse_reject_target("123456 代练") == (123456, "代练")
+    assert request_manager._parse_reject_target("* 外挂") == ("*", "外挂")
+    assert request_manager._parse_reject_target("代练 接单") == (None, "代练 接单")
+
+
+def test_reject_empty_comment(monkeypatch, tmp_path, guard_file):
+    monkeypatch.setattr(request_manager, "CONFIG_FILE", str(tmp_path / "auto_approve.json"))
+    monkeypatch.setattr(request_manager, "REJECT_FILE", str(tmp_path / "auto_reject.json"))
+    monkeypatch.setattr(request_manager, "_is_bnet_managed", lambda gid: False)
+    asyncio.run(request_manager._set_reject_empty(111, True))
+    bot = ApproveBot()
+    ev = _group_request(flag="rejE", gid=111, uid=222, comment="   ")
+    asyncio.run(request_manager.handle_request(bot, ev))
+    assert "rejE" not in request_manager._pending
+    assert bot.group_requests and bot.group_requests[0]["approve"] is False
+    assert any("空附言" in str(m["message"]) for m in bot.sent_private)
+
+
+def test_reject_empty_comment_off(monkeypatch, tmp_path, guard_file):
+    monkeypatch.setattr(request_manager, "CONFIG_FILE", str(tmp_path / "auto_approve.json"))
+    monkeypatch.setattr(request_manager, "REJECT_FILE", str(tmp_path / "auto_reject.json"))
+    monkeypatch.setattr(request_manager, "_is_bnet_managed", lambda gid: False)
+    bot = ApproveBot()
+    ev = _group_request(flag="rejF", gid=111, uid=222, comment="")
+    asyncio.run(request_manager.handle_request(bot, ev))
+    assert "rejF" in request_manager._pending  # 未开启则转人工
+    assert bot.group_requests == []
+
+
+def test_reject_empty_comment_global(monkeypatch, tmp_path, guard_file):
+    monkeypatch.setattr(request_manager, "CONFIG_FILE", str(tmp_path / "auto_approve.json"))
+    monkeypatch.setattr(request_manager, "REJECT_FILE", str(tmp_path / "auto_reject.json"))
+    monkeypatch.setattr(request_manager, "_is_bnet_managed", lambda gid: False)
+    asyncio.run(request_manager._set_reject_empty("*", True))
+    bot = ApproveBot()
+    ev = _group_request(flag="rejG2", gid=555, uid=222, comment="")
+    asyncio.run(request_manager.handle_request(bot, ev))
+    assert bot.group_requests and bot.group_requests[0]["approve"] is False
