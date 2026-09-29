@@ -63,7 +63,7 @@ PUBLIC_SECTIONS: list[tuple[str, str, list[tuple[str, str]]]] = [
     ]),
     ("AI 聊天", "#EC4899", [
         ("@机器人 + 消息", "和西野七濑 AI 聊天"),
-        (".ai <问题>", "向免费 AI 提问（智谱→OpenRouter→Gemini 自动切换）"),
+        (".ai <问题>", "免费 AI 问答，连续追问带上下文；.ai 重置 开新话题"),
     ]),
     ("时间提醒", "#64748B", [
         (".倒计时", "下一个周末和节假日倒计时"),

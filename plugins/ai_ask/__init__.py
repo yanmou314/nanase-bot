@@ -52,6 +52,46 @@ _GLM_SEM = asyncio.Semaphore(2)  # 免费档并发有限，单供应商全局最
 _cooldowns: OrderedDict[str, float] = OrderedDict()
 _cooldown_lock = threading.Lock()
 
+# ---------------- 对话上下文（按 群/私聊+用户 隔离，仅内存不落盘） ----------------
+# 保留最近 _HIST_MAX 条 user/assistant 消息；_HIST_TTL 内无追问视为新话题。
+# bot 重启即清空，避免群聊内容落盘的隐私残留。
+_HIST_MAX = 8
+_HIST_TTL = 30 * 60.0
+_HIST_MAX_ENTRIES = 512
+_histories: dict[str, tuple[float, list]] = {}
+_hist_lock = threading.RLock()  # RLock：_hist_store 持锁期间调用 _hist_load 重入同锁
+
+
+def _hist_key(event) -> str:
+    gid = getattr(event, "group_id", None)
+    return f"{gid if gid is not None else 'private'}:{getattr(event, 'user_id', '0')}"
+
+
+def _hist_load(key: str) -> list:
+    with _hist_lock:
+        entry = _histories.get(key)
+        if not entry:
+            return []
+        last, msgs = entry
+        if time.monotonic() - last > _HIST_TTL:
+            _histories.pop(key, None)
+            return []
+        return list(msgs)
+
+
+def _hist_store(key: str, q: str, answer: str) -> None:
+    with _hist_lock:
+        msgs = _hist_load(key)
+        msgs.append({"role": "user", "content": q})
+        msgs.append({"role": "assistant", "content": answer})
+        _histories[key] = (time.monotonic(), msgs[-_HIST_MAX:])
+        if len(_histories) > _HIST_MAX_ENTRIES:  # 过期与最旧会话清扫，防无界增长
+            now = time.monotonic()
+            for k in [k for k, (t, _) in _histories.items() if now - t > _HIST_TTL]:
+                _histories.pop(k, None)
+            while len(_histories) > _HIST_MAX_ENTRIES:
+                _histories.pop(next(iter(_histories)))
+
 
 def _news_mod():
     """延迟导入晨报插件，经公开接口 get_glm_config 复用免费 GLM 配置。"""
@@ -167,12 +207,14 @@ async def _chat_completion(name: str, url: str, model: str, key: str,
     return content
 
 
-async def _ask_any(q: str) -> tuple[str, str]:
-    """依次尝试供应商链，首个成功即返回 (回答, 供应商名)；全部失败抛汇总异常。"""
-    messages = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": q},
-    ]
+async def _ask_any(q: str, history: list | None = None) -> tuple[str, str]:
+    """依次尝试供应商链，首个成功即返回 (回答, 供应商名)；全部失败抛汇总异常。
+
+    history 为该用户最近的 user/assistant 消息（上下文），随供应商一并发送。
+    """
+    messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    messages += (history or [])[-_HIST_MAX:]
+    messages.append({"role": "user", "content": q})
     errors: list[str] = []
     for name, url, model, key, proxy in _provider_chain():
         try:
@@ -189,7 +231,12 @@ async def handle_ai(event: MessageEvent):
     m = re.match(r"^[\.。]?\s*(?:ai|问ai)\s*(.*)$", raw, re.IGNORECASE | re.DOTALL)
     q = (m.group(1) if m else "").strip()
     if not q:
-        await ai_cmd.finish("用法：.ai <问题>\n例：.ai 帮我写一句给朋友的生日祝福")
+        await ai_cmd.finish("用法：.ai <问题>\n例：.ai 帮我写一句给朋友的生日祝福\n连续追问即可带上下文；.ai 重置 开新话题")
+    # 重置上下文是本地操作：放在冷却检查之前，追问失败后也能随时开新话题
+    if q in {"重置", "新话题", "reset"}:
+        with _hist_lock:
+            _histories.pop(_hist_key(event), None)
+        await ai_cmd.finish("🔄 已清空对话上下文，开始新话题")
     uid = str(getattr(event, "user_id", "0") or "0")
     remaining = _cooldown_remaining(uid)
     if remaining:
@@ -206,12 +253,13 @@ async def handle_ai(event: MessageEvent):
             "3）.aikey gemini <key>"
         )
     try:
-        answer, _provider = await _ask_any(q)
+        answer, _provider = await _ask_any(q, _hist_load(_hist_key(event)))
     except Exception:
         _cooldown_release(uid)
         _logger.exception(".ai 全部供应商失败")
         await ai_cmd.finish("⚠️ AI 服务暂时不可用，请稍后再试")
     _usage_incr(uid, day)
+    _hist_store(_hist_key(event), q, _clip(answer))  # 仅成功时记忆，失败不污染上下文
     # AI 输出为外部内容（防 CQ 码注入）：一律 MessageSegment.text 发送
     await ai_cmd.finish(MessageSegment.text(_clip(answer)))
 

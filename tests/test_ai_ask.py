@@ -32,10 +32,12 @@ def _chain(names=("智谱",)):
 @pytest.fixture(autouse=True)
 def _clean(tmp_path, monkeypatch):
     ai_ask._cooldowns.clear()
+    ai_ask._histories.clear()  # 上下文按 群+uid 记忆，跨测试必须清空
     monkeypatch.setattr(ai_ask, "_USAGE_FILE", str(tmp_path / "usage.json"))
     monkeypatch.setattr(ai_ask, "_CONFIG_FILE", str(tmp_path / "config.json"))
     yield
     ai_ask._cooldowns.clear()
+    ai_ask._histories.clear()
 
 
 def test_ai_ask_usage_on_empty(monkeypatch):
@@ -52,7 +54,7 @@ def test_ai_ask_usage_on_empty(monkeypatch):
 
 
 def test_ai_ask_success_wraps_in_text_segment(monkeypatch):
-    async def fake_ask(q):
+    async def fake_ask(q, history=None):
         assert q == "今天天气怎么样"
         return "今天是晴天！", "智谱"
 
@@ -67,7 +69,7 @@ def test_ai_ask_success_wraps_in_text_segment(monkeypatch):
 
 
 def test_ai_ask_injection_stays_literal_text(monkeypatch):
-    async def evil_ask(q):
+    async def evil_ask(q, history=None):
         return "[CQ:image,file=evil.jpg]", "智谱"
 
     monkeypatch.setattr(ai_ask, "_provider_chain", lambda: _chain())
@@ -80,7 +82,7 @@ def test_ai_ask_injection_stays_literal_text(monkeypatch):
 
 
 def test_ai_ask_long_answer_clipped(monkeypatch):
-    async def long_ask(q):
+    async def long_ask(q, history=None):
         return "长" * 3000, "智谱"
 
     monkeypatch.setattr(ai_ask, "_provider_chain", lambda: _chain())
@@ -92,7 +94,7 @@ def test_ai_ask_long_answer_clipped(monkeypatch):
 
 
 def test_ai_ask_daily_limit_and_owner_exempt(monkeypatch):
-    async def fake_ask(q):
+    async def fake_ask(q, history=None):
         return "ok", "智谱"
 
     monkeypatch.setattr(ai_ask, "_provider_chain", lambda: _chain())
@@ -115,7 +117,7 @@ def test_ai_ask_daily_limit_and_owner_exempt(monkeypatch):
 def test_ai_ask_cooldown_then_release_on_failure(monkeypatch):
     state = {"n": 0}
 
-    async def flaky_ask(q):
+    async def flaky_ask(q, history=None):
         state["n"] += 1
         if state["n"] == 1:
             raise RuntimeError("boom")
@@ -182,3 +184,103 @@ def test_aikey_rejects_non_owner():
     with pytest.raises(FinishedException):
         asyncio.run(ai_ask.aikey_cmd.handlers[0](_ev(".aikey openrouter k", uid=20001)))
     assert "仅机器人主人" in str(ai_ask.aikey_cmd.finished[-1])
+
+
+def test_ai_ask_context_carried_and_isolated(monkeypatch):
+    seen = []
+
+    async def fake_ask(q, history=None):
+        seen.append((q, list(history or [])))
+        return f"答:{q}", "智谱"
+
+    monkeypatch.setattr(ai_ask, "_provider_chain", lambda: _chain())
+    monkeypatch.setattr(ai_ask, "_ask_any", fake_ask)
+    monkeypatch.setattr(ai_ask, "_COOLDOWN_SECONDS", 0)  # 连续问答不受 5s 冷却拦截
+    handler = ai_ask.ai_cmd.handlers[0]
+    with pytest.raises(FinishedException):
+        asyncio.run(handler(_ev(".ai 我叫小明", uid=20001)))
+    with pytest.raises(FinishedException):
+        asyncio.run(handler(_ev(".ai 我叫什么", uid=20001)))
+    q1, h1 = seen[0]
+    q2, h2 = seen[1]
+    assert h1 == []  # 首问无上下文
+    # 第二问带上第一轮 user/assistant
+    assert h2[-2:] == [
+        {"role": "user", "content": "我叫小明"},
+        {"role": "assistant", "content": "答:我叫小明"},
+    ]
+    # 其他用户的上下文隔离
+    with pytest.raises(FinishedException):
+        asyncio.run(handler(_ev(".ai 我叫什么", uid=20002)))
+    assert seen[2][1] == []
+
+
+def test_ai_ask_reset_clears_and_ttl_expires(monkeypatch):
+    import time as _time
+
+    async def fake_ask(q, history=None):
+        return f"答:{q}", "智谱"
+
+    monkeypatch.setattr(ai_ask, "_provider_chain", lambda: _chain())
+    monkeypatch.setattr(ai_ask, "_ask_any", fake_ask)
+    monkeypatch.setattr(ai_ask, "_COOLDOWN_SECONDS", 0)  # 连续问答不受 5s 冷却拦截
+    handler = ai_ask.ai_cmd.handlers[0]
+    with pytest.raises(FinishedException):
+        asyncio.run(handler(_ev(".ai 记住西瓜", uid=20001)))
+    # 重置：本地操作，不受冷却影响
+    with pytest.raises(FinishedException):
+        asyncio.run(handler(_ev(".ai 重置", uid=20001)))
+    assert "新话题" in str(ai_ask.ai_cmd.finished[-1])
+    seen = []
+
+    async def spy(q, history=None):
+        seen.append((q, list(history or [])))
+        return "x", "y"
+
+    monkeypatch.setattr(ai_ask, "_ask_any", spy)
+    with pytest.raises(FinishedException):
+        asyncio.run(handler(_ev(".ai 在吗", uid=20001)))
+    assert seen[0][1] == []  # 重置后上下文为空
+    # TTL 过期：手工注入一个已过期的会话
+    key = ai_ask._hist_key(_ev("", uid=30001))
+    with ai_ask._hist_lock:
+        ai_ask._histories[key] = (
+            _time.monotonic() - ai_ask._HIST_TTL - 10,
+            [{"role": "user", "content": "很久以前的话"}],
+        )
+    seen.clear()
+
+    async def ask2(q, history=None):
+        seen.append((q, list(history or [])))
+        return "x", "y"
+
+    monkeypatch.setattr(ai_ask, "_ask_any", ask2)
+    with pytest.raises(FinishedException):
+        asyncio.run(handler(_ev(".ai 新问题", uid=30001)))
+    assert seen[0][1] == []  # 过期会话不再作为上下文
+
+
+def test_ai_ask_failure_does_not_pollute_context(monkeypatch):
+    state = {"n": 0}
+
+    async def flaky_ask(q, history=None):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise RuntimeError("boom")
+        return "成功", "智谱"
+
+    monkeypatch.setattr(ai_ask, "_provider_chain", lambda: _chain())
+    monkeypatch.setattr(ai_ask, "_ask_any", flaky_ask)
+    handler = ai_ask.ai_cmd.handlers[0]
+    with pytest.raises(FinishedException):
+        asyncio.run(handler(_ev(".ai 失败的问题", uid=20001)))  # 失败
+    seen = []
+
+    async def spy(q, history=None):
+        seen.append(list(history or []))
+        return "成功", "智谱"
+
+    monkeypatch.setattr(ai_ask, "_ask_any", spy)
+    with pytest.raises(FinishedException):
+        asyncio.run(handler(_ev(".ai 再试", uid=20001)))
+    assert seen[0] == []  # 失败的问答不得进入上下文
