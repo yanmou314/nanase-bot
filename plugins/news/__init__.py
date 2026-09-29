@@ -312,6 +312,15 @@ def _load_ai_cfg() -> tuple[str, str]:
     return _ai_cfg_cache["key"], _ai_cfg_cache["model"]
 
 
+def get_glm_config() -> tuple[str, str]:
+    """公开接口：免费智谱 GLM 的 (api_key, model)，供其他插件复用（如 .ai 问答）。
+
+    与 auto_chat.chat_completion 同一先例：跨插件只走公开接口，不碰私有符号。
+    未配置时返回 ("", "glm-4-flash")，调用方按未配置处理。
+    """
+    return _load_ai_cfg()
+
+
 def _save_ai_cfg(key: str) -> None:
     _, model = _load_ai_cfg()
     save_json_state(AI_CFG_FILE, {"api_key": key, "model": model})
