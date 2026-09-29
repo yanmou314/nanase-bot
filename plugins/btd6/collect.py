@@ -186,7 +186,7 @@ async def collect_rules(kind: str, variant: str) -> dict:
         side_img = await _safe(assets._asset_data_url(ev.get("bossTypeURL")), "boss_img") if ev.get("bossTypeURL") else ""
         stale_urls = (nkapi.URL_BOSSES, meta_url)
     elif kind == "ct":
-        return {"empty": "争夺领土暂无通用规则数据，请使用 .btd6活动 或 .btd6排行 领土 查询"}
+        return {"empty": "争夺领土暂无通用规则数据，请使用 .活动 或 .排行 领土 查询"}
     else:
         return {"empty": "暂不支持该活动类型的规则查询"}
     map_img = await _safe(assets._asset_data_url(meta.get("mapURL")), "map_img") if meta.get("mapURL") else ""
@@ -356,38 +356,49 @@ async def collect_daily_dual(now_ms: int | None = None) -> dict:
     items = await nkapi.fetch_body(nkapi.URL_DAILY)
     if not isinstance(items, list):  # 非 list 响应按空数据处理，走既有失败文案
         items = []
-    variants = []
-    for ev, variant, adv in (
-        (_daily_pick(items, "Standard", now), "standard", False),
-        (_daily_pick(items, "Advanced", now), "advanced", True),
-    ):
+    std_ev = _daily_pick(items, "Standard", now)
+    adv_ev = _daily_pick(items, "Advanced", now)
+    coop_ev = _coop_pick(items, now)
+
+    async def _daily_variant(ev: dict | None, variant: str, adv: bool) -> dict | None:
         if not ev:
-            continue
+            return None
         meta_url = ev.get("metadata")
         meta = await nkapi.fetch_body(meta_url) if meta_url else None
         meta = meta if isinstance(meta, dict) else {}
         issue = _daily_prefix(str(ev.get("name") or ""), adv).replace("每日", "", 1)
-        variants.append({
+        return {
             "variant": variant,
             "label": "高级" if adv else "标准",
             "issue": issue,
             "meta": meta,
             "ev": ev,
             "map_img": await _challenge_map_img(meta, f"daily_map_{variant}"),
-        })
-    coop_ev = _coop_pick(items, now)
-    if coop_ev:
-        meta_url = coop_ev.get("metadata")
+        }
+
+    async def _coop_variant(ev: dict | None) -> dict | None:
+        if not ev:
+            return None
+        meta_url = ev.get("metadata")
         meta = await nkapi.fetch_body(meta_url) if meta_url else None
         meta = meta if isinstance(meta, dict) else {}
-        variants.append({
+        return {
             "variant": "coop",
             "label": "Co-op",
             "issue": "Co-op 挑战",
             "meta": meta,
-            "ev": coop_ev,
+            "ev": ev,
             "map_img": await _challenge_map_img(meta, "daily_map_coop"),
-        })
+        }
+
+    # 标准/高级/Co-op 三路 metadata 与地图图并发拉取（冷缓存时省 2 次串行 RTT）；
+    # variants 顺序保持 标准 → 高级 → Co-op 不变
+    std_v, adv_v, coop_v = await asyncio.gather(
+        _daily_variant(std_ev, "standard", False),
+        _daily_variant(adv_ev, "advanced", True),
+        _coop_variant(coop_ev),
+    )
+    variants = [v for v in (std_v, adv_v, coop_v) if v]
     if not variants:
         return {"empty": "暂无每日挑战数据"}
     return {

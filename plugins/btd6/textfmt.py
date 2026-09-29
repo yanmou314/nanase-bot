@@ -558,7 +558,7 @@ def ct_text(col: dict) -> str:
     return "\n".join(lines)
 
 
-_CT_PRESET_CN = {"default": "默认", "gametypes": "游戏类型", "maps": "地图背景", "heroes": "英雄", "coords": "坐标"}
+_CT_PRESET_CN = {"default": "默认", "gametypes": "类型", "maps": "地图背景", "heroes": "英雄", "coords": "坐标"}
 
 
 def ct_preset_text(col: dict, name: str) -> str:

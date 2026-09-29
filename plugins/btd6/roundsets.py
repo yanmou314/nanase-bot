@@ -41,7 +41,7 @@ def _available_names() -> set:
 
 
 def load_set(name: str) -> dict | None:
-    """按名（大小写不敏感）读取回合组快照，返回 {"rounds":[...]}；缺失返回 None。"""
+    """按名（须与 assets/data/roundsets/ 下快照文件名一致）读取回合组快照，返回 {"rounds":[...]}；缺失返回 None。"""
     key = str(name or "").strip()
     if not key:
         return None

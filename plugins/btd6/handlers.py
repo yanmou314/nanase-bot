@@ -120,24 +120,24 @@ def parse_lb_rank(tokens: list[str]) -> int | None:
 
 
 # ---------------- 命令处理 ----------------
+# 除帮助（.btd6 / .btd）外，子命令一律不带 btd6 前缀。
 
 help_cmd = on_command("btd6", aliases={"btd"}, priority=5, block=True)
-help_alias_cmd = on_command("btd6帮助", priority=5, block=True)
-events_cmd = on_command("btd6活动", priority=5, block=True)
-ct_cmd = on_command("btd6ct", priority=5, block=True)
-rush_cmd = on_command("btd6rush", priority=5, block=True)
-collect_cmd = on_command("btd6收集", priority=5, block=True)
-lb_cmd = on_command("btd6排行", priority=4, block=True)
-rules_cmd = on_command("btd6竞速", priority=5, block=True)
-boss_cmd = on_command("btd6boss", priority=5, block=True)
-daily_cmd = on_command("btd6每日", priority=5, block=True)
-odyssey_cmd = on_command("btd6远征", priority=5, block=True)
-player_cmd = on_command("btd6玩家", priority=5, block=True)
-push_on_cmd = on_command("btd6推送开启", priority=5, block=True)
-push_off_cmd = on_command("btd6推送关闭", priority=5, block=True)
-push_status_cmd = on_command("btd6推送状态", priority=5, block=True)
-hist_cmd = on_command("btd6历史", priority=5, block=True)
-prewarm_cmd = on_command("btd6预热", priority=5, block=True)
+events_cmd = on_command("活动", priority=5, block=True)
+ct_cmd = on_command("ct", priority=5, block=True)
+rush_cmd = on_command("rush", priority=5, block=True)
+collect_cmd = on_command("收集", priority=5, block=True)
+lb_cmd = on_command("排行", priority=4, block=True)
+rules_cmd = on_command("竞速", priority=5, block=True)
+boss_cmd = on_command("boss", priority=5, block=True)
+daily_cmd = on_command("每日", priority=5, block=True)
+odyssey_cmd = on_command("远征", priority=5, block=True)
+player_cmd = on_command("玩家", priority=5, block=True)
+push_on_cmd = on_command("推送开启", priority=5, block=True)
+push_off_cmd = on_command("推送关闭", priority=5, block=True)
+push_status_cmd = on_command("推送状态", priority=5, block=True)
+hist_cmd = on_command("历史", priority=5, block=True)
+prewarm_cmd = on_command("预热", priority=5, block=True)
 
 
 @help_cmd.handle()
@@ -157,12 +157,6 @@ async def handle_help(event: MessageEvent):
         await cards_mod._send_card(help_cmd, "btd6ov", lambda: cards_mod.overview_html(data), lambda: textfmt.overview_text(data))
         return
     await cards_mod._send_card(help_cmd, "btd6help", cards_mod.help_html, lambda: i18n.HELP_TEXT)
-
-
-@help_alias_cmd.handle()
-async def handle_help_alias(event: MessageEvent):
-    await nkapi._enforce_cooldown(help_alias_cmd, event, "help")
-    await cards_mod._send_card(help_alias_cmd, "btd6help", cards_mod.help_html, lambda: i18n.HELP_TEXT)
 
 
 @events_cmd.handle()
@@ -188,7 +182,7 @@ _CT_PRESET_ALIAS = {
 
 @ct_cmd.handle()
 async def handle_ct(event: MessageEvent):
-    """争夺领土：无参 → 总览图；带 preset 名 → 预设图；带 tile id → 单格详情。"""
+    """争夺领土：无参 → 默认预设图；详情 → 总览大地图；带 preset 名 → 预设图；带 tile id → 单格。"""
     await nkapi._enforce_cooldown(ct_cmd, event, "ct")
     try:
         col = await collect.collect_ct()
@@ -206,7 +200,14 @@ async def handle_ct(event: MessageEvent):
     arg = raw.split(maxsplit=1)[1].strip() if len(raw.split(maxsplit=1)) > 1 else ""
     arg_key = arg.lower()
     if not arg:
-        await cards_mod._send_card(ct_cmd, "btd6ct",
+        # 无参 → 站点「默认」显示预设（预热已覆盖，首查秒回）
+        await cards_mod._send_card(ct_cmd, "btd6ctp_default",
+                                   lambda: cards_mod.ctmap_preset_html(col, "default"),
+                                   lambda: textfmt.ct_preset_text(col, "default"))
+        return
+    if arg in {"详情", "地图", "大地图"}:
+        # 原无参大地图（难度角标 + 图例统计）挂到「详情」参数
+        await cards_mod._send_card(ct_cmd, "btd6ctd",
                                    lambda: cards_mod.ctmap_html(col),
                                    lambda: textfmt.ct_text(col))
         return
@@ -228,7 +229,7 @@ async def handle_ct(event: MessageEvent):
     valid = "、".join(f"{n}({lbl})" for n, lbl in cards_mod.CT_PRESET_CARDS)
     # arg 是用户原文（防 CQ 码自注入）：整段经 MessageSegment.text 发送
     await ct_cmd.finish(MessageSegment.text(
-        f"⚠️ 未知参数：{arg}\n预设：{valid}\n"
+        f"⚠️ 未知参数：{arg}\n可用：详情（大地图）｜预设：{valid}\n"
         f"或格子 id（例：DAA / AAA，共 {len(grid['tiles']) + 6} 个）"))
 
 
@@ -424,7 +425,7 @@ async def handle_leaderboard(event: MessageEvent):
 
 
 async def _boss_rule_cards(cmd, event) -> None:
-    """Boss 规则：标准+精英并排合卡（供 .btd6boss 使用）。"""
+    """Boss 规则：标准+精英并排合卡（供 .boss 使用）。"""
     try:
         c = await collect.collect_boss_dual()
     except Exception:
@@ -456,7 +457,7 @@ async def handle_rules(event: MessageEvent):
     kind = parse_kind(tokens)
     if kind is not None and kind != "race":
         nkapi._release_cooldown(event, "rules")
-        await rules_cmd.finish("🏁 竞赛与 Boss 规则已拆分：Boss 请使用 .btd6boss 查看")
+        await rules_cmd.finish("🏁 竞赛与 Boss 规则已拆分：Boss 请使用 .boss 查看")
     try:
         col = await collect.collect_rules("race", "")
     except Exception:
@@ -522,7 +523,7 @@ async def handle_player(event: MessageEvent):
         return
     pid = collect._extract_player_id(arg)
     if not pid:
-        await player_cmd.finish("用法：.btd6玩家 <OAK>\nOAK 在游戏设置→账号中生成（以 oak_ 开头），可查完整档案与存档数据；也可用排行榜玩家链接末尾的 ID（仅公开档案）\n⚠️ OAK 等同账号凭证，请私聊使用，不要发到群里")
+        await player_cmd.finish("用法：.玩家 <OAK>\nOAK 在游戏设置→账号中生成（以 oak_ 开头），可查完整档案与存档数据；也可用排行榜玩家链接末尾的 ID（仅公开档案）\n⚠️ OAK 等同账号凭证，请私聊使用，不要发到群里")
     try:
         col = await collect.collect_player(pid)
     except Exception:
@@ -570,7 +571,7 @@ async def handle_push_status(event: MessageEvent):
     else:
         lines.append("最近推送：无")
     lines.append("")
-    lines.append("命令：.btd6推送开启 / .btd6推送关闭（仅主人）")
+    lines.append("命令：.推送开启 / .推送关闭（仅主人）")
     # ev_id 等字段来自 NK API（防 CQ 码注入）：整段经 MessageSegment.text 发送
     await push_status_cmd.finish(MessageSegment.text("\n".join(lines)))
 
@@ -582,7 +583,7 @@ _HIST_KIND_WORDS = {"竞速": "race", "race": "race", "boss": "boss", "首领": 
 
 @hist_cmd.handle()
 async def handle_history(event: MessageEvent):
-    """查询本地归档的历史活动：.btd6历史 [竞速|boss|领土|远征|每日] [数量]。
+    """查询本地归档的历史活动：.历史 [竞速|boss|领土|远征|每日] [数量]。
     NK API 各列表只保留近几期（Boss 仅 3 期），本命令读的是预热顺带落盘的 history.json。"""
     await nkapi._enforce_cooldown(hist_cmd, event, "history")
     tokens = event.get_plaintext().split()[1:]

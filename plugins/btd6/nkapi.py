@@ -6,11 +6,14 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import threading
 import time
 from collections import OrderedDict
 from urllib.parse import urlsplit
+
+import httpx
 
 from common import get_http_client
 
@@ -63,6 +66,10 @@ MAX_JSON_MEM_BYTES = 32_000_000   # JSON body 内存字节预算：按 _cache �
 
 URL_HOSTS = {"data.ninjakiwi.com", "static-api.nkstatic.com", "storage.googleapis.com"}
 REQUEST_LIMIT = asyncio.Semaphore(8)
+
+# 走 clash 代理时视为"代理不可用"的连接类异常（读取超时不算：那说明已到达上游，
+# 回退直连只会重复打一次 API）——clash 停机时自动回退直连，功能不中断
+_PROXY_FALLBACK_EXC = (httpx.ProxyError, httpx.ConnectError, httpx.ConnectTimeout)
 
 
 _COOLDOWN_SECONDS = {
@@ -270,8 +277,18 @@ def _stale_warn(*urls: str) -> str:
 
 async def _http_get(url: str, timeout: float):
     _validate_url(url)
-    client = get_http_client(20)
+    # 默认走本机 clash 代理（跨境直连抖动是后台刷新失败的主因，实测代理热请求更快）；
+    # BTD6_PROXY 环境变量可换地址，设为空串禁用代理。
+    # 连接类失败（代理挂了/拒绝/连不上）自动回退直连一次，保证 clash 停机时功能不中断。
+    proxy = os.getenv("BTD6_PROXY", "http://127.0.0.1:7890").strip()
     async with REQUEST_LIMIT:
+        if proxy:
+            try:
+                client = get_http_client(timeout, proxy=proxy)
+                return await client.get(url, timeout=timeout)
+            except _PROXY_FALLBACK_EXC:
+                _logger.warning("BTD6 clash 代理请求失败（%s），本次回退直连", proxy, exc_info=True)
+        client = get_http_client(timeout)
         return await client.get(url, timeout=timeout)
 
 

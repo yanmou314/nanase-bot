@@ -618,8 +618,8 @@ def test_cooldown_is_scoped_and_rejects_repeated_request():
 
 def test_help_html_lists_all_commands():
     html = btd6.help_html()
-    for cmd in (".btd6活动", ".btd6竞速", ".btd6排行", ".btd6每日", ".btd6远征",
-                ".btd6玩家"):
+    for cmd in (".活动", ".竞速", ".排行", ".每日", ".远征", ".ct", ".rush",
+                ".收集", ".玩家"):
         assert cmd in html
     assert "活动" in html and "排行与档案" in html
     assert "chip" in html and "hdesc" in html
@@ -1117,7 +1117,7 @@ def test_asset_data_url_caches_to_disk(monkeypatch, tmp_path):
         async def get(self, url, **kw):
             return _Resp()
 
-    monkeypatch.setattr(btd6.nkapi, "get_http_client", lambda t: _Client())
+    monkeypatch.setattr(btd6.nkapi, "get_http_client", lambda t, proxy=None: _Client())
     url = "https://static-api.nkstatic.com/img.png"
     d1 = asyncio.run(btd6._asset_data_url(url))
     assert d1.startswith("data:image/png;base64,")
@@ -1125,7 +1125,7 @@ def test_asset_data_url_caches_to_disk(monkeypatch, tmp_path):
     d2 = asyncio.run(btd6._asset_data_url(url))
     assert d1 == d2
     # 第二次应命中磁盘缓存：换成会抛异常的客户端验证不再发请求
-    def boom(t):
+    def boom(t, proxy=None):
         raise AssertionError("disk cache hit expected")
 
     monkeypatch.setattr(btd6.nkapi, "get_http_client", boom)
@@ -1148,7 +1148,7 @@ def test_asset_data_url_rejects_unverified_image_bytes(monkeypatch):
         async def get(self, url, **kw):
             return _Resp()
 
-    monkeypatch.setattr(btd6.nkapi, "get_http_client", lambda t: _Client())
+    monkeypatch.setattr(btd6.nkapi, "get_http_client", lambda t, proxy=None: _Client())
     assert asyncio.run(btd6._asset_data_url("https://static-api.nkstatic.com/not-image.svg")) == ""
 
 
@@ -1219,7 +1219,7 @@ def test_prewarm_once_renders_active_leaderboards_only(monkeypatch):
 
     asyncio.run(btd6._prewarm_once())
     # 竞赛榜 + Boss 标准榜 + CT 个人榜 + CT 地图卡（总览 + 5 张显示预设图），无 btd6ov/btd6rule/每日
-    assert rendered == ["btd6lb", "btd6lb", "btd6lb", "btd6ct",
+    assert rendered == ["btd6lb", "btd6lb", "btd6lb", "btd6ctd",
                         "btd6ctp_default", "btd6ctp_gametypes", "btd6ctp_maps", "btd6ctp_heroes",
                         "btd6ctp_coords"]
     assert btd6.push._prewarm_running is False
@@ -1884,7 +1884,7 @@ def test_asset_data_url_dedupes_inflight(monkeypatch, tmp_path):
             await asyncio.sleep(0.01)
             return _Resp()
 
-    monkeypatch.setattr(btd6.nkapi, "get_http_client", lambda t: _Client())
+    monkeypatch.setattr(btd6.nkapi, "get_http_client", lambda t, proxy=None: _Client())
     url = "https://static-api.nkstatic.com/dedup.png"
     btd6._asset_mem.clear()
 
@@ -1965,17 +1965,6 @@ def test_handler_collect_empty(monkeypatch):
         asyncio.run(btd6.collect_cmd.handlers[0](_ev(".btd6收集")))
     seg = btd6.collect_cmd.finished[-1]  # 空态 finish 原始字符串（与其他 handler 空态一致）
     assert "当前没有收集活动" in str(seg)
-# ---------------- CT 领土地图（ctmap + 卡片/文本/命令） ----------------
-
-# ---------------- CT 领土地图（ctmap + 卡片/文本/命令） ----------------
-
-# ---------------- CT 领土地图（ctmap + 卡片/文本/命令） ----------------
-
-# ---------------- CT 领土地图（ctmap + 卡片/文本/命令） ----------------
-
-# ---------------- CT 领土地图（ctmap + 卡片/文本/命令） ----------------
-
-# ---------------- CT 领土地图（ctmap + 卡片/文本/命令） ----------------
 
 # ---------------- CT 领土地图（ctmap + 卡片/文本/命令） ----------------
 
@@ -2758,3 +2747,128 @@ def test_send_push_batch_overview_accounting(monkeypatch, tmp_path):
     assert result2["overview_all"] is True
     assert bot2.sent.get(1, 0) == 0  # 健康群跳过，不再重收
     assert bot2.sent.get(2, 0) == 1  # 坏群补收
+
+
+# ---------------- 2026-09-29 审查修复回归 ----------------
+
+def test_push_race_fail_not_marked_by_stale_payload(monkeypatch, tmp_path):
+    """回归：重试标记必须看当前 kind 自己的 payload（p.get("details")），
+    不得用渲染循环残留的最后一个 payload——同批「纯总览类 race 发送失败 +
+    带详情类 coop 最后渲染」时，race 会被误标 skip-overview，重试轮零条消息
+    直至放弃，本期推送静默丢失。"""
+    sent = []
+
+    class _Bot:
+        async def send_group_msg(self, group_id=None, message=None, **kw):
+            if group_id == 200:
+                raise RuntimeError("group 200 unreachable")
+            sent.append((group_id, str(message)))
+
+    async def fake_render(prefix, html_fn):
+        return str(tmp_path / f"{prefix}.png")
+
+    async def fake_overview():
+        return {"now": int(time.time() * 1000), "races": [], "bosses": [], "cts": [],
+                "odysseys": [], "rush": [], "socials": [], "collectables": []}
+
+    async def fake_coop():
+        return {"prefix": "Co-op 挑战", "meta": {"name": "CoopX"}, "map_img": "",
+                "side_img": "", "scoring_cn": "固定种子", "kind_label": "Co-op 挑战",
+                "stale_note": ""}
+
+    monkeypatch.setattr(btd6.push, "get_bot", lambda: _Bot())
+    monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
+    monkeypatch.setattr(btd6.cards, "overview_html", lambda data: "<html/>")
+    monkeypatch.setattr(btd6.collect, "collect_overview", fake_overview)
+    monkeypatch.setattr(btd6.collect, "collect_daily_coop", fake_coop)
+
+    asyncio.run(_run_batch(monkeypatch, tmp_path, [
+        ("race", {"id": "r1", "name": "RaceX"}, "r1", "RaceX"),
+        ("coop", {"id": "c1", "name": "coop - CoopX"}, "c1", "coop - CoopX"),
+    ], groups=(100, 200)))
+
+    # 核心：race 失败后不得被误标 skip-overview（旧 bug 借 coop 残留 payload 的 details 误标）
+    assert "race" not in btd6.push._overview_already_sent
+    assert "coop" not in btd6.push._overview_already_sent
+    # 两类都留在缓冲等待重试，且均未标记已推
+    assert "race" in btd6.push._pending_batch
+    assert "coop" in btd6.push._pending_batch
+    assert btd6.push._last_pushed().get("race") is None
+    assert btd6.push._last_pushed().get("coop") is None
+
+
+def test_http_get_uses_proxy_and_falls_back_to_direct(monkeypatch):
+    """取数默认走 clash 代理；连接类失败（代理挂了）自动回退直连一次，
+    clash 停机时功能不中断（与 llm_price 时代的代理回退口径一致）。"""
+    calls = []
+
+    class _Resp:
+        status_code = 200
+        content = b"{}"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {}
+
+    class _ProxyClient:
+        async def get(self, url, timeout=None):
+            calls.append(("proxy", url))
+            raise btd6.nkapi.httpx.ConnectError("clash down")
+
+    class _DirectClient:
+        async def get(self, url, timeout=None):
+            calls.append(("direct", url))
+            return _Resp()
+
+    def fake_get_http_client(timeout=30.0, proxy=None):
+        return _ProxyClient() if proxy else _DirectClient()
+
+    monkeypatch.setattr(btd6.nkapi, "get_http_client", fake_get_http_client)
+    monkeypatch.setenv("BTD6_PROXY", "http://127.0.0.1:7890")
+    resp = asyncio.run(btd6._http_get(btd6.URL_RACES, 20))
+    assert calls == [("proxy", btd6.URL_RACES), ("direct", btd6.URL_RACES)]
+    assert resp.status_code == 200
+
+
+def test_http_get_read_timeout_no_fallback(monkeypatch):
+    """读取超时不回退直连：超时说明已到达上游，回退只会重复打一次 API。
+    （ConnectError 回退已在上一条覆盖，这里补齐边界。）"""
+    calls = []
+
+    class _ProxyClient:
+        async def get(self, url, timeout=None):
+            calls.append(("proxy", url))
+            raise btd6.nkapi.httpx.ReadTimeout("slow upstream")
+
+    monkeypatch.setattr(btd6.nkapi, "get_http_client", lambda t=30.0, proxy=None: _ProxyClient())
+    monkeypatch.setenv("BTD6_PROXY", "http://127.0.0.1:7890")
+    with pytest.raises(btd6.nkapi.httpx.ReadTimeout):
+        asyncio.run(btd6._http_get(btd6.URL_RACES, 20))
+    assert calls == [("proxy", btd6.URL_RACES)]
+
+
+def test_http_get_proxy_disabled_by_env(monkeypatch):
+    """BTD6_PROXY 设为空串时完全直连，不尝试代理。"""
+    calls = []
+
+    class _Resp:
+        status_code = 200
+        content = b"{}"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {}
+
+    class _DirectClient:
+        async def get(self, url, timeout=None):
+            calls.append(("direct", url))
+            return _Resp()
+
+    monkeypatch.setattr(btd6.nkapi, "get_http_client", lambda t=30.0, proxy=None: _DirectClient())
+    monkeypatch.setenv("BTD6_PROXY", "")
+    asyncio.run(btd6._http_get(btd6.URL_RACES, 20))
+    assert calls == [("direct", btd6.URL_RACES)]

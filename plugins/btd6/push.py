@@ -140,7 +140,8 @@ async def _prewarm_once() -> bool:
             try:
                 ct_col = await collect.collect_ct(now)
                 if not ct_col.get("empty"):
-                    jobs.append(cards._render_card("btd6ct", lambda: cards.ctmap_html(ct_col)))
+                    # 大地图是「详情」视图（.ct 详情）；无参默认走 btd6ctp_default 预设卡
+                    jobs.append(cards._render_card("btd6ctd", lambda: cards.ctmap_html(ct_col)))
                     for name, _label in cards.CT_PRESET_CARDS:
                         jobs.append(cards._render_card(
                             f"btd6ctp_{name}", lambda n=name: cards.ctmap_preset_html(ct_col, n)))
@@ -206,7 +207,8 @@ async def _lb_prewarm_jobs(data: dict, *, ongoing_only: bool = False) -> list:
 async def _prewarm_daily_cards() -> int:
     """渲染标准+高级每日卡各一张，返回成功张数。
 
-    每日挑战 00:20（Asia/Shanghai，NK 实测 16:20 UTC）切换，新一期首查原本必然冷渲染
+    每日挑战北京时间每天 16:00 切换（与游戏内正式刷新点一致，勿改：见 collect.py
+    每日选期注释），新一期首查原本必然冷渲染
     （跨境取数 + 地图大图 + 每张卡约 40 个塔立绘的重渲染，10 秒级）。
     卡片按内容哈希缓存：内容不变时重复预热近零成本，因此挂进每小时 :10
     的任务即可在重置后最迟 10 分钟自动暖好，用户查询命中缓存。
@@ -264,7 +266,7 @@ async def btd6_prewarm_job():
                          timezone="Asia/Shanghai")
 async def btd6_prewarm_lb_hourly_job():
     """每小时 :10 错峰预热：进行中活动的榜单卡（race/boss/ct 各一张，无则跳过）
-    + 标准/高级每日卡 + Co-op 卡（00:20 每日切换后最迟约 50 分钟暖好，内容不变时近零成本）。
+    + 标准/高级每日卡 + Co-op 卡（16:00 每日切换后最迟约 50 分钟暖好，内容不变时近零成本）。
 
     榜单卡含"剩余 X天X小时"相对时间（时间粒度按 15 分钟桶取整），04:00 预热的卡只对
     邻近时段有效；每小时错峰重渲才能让"首查秒回"持续生效。数据全部来自既有缓存/
@@ -300,7 +302,7 @@ _register_warmup = getattr(get_driver(), "on_bot_connect", get_driver().on_start
 @_register_warmup
 async def _btd6_warm_on_connect(bot=None) -> None:
     await asyncio.sleep(5)  # 等 NapCat 连接稳定后再拉数据/归档/预热榜单
-    # 帮助菜单是纯静态卡片，预先渲染到持久缓存目录，确保 .btd6 / .btd6帮助 首屏直接复用。
+    # 帮助菜单是纯静态卡片，预先渲染到持久缓存目录，确保 .btd6/.btd 首屏直接复用。
     # 与 _prewarm_once 并发：help 不依赖网络/信号量，但走同一 RENDER_SEM 串行化，所以放到
     # _prewarm_once 之后避免抢用户首查的渲染位。
     await _prewarm_once()
@@ -577,7 +579,7 @@ async def _render_kind_payload(kind: str, ev: dict, label: str,
                 col = await collect._safe(collect.collect_ct())
                 if col and not col.get("empty"):
                     p2 = await cards._render_card(
-                        "btd6ct", lambda c=col: cards.ctmap_html(c))
+                        "btd6ctd", lambda c=col: cards.ctmap_html(c))
                     vt = f"争夺领土地图：{label}" if label else "争夺领土地图"
                     details.append((vt, p2))
             return {"overview": path, "announce": text, "label": label, "details": details}
@@ -825,7 +827,7 @@ async def _flush_push_batch() -> None:
                     _overview_already_sent.discard(kind)
                 _logger.error(
                     "BTD6 批量推送渲染连续 %d 轮失败，本轮放弃 kinds=%s"
-                    "（可用 .btd6推送检查 手动补推）",
+                    "（可用 .推送检查 手动补推）",
                     _PUSH_RETRY_MAX, give_up_render)
             if len(give_up_render) < len(render_failed):
                 _logger.warning("BTD6 批量推送渲染失败已回填 kinds=%s",
@@ -867,7 +869,10 @@ async def _flush_push_batch() -> None:
                 # 总览已发出且本类还有详情可补：标记 skip，重试只补详情。
                 # 纯总览类（race/rush）无详情，重试必须重发总览——否则重试轮
                 # messages 为空恒判失败直至 give-up，且标记滞留会让后续期次永久静默。
-                if result.get("overview_ok") and kind in _OVERVIEW_KINDS and payload.get("details"):
+                # 注意必须看当前 kind 自己的 p，不能用渲染循环残留的 payload 变量：
+                # 同批最后渲染的若是带详情类（如 coop），残留 payload 有 details，
+                # 会把纯总览类的失败误标成 skip-overview，重试轮零消息直至放弃。
+                if result.get("overview_ok") and kind in _OVERVIEW_KINDS and p.get("details"):
                     _overview_already_sent.add(kind)
         for kind, ev_id in to_mark:
             await asyncio.to_thread(_set_last_pushed, kind, ev_id)
@@ -886,7 +891,7 @@ async def _flush_push_batch() -> None:
                 given_up.add(kind)
             _logger.error(
                 "BTD6 批量推送连续 %d 轮未完整送达，本轮放弃 kinds=%s"
-                "（多半是某个订阅群已不可达；可用 .btd6推送检查 手动补推）",
+                "（多半是某个订阅群已不可达；可用 .推送检查 手动补推）",
                 _PUSH_RETRY_MAX, to_give_up)
         if to_retry:
             with _batch_lock:
@@ -1011,7 +1016,7 @@ async def btd6_push_social_job(): await _btd6_push_kind("social")
 
 # ---------------- 手动推送检查（owner 调试/补推） ----------------
 
-push_check_cmd = on_command("btd6推送检查", priority=5, block=True)
+push_check_cmd = on_command("推送检查", priority=5, block=True)
 
 _PUSH_KIND_CN = {"race": "竞速", "boss": "Boss", "ct": "争夺领土", "odyssey": "远征",
                  "daily": "每日挑战", "rush": "Boss Rush", "coop": "Co-op",
@@ -1031,7 +1036,7 @@ def _parse_push_kind(text: str) -> str:
 
 @push_check_cmd.handle()
 async def _push_check(event: MessageEvent):
-    """`.btd6推送检查 [kind]`：无参数看各路当前/已推对照；带 kind 则把当期强制补推到本群。
+    """`.推送检查 [kind]`：无参数看各路当前/已推对照；带 kind 则把当期强制补推到本群。
 
     强制补推仍以 id 去重（已推送的不重发），只跳过“刷新点 12 分钟窗口”限制，
     用于窗口期服务异常/重启导致的漏推。
@@ -1060,7 +1065,7 @@ async def _push_check(event: MessageEvent):
         # 活动名/id 来自 NK API（防 CQ 码注入）：整段经 MessageSegment.text 发送
         await push_check_cmd.finish(MessageSegment.text(
             "🔍 BTD6 推送对照（当前 / 已推）：\n" + "\n".join(lines)
-            + "\n用法：.btd6推送检查 远征（强制补推当期到本群）"))
+            + "\n用法：.推送检查 远征（强制补推当期到本群）"))
         return
     if not isinstance(event, GroupMessageEvent):
         await push_check_cmd.finish("补推请在群里使用（将发到本群）")

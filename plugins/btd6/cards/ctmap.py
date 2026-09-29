@@ -492,7 +492,7 @@ def ctmap_html(col: dict) -> str:
 # 站点 DISPLAY PRESETS 的 4 种预设（handler 发送顺序）
 CT_PRESET_CARDS = (
     ("default", "默认"),
-    ("gametypes", "游戏类型"),
+    ("gametypes", "类型"),
     ("maps", "地图背景"),
     ("heroes", "英雄"),
     ("coords", "坐标"),
