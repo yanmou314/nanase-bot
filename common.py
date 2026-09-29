@@ -14,6 +14,7 @@ import uuid
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from nonebot.adapters.onebot.v11 import Message, MessageEvent, MessageSegment
 
@@ -144,8 +145,6 @@ def parse_tag(arg: str) -> str:
     # 此处已无空格可控（isspace 分支先行返回），无需再 replace
     return tag if "#" in tag else ""
 
-
-from zoneinfo import ZoneInfo
 
 _SH_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -500,28 +499,30 @@ def gradient_background(w: int, h: int, top=(249, 248, 250), bottom=(243, 241, 2
 
 # ---------------- httpx 客户端单例 ----------------
 
-_http_clients: dict[float, object] = {}
-# 并发首调同一 timeout 时败者的客户端无法放回注册表，记入孤儿表由关停统一关闭
+_http_clients: dict[tuple, object] = {}
+# 并发首调同一 (timeout, proxy) 时败者的客户端无法放回注册表，记入孤儿表由关停统一关闭
 _orphan_clients: list = []
 
 
-def get_http_client(timeout: float = 30.0):
-    """按超时参数缓存的 httpx.AsyncClient 单例。
+def get_http_client(timeout: float = 30.0, proxy: str | None = None):
+    """按 (超时, 代理) 参数缓存的 httpx.AsyncClient 单例。
 
     若池内实例已 is_closed，先 pop 再注册新客户端，避免 setdefault 一直
     挂着关闭实例、把新客户端永久丢进孤儿表。
     """
     import httpx
 
-    client = _http_clients.get(timeout)
+    key = (timeout, proxy)
+    client = _http_clients.get(key)
     if client is not None and client.is_closed:
-        _http_clients.pop(timeout, None)
+        _http_clients.pop(key, None)
         client = None
     if client is None:
         # 显式不跟随重定向：SSRF 白名单（如 btd6 的 _validate_url）只校验首跳，
         # 依赖 httpx 默认值不够稳，白名单主机 302 到内网必须直接拒绝
-        new_client = httpx.AsyncClient(timeout=timeout, follow_redirects=False)
-        existing = _http_clients.setdefault(timeout, new_client)
+        new_client = httpx.AsyncClient(timeout=timeout, follow_redirects=False,
+                                       proxy=proxy or None)
+        existing = _http_clients.setdefault(key, new_client)
         if existing is new_client:
             client = new_client
         else:
