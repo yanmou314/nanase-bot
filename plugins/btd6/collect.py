@@ -348,9 +348,10 @@ def _coop_pick(items: list, now_ms: int) -> dict | None:
 
 
 async def collect_daily_dual(now_ms: int | None = None) -> dict:
-    """每日挑战 标准+高级合卡数据（bdual 模板）；选期口径与 collect_daily 一致。
+    """每日挑战 标准+高级+Co-op 三面板合卡数据（bdual 模板）；选期口径与 collect_daily 一致。
 
-    variants[].issue 为面板标签（标准·第N期 / 高级·第N期）；announce 供推送文案使用。
+    variants[].issue 为面板标签（标准·第N期 / 高级·第N期 / Co-op 挑战）；
+    announce 供推送文案使用。Co-op 不再独立采样推送（2026-10-04），换期信息随本卡到达。
     """
     now = now_ms if now_ms is not None else int(time.time() * 1000)
     items = await nkapi.fetch_body(nkapi.URL_DAILY)

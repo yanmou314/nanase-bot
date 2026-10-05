@@ -54,3 +54,4 @@ plugins/**/usage.json
 plugins/**/pending_requests.json
 *.unreadable-*
 plugins/**/auto_reject.json
+plugins/**/notify_index.json

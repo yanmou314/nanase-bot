@@ -320,7 +320,7 @@ _pending_loaded = False
 
 
 def _save_pending() -> None:
-    """待审申请持久化（QQ 侧 flag 48h 内有效，重启后仍可决策）。"""
+    """待审申请持久化（3 小时内重启后仍可决策，超时自动失效）。"""
     # 读失败后若继续用内存空表覆盖，会把磁盘上真实待审清空且备份也可能已失败
     if json_load_had_error(_PENDING_FILE):
         _logger.warning("跳过待审申请落盘：上次读取失败，避免覆盖原状态")
@@ -347,10 +347,14 @@ def _load_pending_once() -> None:
             restored += 1
     if restored:
         _logger.info("已恢复 %d 条待审申请（进程重启前遗留）", restored)
-_notify_index: dict[str, str] = {}  # 机器人发给主人的申请通知 message_id -> pending flag
+    _load_notify_once()
+_notify_index: dict[str, str] = {}  # 机器人发给主人的申请通知 message_id -> pending flag（或 _PROMPT_FLAG）
+_NOTIFY_INDEX_FILE = os.path.join(os.path.dirname(__file__), "notify_index.json")
+_notify_loaded = False
+_PROMPT_FLAG = "__prompt__"  # 决策提示消息的索引标记：引用提示本身可唤出最新待处理清单
 # 可重入：_save_keywords 持锁期间会经 _load_config/save_json_state 再次申请同一把锁
 _save_lock = threading.RLock()
-_PENDING_TTL = 48 * 3600  # 与 QQ 侧 flag 有效期一致
+_PENDING_TTL = 3 * 3600  # 主人指定：待审申请保留 3 小时，超时自动失效（QQ 侧 flag 有效期更长，窗口内审批安全）
 
 
 def _purge_pending() -> None:
@@ -361,9 +365,12 @@ def _purge_pending() -> None:
         if now - _pending[key].get("ts", 0) > _PENDING_TTL:
             _pending.pop(key, None)
     for mid in list(_notify_index):
-        if _notify_index[mid] not in _pending:
+        flag = _notify_index[mid]
+        # 提示标记不绑定具体申请，保留（总量有 200 条上限兜底）
+        if flag != _PROMPT_FLAG and flag not in _pending:
             _notify_index.pop(mid, None)
     _save_pending()
+    _save_notify_index()
 
 
 def _remember_notify(resp, flag: str) -> None:
@@ -378,6 +385,45 @@ def _remember_notify(resp, flag: str) -> None:
         for k in list(_notify_index)[: len(_notify_index) - 100]:
             _notify_index.pop(k, None)
     _notify_index[str(mid)] = flag
+    _save_notify_index()
+
+
+def _save_notify_index() -> None:
+    """通知索引持久化：与 _pending 同生命周期，重启后引用原通知仍能路由。"""
+    if json_load_had_error(_NOTIFY_INDEX_FILE):
+        _logger.warning("跳过通知索引落盘：上次读取失败，避免覆盖原索引")
+        return
+    try:
+        save_json_state(_NOTIFY_INDEX_FILE, dict(_notify_index), _save_lock)
+    except Exception:
+        _logger.warning("通知索引持久化失败", exc_info=True)
+
+
+def _load_notify_once() -> None:
+    """恢复通知索引；只保留仍指向待审申请（或提示标记）的条目。"""
+    global _notify_loaded
+    if _notify_loaded and not json_load_had_error(_NOTIFY_INDEX_FILE):
+        return
+    _notify_loaded = True
+    data = load_json_state(_NOTIFY_INDEX_FILE, _save_lock)
+    for mid, flag in data.items():
+        if flag == _PROMPT_FLAG or flag in _pending:
+            _notify_index[str(mid)] = str(flag)
+
+
+def _pending_listing_text() -> str:
+    """多条待审时的清单文案：每条注明类型/群号/申请人/时间，指引引用对应通知处理。"""
+    items = sorted(_pending.items(), key=lambda kv: kv[1].get("ts") or 0)
+    lines = [f"⚠️ 当前有 {len(items)} 个待处理申请："]
+    for i, (_key, v) in enumerate(items, 1):
+        ts = time.strftime("%m-%d %H:%M", time.localtime(v.get("ts") or 0))
+        if v.get("kind") == "friend":
+            lines.append(f"{i}）好友申请 · 申请人 {v.get('user_id')}（{ts}）")
+        else:
+            who = "邀请人" if v.get("sub_type") == "invite" else "申请人"
+            lines.append(f"{i}）进群申请 · 群 {v.get('group_id')} · {who} {v.get('user_id')}（{ts}）")
+    lines.append("引用对应的🔔申请通知回复「同意/拒绝」即可处理指定的那一条；引用本条消息可随时刷新清单")
+    return "\n".join(lines)
 
 
 def _load_config() -> dict:
@@ -953,12 +999,17 @@ async def handle_request(bot: Bot, event):
 
 
 # ---------------- 主人回复 同意/拒绝 ----------------
-async def _send_decision_notice(bot: Bot, message: str) -> None:
-    """审批结果是管理操作反馈，只私发给主人，不在群里公开。"""
-    await bot.send_private_msg(
+async def _send_decision_notice(bot: Bot, message: str, *, register: bool = False) -> None:
+    """审批结果是管理操作反馈，只私发给主人，不在群里公开。
+
+    register=True 时把本条消息登记进通知索引（_PROMPT_FLAG 标记）：
+    主人引用提示本身也能唤出最新待处理清单，而不是反复看到同一条提示。"""
+    resp = await bot.send_private_msg(
         user_id=int(OWNER),
         message=MessageSegment.text(message),
     )
+    if register:
+        _remember_notify(resp, _PROMPT_FLAG)
 
 
 async def _process_decision(bot: Bot, event: MessageEvent, action: bool) -> None:
@@ -1026,9 +1077,9 @@ async def _process_decision(bot: Bot, event: MessageEvent, action: bool) -> None
                 except Exception:
                     _n2 = 0
                 _extra = f"\n另有 {_n2} 个战网验证待审批，用 .同意 QQ号 处理" if _n2 else ""
+                # 多条待审：回发可引用的清单并登记为提示（引用本条可随时刷新清单）
                 await _send_decision_notice(
-                    bot,
-                    "⚠️ 有多个待处理申请，请回复时引用机器人发来的申请通知消息来指定处理哪一个" + _extra,
+                    bot, _pending_listing_text() + _extra, register=True,
                 )
                 return
 

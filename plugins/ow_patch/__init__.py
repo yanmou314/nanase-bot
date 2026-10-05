@@ -325,12 +325,14 @@ def parse_month_page(page_html: str, year: int, month: int, source_url: str) -> 
 
 
 def _target_months(now: datetime) -> list[tuple[int, int]]:
-    """本月必查；每月 1~3 号附带查上月，防跨月补丁漏推。"""
+    """本月+上月都查。上月页会追加热修补丁；且新月份页可能滞后发布
+    （如 2026-10-04 时 10 月页仍未建，只查本月会解析出 0 节，连续 3 轮
+    误报"官网可能已改版"并漏掉上月热修）。多一次 hourly 抓取成本可忽略；
+    上月页 404 静默降级为 []，不影响本月解析。"""
     months = [(now.year, now.month)]
-    if now.day <= 3:
-        first = date(now.year, now.month, 1)
-        prev = first - timedelta(days=1)
-        months.append((prev.year, prev.month))
+    first = date(now.year, now.month, 1)
+    prev = first - timedelta(days=1)
+    months.append((prev.year, prev.month))
     return months
 
 

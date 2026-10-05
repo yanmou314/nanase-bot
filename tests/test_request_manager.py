@@ -25,7 +25,9 @@ def _isolate_pending(monkeypatch, tmp_path):
     # 隔离生产 pending_requests.json：以 root 跑测试会把该文件改成 root 属主，
     # 叠加 chmod 的 ACL mask 后 qqbot 进程读不了（2026-09-28 线上告警）
     monkeypatch.setattr(request_manager, "_PENDING_FILE", str(tmp_path / "pending_requests.json"))
+    monkeypatch.setattr(request_manager, "_NOTIFY_INDEX_FILE", str(tmp_path / "notify_index.json"))
     monkeypatch.setattr(request_manager, "_pending_loaded", False)
+    monkeypatch.setattr(request_manager, "_notify_loaded", False)
     request_manager._pending.clear()
     request_manager._notify_index.clear()
     yield
@@ -146,6 +148,49 @@ def test_purge_pending_ttl():
     assert "flag_old" not in mod._pending
     assert "flag_new" in mod._pending
     mod._pending.clear()
+
+
+def test_pending_ttl_is_3h():
+    """主人指定：待审申请 3 小时后自动失效（4 小时前的清掉，2 小时前的保留）。"""
+    mod = request_manager
+    mod._pending.clear()
+    mod._pending["stale"] = {"ts": time.time() - 4 * 3600}
+    mod._pending["fresh"] = {"ts": time.time() - 2 * 3600}
+    mod._purge_pending()
+    assert "stale" not in mod._pending and "fresh" in mod._pending
+    mod._pending.clear()
+
+
+def test_notify_index_persisted_across_restart():
+    """通知索引保存/恢复：重启（清内存后重载）后引用原通知仍能路由，失效条目被剔除。"""
+    mod = request_manager
+    mod._pending["fA"] = _pending_group("fA", 111, uid=222)
+    mod._notify_index["900"] = "fA"
+    mod._notify_index["901"] = mod._PROMPT_FLAG
+    mod._notify_index["902"] = "fGone"  # 指向已失效申请：恢复时应被剔除
+    mod._save_notify_index()
+    mod._notify_index.clear()
+    mod._notify_loaded = False
+    mod._load_notify_once()
+    assert mod._notify_index.get("900") == "fA"
+    assert mod._notify_index.get("901") == mod._PROMPT_FLAG
+    assert "902" not in mod._notify_index
+
+
+def test_multi_pending_lists_and_prompt_refresh():
+    """多条待审：裸发「同意」回发清单；引用提示本身可刷新清单（不再死循环）。"""
+    mod = request_manager
+    bot = ApproveBot()
+    mod._pending["fF"] = _pending_friend("fF", 888)
+    mod._pending["fG"] = _pending_group("fG", 111, uid=999)
+    asyncio.run(mod._process_decision(bot, _owner_private_msg("同意"), True))
+    text = str(bot.sent_private[-1]["message"])
+    assert "2 个待处理申请" in text and "888" in text and "999" in text and "引用" in text
+    # 引用清单提示本身：再次回发最新清单，而不是死循环同一条泛化提示
+    mod._notify_index["777"] = mod._PROMPT_FLAG
+    asyncio.run(mod._process_decision(bot, _owner_private_msg("同意", reply_to=777), True))
+    assert "2 个待处理申请" in str(bot.sent_private[-1]["message"])
+    assert bot.friend_requests == [] and bot.group_requests == []
 
 
 def test_owner_decision_regex_patterns():

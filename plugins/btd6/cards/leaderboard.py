@@ -4,6 +4,8 @@
   RANK | 头像+昵称 | Time Submitted（绝对+相对） | Game Time（层数+用时）
 顶部：BOSS LEADERBOARD 横幅 + 标准/精英切换条。
 """
+import os
+
 from . import common
 from .. import util
 
@@ -12,16 +14,74 @@ _MEDAL_COLOR = {1: "#f5c518", 2: "#c0c0c0", 3: "#cd7f32"}
 _TIER_ICON_FALLBACK = "🏆"
 _WATCH_FALLBACK = "⏱"
 
+# _list_shell 的背景渐变节点（与 common._list_shell 的 linear-gradient 一致）
+_LB_BG_STOPS = ((0.0, (70, 200, 241)), (0.56, (18, 158, 208)), (1.0, (8, 126, 175)))
+
+
+def _lb_probe_height(body: str, probe_prefix: str, generous: int, *, margin: int = 24) -> int:
+    """两遍渲染定高：宽松探针实测内容底部，再按实测出正式页面高度。
+
+    行高公式（boss 78px/紧凑 56px）会被表格 border-spacing、长昵称换行、
+    提示行等推高，累计误差把最后一名推出页面底边（2026-10-06 实测 25 行
+    boss 榜裁掉末行）。与每日三面板卡同思路；探针渲染进 cache/.render
+    子目录（max_age=120），不触碰正式卡片缓存；探针失败回退宽松估算值。
+    若内容顶到探针页底（初始估算仍偏低，测量不可信），逐轮放大重测（至多 3 轮）。"""
+    try:
+        from common import render_html_to_png
+        from .rules import _daily_content_bottom_css
+        probe_dpi = 60
+        cache_dir = os.path.join(os.path.dirname(__file__), "cache", ".render")
+        g = max(generous, 320)
+        need = max(g, 320)
+        for _ in range(3):
+            probe = render_html_to_png(
+                common._list_shell(body, g), probe_prefix, cache_dir,
+                max_age=120, dpi=probe_dpi)
+            need = _daily_content_bottom_css(probe, probe_dpi, stops=_LB_BG_STOPS) + margin
+            need = max(320, min(int(need), 11000))
+            if need + 8 <= g:  # 内容在探针页内自然结束：测量可信
+                return need
+            g = g * 3 // 2 + 400  # 内容顶到页底：估算仍偏低，放大重测
+        return need
+    except Exception:
+        return max(320, min(generous, 11000))
+
 
 def _lb_banner_html(title: str, sub: str = "", note: str = "", img: str = "") -> str:
-    """横幅：主标题 + 剩余时间（sub）都在条内；note 仍放条下。"""
+    """横幅：主标题 + 剩余时间（sub）都在条内；note 仍放条下。
+
+    img（boss 官图 data URI）存在时作为标题条背景：按官图宽高比撑出横幅高度
+    （contain 完整显示不裁切不变形，用户需求 2026-10-06），文字沉底叠在蒙版上；
+    宽高比测量失败时回退 180px 高 + contain（同样不裁切）。"""
     note_html = f"<div class='exlb-note'>{util._esc(note)}</div>" if note else ""
     sub_html = f"<div class='exlb-sub'>{util._esc(sub)}</div>" if sub else ""
-    img_html = (f"<img class='exlb-hero-img' src='{util._esc(img)}' alt=''/>" if img else "")
+    bg_attr = ""
+    if img:
+        ratio = 0.0
+        try:
+            import base64 as _b64
+            from io import BytesIO as _BIO
+            from PIL import Image as _PILImage
+            payload = img.split(",", 1)[1] if "," in img else ""
+            im = _PILImage.open(_BIO(_b64.b64decode(payload)))
+            w, h = im.size
+            if w > 0 and h > 0:
+                ratio = w / h
+        except Exception:
+            ratio = 0.0
+        inner_w = 774  # 800 卡宽 - 横幅左右 margin 20 - 边框 6
+        h_px = min(int(inner_w / ratio), 480) if ratio else 180
+        pad_top = max(14, h_px - 90)  # 文字沉底：避开官图中部的 logo 区
+        bg_attr = (
+            f" style=\"min-height:{h_px}px;padding:{pad_top}px 16px 14px;"
+            "background-image:linear-gradient(180deg,rgba(6,42,68,.35),rgba(6,42,68,.55)),"
+            f"url('" + util._esc(img) + "');"
+            "background-size:auto,contain;background-repeat:no-repeat,no-repeat;"
+            "background-position:center;\"")
     return (
-        "<div class='exlb-banner'>"
+        f"<div class='exlb-banner'{bg_attr}>"
         f"<div class='exlb-banner-title'>{util._esc(title)}</div>"
-        f"{sub_html}{img_html}"
+        f"{sub_html}"
         "</div>"
         + (f"<div class='exlb-meta'>{note_html}</div>" if note_html else "")
     )
@@ -123,8 +183,10 @@ def boss_leaderboard_html(col: dict) -> str:
                         col.get("stale_note") or "", col.get("img") or "")
         + table
     )
-    h = 20 + 56 + 40 + 36 + max(len(entries), 1) * 78 + 24
-    return common._list_shell(body, min(h, 3200))
+    h = _lb_probe_height(
+        body, "btd6lbprobe",
+        20 + 56 + 40 + 36 + max(len(entries), 1) * 104 + 300)
+    return common._list_shell(body, h)
 
 
 def leaderboard_html(col: dict) -> str:
@@ -168,5 +230,7 @@ def leaderboard_html(col: dict) -> str:
     body = (f"<div class='exlb-banner'><div class='exlb-banner-title'>{util._esc(banner_title)}</div></div>"
             f"<div class='lb-head'>{head_body}</div>"
             f"<div class='lb-panel'>{rows_html}</div>")
-    h = 20 + 56 + 90 + max(len(rows), 1) * 56 + 40
+    h = _lb_probe_height(
+        body, "btd6lbprobec",
+        20 + 56 + 90 + max(len(rows), 1) * 64 + 200)
     return common._list_shell(body, h)

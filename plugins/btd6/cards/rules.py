@@ -756,14 +756,17 @@ def _daily_variant_cells(v: dict, head_cls: str = "standard") -> dict:
             "rule": rule_html, "grid": grid_html, "_head_cls": head_cls}
 
 
-def _daily_content_bottom_css(png_path: str, dpi: int) -> int:
-    """扫描探针渲染图，返回内容最后一行的 CSS 高度（排除背景渐变）。"""
+def _daily_content_bottom_css(png_path: str, dpi: int, stops=None) -> int:
+    """扫描探针渲染图，返回内容最后一行的 CSS 高度（排除背景渐变）。
+
+    stops=（(位置, (r,g,b)), ...）背景渐变节点；缺省为 Boss 双面板壳渐变，
+    排行榜列表壳（_list_shell）传入自己的渐变节点。"""
     from PIL import Image
 
     im = Image.open(png_path).convert("RGB")
     w, h = im.size
     scale = dpi / 96
-    stops = ((0.0, (90, 163, 216)), (0.52, (47, 126, 184)), (1.0, (26, 95, 150)))
+    stops = stops or ((0.0, (90, 163, 216)), (0.52, (47, 126, 184)), (1.0, (26, 95, 150)))
 
     def bg_at(y):
         t = min(1.0, y / h)

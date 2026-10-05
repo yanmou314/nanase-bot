@@ -106,8 +106,11 @@ def _cover_crop(img: Image.Image, tw: int, th: int) -> Image.Image:
 
 
 def _hex_bbox_pts(tw: float, th: float) -> list[tuple[float, float]]:
-    """外接尺寸 tw×th 的尖顶正六边形顶点（顶点在上/下）。"""
-    return [(tw / 2, 0), (tw, th / 4), (tw, th * 3 / 4), (tw / 2, th), (0, th * 3 / 4), (0, th / 4)]
+    """外接尺寸 tw×th 的平顶正六边形顶点（平边在上/下）。
+
+    棋盘布局顺时针转 90°（AAA 落到最下、DAA 升到最上），六边形随之从尖顶
+    改为平顶取向；格内地图贴图/角标/文字保持正向。"""
+    return [(0, th / 2), (tw / 4, 0), (tw * 3 / 4, 0), (tw, th / 2), (tw * 3 / 4, th), (tw / 4, th)]
 
 
 # 棋盘 PNG 与渲染期无关（活动一周期数/布局固定），按事件+视图+角标缓存
@@ -138,14 +141,15 @@ def _render_board(col: dict, view: str | None = None, badge: bool = False) -> tu
 
     grid = ctmap.build_ct_grid()
     ct_tiles: dict = col.get("ct_tiles") or {}
-    content_w = common.CARD_W - 2 * _PAD - 24
-    # board_metrics 返回 (width, height, left, top)，取 width 反推格尺寸
-    w1 = ctmap.board_metrics(grid["tiles"], grid["spawns"], 1.0, pad=0.0)[0]
-    size = content_w / w1
+    content_w = common.CARD_W - 2 * _PAD  # 与标题条/图例同宽（原多减 24 致面板窄一截）
+    # 布局转 90° 后棋盘宽度 = 未旋转高度：按高度反推格尺寸，
+    # 棋盘面板左右缘与标题条/图例对齐（旧公式按未旋转宽度反推，面板偏窄不齐）
+    h1 = ctmap.board_metrics(grid["tiles"], grid["spawns"], 1.0, pad=0.0)[1]
+    size = (content_w - 24) / h1
     css_w, css_h, left, top = ctmap.board_metrics(grid["tiles"], grid["spawns"], size, pad=12.0)
 
     s = _SS
-    W, H = round(css_w * s), round(css_h * s)
+    W, H = round(css_h * s), round(css_w * s)  # 布局转 90° 后宽高互换
     board = Image.new("RGB", (W, H), (13, 32, 58))
     draw = ImageDraw.Draw(board)
     R = size * s            # 格外接半径（像素）
@@ -193,7 +197,11 @@ def _render_board(col: dict, view: str | None = None, badge: bool = False) -> tu
 
     def tile_xy(q: int, r: int) -> tuple[float, float]:
         x, y = ctmap.hex_position(q, r, size)
-        return (x - left + 12) * s, (y - top + 12) * s
+        px, py = (x - left + 12) * s, (y - top + 12) * s
+        # 对齐 API Explorer/game：o() 的 x 取负（镜像）后按 A 队视角逆时针转
+        # 90°，两步合成即 (px,py)→(py,px) 的对角线翻转——AAA（A 队出生点）
+        # 落到最下、DAA 升到最上，与游戏内 A 队视角一致；格内贴图/文字保持正向
+        return py, px
 
     def paste_hex_art(cx: float, cy: float, art: Image.Image, Ri: float, tw: int, th: int) -> None:
         mask = Image.new("L", (tw, th), 0)
@@ -204,8 +212,8 @@ def _render_board(col: dict, view: str | None = None, badge: bool = False) -> tu
             mask.close()
 
     def fill_hex(cx: float, cy: float, color: tuple[int, int, int], Ri: float) -> None:
-        draw.polygon([(cx + Ri * math.cos(math.radians(60 * k - 30)),
-                       cy + Ri * math.sin(math.radians(60 * k - 30))) for k in range(6)], fill=color)
+        draw.polygon([(cx + Ri * math.cos(math.radians(60 * k)),
+                       cy + Ri * math.sin(math.radians(60 * k))) for k in range(6)], fill=color)
 
     decor_cache: dict[tuple, Image.Image | None] = {}
 
@@ -247,11 +255,11 @@ def _render_board(col: dict, view: str | None = None, badge: bool = False) -> tu
         gd = data.get("GameData") or {}
         tile_type = str(data.get("TileType") or "Regular")
         # 深色描边（外六边形）
-        draw.polygon([(cx + (R - ol // 2) * math.cos(math.radians(60 * k - 30)),
-                       cy + (R - ol // 2) * math.sin(math.radians(60 * k - 30))) for k in range(6)],
+        draw.polygon([(cx + (R - ol // 2) * math.cos(math.radians(60 * k)),
+                       cy + (R - ol // 2) * math.sin(math.radians(60 * k))) for k in range(6)],
                      fill=_OUTLINE)
         Ri = R - ol
-        tw, th = int(math.sqrt(3) * Ri), int(2 * Ri)
+        tw, th = int(2 * Ri), int(math.sqrt(3) * Ri)  # 平顶：宽 2R、高 √3R
 
         if view == "default":
             # 站点 decor 层：青柠底 + 主题装饰纹理（RGBA 透明底，meet 适配居中）
@@ -323,11 +331,11 @@ def _render_board(col: dict, view: str | None = None, badge: bool = False) -> tu
     for sp in grid["spawns"]:
         cx, cy = tile_xy(sp["q"], sp["r"])
         color = _hex_to_rgb(ctmap.TEAM_COLORS.get(sp["team"], "#888888"))
-        draw.polygon([(cx + (R - ol // 2) * math.cos(math.radians(60 * k - 30)),
-                       cy + (R - ol // 2) * math.sin(math.radians(60 * k - 30))) for k in range(6)],
+        draw.polygon([(cx + (R - ol // 2) * math.cos(math.radians(60 * k)),
+                       cy + (R - ol // 2) * math.sin(math.radians(60 * k))) for k in range(6)],
                      fill=(242, 246, 251))
-        draw.polygon([(cx + (R - ol) * math.cos(math.radians(60 * k - 30)),
-                       cy + (R - ol) * math.sin(math.radians(60 * k - 30))) for k in range(6)],
+        draw.polygon([(cx + (R - ol) * math.cos(math.radians(60 * k)),
+                       cy + (R - ol) * math.sin(math.radians(60 * k))) for k in range(6)],
                      fill=color)
         f = _font(0.42 * size * s)
         draw.text((cx, cy - 0.30 * R), "起点", font=f, fill=(255, 255, 255),
@@ -350,8 +358,8 @@ def _render_board(col: dict, view: str | None = None, badge: bool = False) -> tu
     while len(_BOARD_CACHE) >= 24:
         # 逐出最旧而非 clear() 全清：多期活动/预设卡连续渲染时避免整批重建卡顿
         _BOARD_CACHE.pop(next(iter(_BOARD_CACHE)), None)
-    _BOARD_CACHE[cache_key] = (data_url, css_w, css_h)
-    return data_url, css_w, css_h
+    _BOARD_CACHE[cache_key] = (data_url, css_h, css_w)
+    return data_url, css_h, css_w
 
 
 def _map_shell(body: str, w: int, h: int) -> str:

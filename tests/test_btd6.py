@@ -378,6 +378,50 @@ def test_refresh_url_failure_counted(monkeypatch, caplog):
     assert any("后台刷新失败" in r.message for r in caplog.records)
 
 
+def test_refresh_url_log_masks_oak_in_exception(monkeypatch, caplog):
+    """OAK 等同账号凭证绝不进日志：httpx 异常消息内含完整 oak URL 时必须脱敏。"""
+
+    async def broken(url, timeout):
+        raise RuntimeError("Client error '404 Not Found' for url "
+                           "'https://data.ninjakiwi.com/btd6/save/oak_0123456789abcdef'")
+
+    monkeypatch.setattr(btd6.nkapi, "_http_get", broken)
+    url = btd6.nkapi.URL_SAVE + "oak_0123456789abcdef"
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(btd6._refresh_url(url))
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "oak_0123456789abcdef" not in text
+    assert "oak_***" in text
+
+
+def test_fetch_leaderboard_paginated_page_cap(monkeypatch):
+    """rows 超大时页数硬上限仍为 LB_MAX_PAGE，不得随 rows 放大（防御纵深）。"""
+    nk = btd6.nkapi
+    chain_len = 50  # next 链比上限长：上限失效（旧 max 写法 rows=10000 时）会走满 50 页
+    visited = []
+
+    async def fake_fetch(url):
+        visited.append(url)
+        return []  # 每页 0 条：诱使一直翻页
+
+    monkeypatch.setattr(nk, "fetch_body", fake_fetch)
+    start = "https://data.ninjakiwi.com/btd6/races/leaderboard?page=0"
+    with nk._cache_lock:
+        saved_next = dict(nk._lb_next_cache)
+        nk._lb_next_cache.clear()
+        for i in range(chain_len):
+            nk._lb_next_cache[f"https://data.ninjakiwi.com/btd6/races/leaderboard?page={i}"] = \
+                f"https://data.ninjakiwi.com/btd6/races/leaderboard?page={i + 1}"
+    try:
+        result = asyncio.run(nk.fetch_leaderboard_paginated(start, 10000))
+    finally:
+        with nk._cache_lock:
+            nk._lb_next_cache.clear()
+            nk._lb_next_cache.update(saved_next)
+    assert result == []                        # 每页 0 条，entries 为空
+    assert len(visited) == nk.LB_MAX_PAGE      # 走满 20 页硬上限即停
+
+
 def test_rushgen_constants_validation(caplog):
     """rushdata.json 结构校验：关键字段缺失时 warning。"""
     rg = btd6.rushgen
@@ -958,13 +1002,55 @@ def test_ody_mode_icon_file():
     assert btd6._ody_mode_icon_file("HalfCash") == "HalfCash.png"
     assert btd6._ody_mode_icon_file("Half Cash") == "HalfCash.png"
     assert btd6._ody_mode_icon_file("AlternateBloonsRounds") == "AlternateBloonsRounds.png"
-    assert btd6._ody_mode_icon_file("Standard") == ""
+    assert btd6._ody_mode_icon_file("Standard") == "Standard.png"
     assert btd6._ody_mode_icon_file("") == ""
 
 
 def test_ody_mode_icon_html_fallback():
     html = btd6._ody_mode_icon_html("NoSuchMode")
     assert "RaceIcon" in html or "🏁" in html or "ody-meta-ico" in html
+
+
+def test_ody_mode_icon_standard_not_race(monkeypatch):
+    """标准模式有专属图标 Standard.png；素材缺失时也不得回退成竞赛图标。"""
+    monkeypatch.setattr(btd6.assets, "_mode_asset_data_url",
+                        lambda f: "data:image/png;base64,xxx" if f == "Standard.png" else "")
+    html = btd6._ody_mode_icon_html("Standard")
+    assert "data:image/png;base64,xxx" in html
+    monkeypatch.setattr(btd6.assets, "_mode_asset_data_url", lambda f: "")
+    html2 = btd6._ody_mode_icon_html("Standard")
+    assert "RaceIcon" not in html2 and "🏁" not in html2
+
+
+def test_odyssey_hero_diff_marker():
+    """英雄难度标注：三难度均可不标；中等起（中等+困难）红框；仅困难黑框。"""
+    membership = {
+        "Quincy": frozenset({"easy", "medium", "hard"}),
+        "PatFusty": frozenset({"medium", "hard"}),
+        "Ezili": frozenset({"hard"}),
+    }
+    assert btd6._odyssey_hero_marker(membership, "Quincy") == ""
+    assert btd6._odyssey_hero_marker(membership, "PatFusty") == " is-medium"
+    assert btd6._odyssey_hero_marker(membership, "Ezili") == " is-hard"
+    # 未知英雄 / 怪异组合不标
+    assert btd6._odyssey_hero_marker(membership, "Sauda") == ""
+    assert btd6._odyssey_hero_marker({"X": frozenset({"easy", "hard"})}, "X") == ""
+
+
+def test_odyssey_available_html_hero_markers():
+    """合卡英雄面板按难度出框：Quincy 无框 / PatFusty 红框 / Ezili 黑框。"""
+    def towers(names):
+        return [{"tower": n, "isHero": True, "max": 1} for n in names]
+    diffs = {
+        "easy": {"meta": {"_availableTowers": towers(["Quincy"])}},
+        "medium": {"meta": {"_availableTowers": towers(["Quincy", "PatFusty"])}},
+        "hard": {"meta": {"_availableTowers": towers(["Quincy", "PatFusty", "Ezili"])}},
+    }
+    html = btd6._odyssey_available_html(diffs["hard"]["meta"], diffs)
+    assert html.count("is-medium") == 1  # PatFusty：中等起可用
+    assert html.count("is-hard") == 1    # Ezili：仅困难可用
+    quincy_card = f"ody-unit-card hero cat-hero available' title='{btd6.assets._tower_display_name('Quincy', True)}'"
+    assert quincy_card in html          # 三难度均可用：无难度框
 
 
 def test_mode_cn_translates_odyssey_modes():
@@ -2599,6 +2685,17 @@ def test_daily_dual_html_empty():
     assert "暂无每日挑战数据" in btd6.daily_dual_html({"empty": "暂无每日挑战数据"})
 
 
+def test_coop_not_standalone_pushed():
+    """Co-op 不再独立采样/补检推送：三面板已并入每日推送卡（2026-10-04 用户决策）。
+    _btd6_push_single("coop") 手动补推与 collect_daily_coop 预热保留。"""
+    import inspect
+
+    src = inspect.getsource(btd6.push)
+    assert "btd6_push_coop" not in src  # 三个 cron 采样任务已移除
+    assert '_btd6_push_kind("coop")' not in src  # 无直接 coop 采样调用
+    assert '"coop"' in src  # _BTD6_PUSH_KINDS 仍保留：last_pushed 过滤/手动补推兼容
+
+
 def test_boss_dual_title_cn_and_hero_no_badge():
     """Boss 合卡：标题用汉化名且不带层数数字；英雄不打 ×1 角标。"""
     meta = {"name": "Bloonarius 300", "map": "Cubism", "difficulty": "hard", "mode": "standard",
@@ -2688,6 +2785,27 @@ def test_collect_daily_meta_not_dict(monkeypatch):
 def test_shell_css_no_double_brace():
     """M5 回归：_shell 输出的 CSS 不得包含 {{（四重花括号曾致 13 条规则失效）。"""
     assert "{{" not in btd6.help_html()
+
+
+def test_boss_leaderboard_probe_height(monkeypatch, tmp_path):
+    """Boss 榜页面高度走探针实测：@page 高度 = 实测内容底部 + 余量
+    （修复行高公式低估导致最后一名被页面底边裁掉）。"""
+    import re as _re
+    import common as bot_common
+
+    def fake_render(html, prefix, cache_dir, max_age=120, dpi=120):
+        return str(tmp_path / f"{prefix}.png")
+
+    monkeypatch.setattr(bot_common, "render_html_to_png", fake_render)
+    monkeypatch.setattr(btd6.cards.rules, "_daily_content_bottom_css",
+                        lambda png, dpi, stops=None: 2400)
+    col = {"kind": "boss", "variant": "standard", "head": "h", "status": "s",
+           "entries_detailed": [
+               {"rank": i, "name": f"p{i}", "score": str(100 + i)}
+               for i in range(1, 26)]}
+    html = btd6.leaderboard_html(col)
+    m = _re.search(r"size: (\d+)px (\d+)px", html)
+    assert m and int(m.group(2)) == 2424  # 2400 + margin 24（宽度为 ODYSSEY_CARD_W=800）
 
 
 def test_leaderboard_boss_kind_routes_to_explorer_layout():

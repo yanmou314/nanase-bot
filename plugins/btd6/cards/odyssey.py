@@ -253,9 +253,21 @@ def _odyssey_tower_card(raw: str, is_hero: bool, count_text: str = "",
     return f"<div class='{wrap_classes}'><div class='{card_classes}' title='{util._esc(name)}'>{content}</div></div>"
 
 
+def _odyssey_hero_marker(membership: dict[str, frozenset], raw: str) -> str:
+    """英雄难度标注 class：三难度均可用不标；中等起可用（中等+困难）红框；
+    仅困难可用黑框。其余组合不标。"""
+    keys = membership.get(str(raw or "").strip()) or frozenset()
+    if keys == frozenset({"hard"}):
+        return " is-hard"
+    if keys == frozenset({"medium", "hard"}):
+        return " is-medium"
+    return ""
+
+
 def _odyssey_available_html(meta: dict, diffs: dict | None = None) -> str:
     """可用英雄/猴子/力量三面板。
-    猴子不标注难度；英雄仍一行两个，仅「困难可用」的英雄加贴身黑边。"""
+    猴子不标注难度；英雄一行两个，按可用难度标注：
+    三难度均可不标、中等起红框、仅困难黑框。"""
     diffs = diffs or {}
     membership = _odyssey_unit_membership(diffs)
     towers = [t for t in meta.get("_availableTowers") or []
@@ -265,9 +277,8 @@ def _odyssey_available_html(meta: dict, diffs: dict | None = None) -> str:
 
     def _hero_card(t: dict) -> str:
         raw = str(t.get("tower") or "").strip()
-        is_hard = "hard" in (membership.get(raw) or frozenset())
         return _odyssey_tower_card(
-            raw, True, "", "available" + (" is-hard" if is_hard else ""),
+            raw, True, "", "available" + _odyssey_hero_marker(membership, raw),
             category="hero",
             upgrade_caps=_odyssey_upgrade_caps(t),
             badge_pos="left",
@@ -503,16 +514,21 @@ def _ody_mode_icon_file(mode: str) -> str:
         "halfcash": "HalfCash.png",
         "halfmoney": "HalfCash.png",
         "sandbox": "Sandbox.png",
+        "standard": "Standard.png",
+        "standardmode": "Standard.png",
     }
     return table.get(raw.replace(" ", "").lower(), "")
 
 
 def _ody_mode_icon_html(mode: str) -> str:
-    """地图模式专属图标；缺失回退竞赛图标。"""
+    """地图模式专属图标；未知模式回退竞赛图标。
+    已知模式（如标准）的专属文件缺失时不显示图标，避免张冠李戴。"""
     fname = _ody_mode_icon_file(mode)
     url = assets._mode_asset_data_url(fname) if fname else ""
     if url:
         return f"<img class='ody-meta-ico' src='{util._esc(url)}'/>"
+    if fname:
+        return ""
     return common._race_ui_img("RaceIcon.png", "🏁", "ody-meta-ico")
 
 

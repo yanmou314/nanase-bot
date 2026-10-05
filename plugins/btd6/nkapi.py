@@ -314,10 +314,13 @@ async def _refresh_url(url: str) -> None:
             await _cache_put_async(url, data["body"], size=len(r.content or b""))
             with _cache_lock:
                 _lb_next_cache[url] = data.get("next")
-    except Exception:
+    except Exception as e:
         fails = _refresh_fail_counts.get(url, 0) + 1
         _refresh_fail_counts[url] = fails
-        _logger.warning("BTD6 后台刷新失败（保留旧缓存） url=%s 连续失败 %d 次", _mask_url(url), fails, exc_info=True)
+        # OAK 等凭证会出现在 URL 里，httpx 的 HTTPStatusError 消息内含完整 URL；
+        # exc_info 堆栈会把未脱敏的 URL 带进日志，这里只记脱敏后的异常摘要
+        _logger.warning("BTD6 后台刷新失败（保留旧缓存） url=%s 连续失败 %d 次 err=%s",
+                        _mask_url(url), fails, _mask_url(f"{type(e).__name__}: {e}"))
     else:
         _refresh_fail_counts.pop(url, None)
     finally:
@@ -363,10 +366,12 @@ async def _refresh_raw_url(url: str) -> None:
         if len(r.content or b"") > MAX_JSON_BYTES:
             raise ValueError("BTD6 API 响应过大")
         await _cache_put_async(url, r.json(), size=len(r.content or b""))
-    except Exception:
+    except Exception as e:
         fails = _refresh_fail_counts.get(url, 0) + 1
         _refresh_fail_counts[url] = fails
-        _logger.warning("数据端点后台刷新失败（保留旧缓存） url=%s 连续失败 %d 次", _mask_url(url), fails, exc_info=True)
+        # 同 _refresh_url：异常消息可能含完整 URL（OAK 凭证），脱敏后再落日志
+        _logger.warning("数据端点后台刷新失败（保留旧缓存） url=%s 连续失败 %d 次 err=%s",
+                        _mask_url(url), fails, _mask_url(f"{type(e).__name__}: {e}"))
     else:
         _refresh_fail_counts.pop(url, None)
     finally:
@@ -447,9 +452,8 @@ async def fetch_leaderboard_paginated(start_url: str, rows: int, touched: set[st
     entries: list = []
     url: str | None = start_url
     seen: set[str] = set()
-    # 页数硬上限（防御纵深）：正常由调用方 rows clamp，这里保证单次调用
-    # 最多也只请求 LB_MAX_PAGE 页
-    hard_pages = max(LB_MAX_PAGE, -(-min(rows, 10000) // 25))
+    # 页数硬上限（防御纵深）：无论 rows 多大，单次调用最多只请求 LB_MAX_PAGE 页
+    hard_pages = LB_MAX_PAGE
     pages = 0
     while url and len(entries) < rows and url not in seen and pages < hard_pages:
         pages += 1

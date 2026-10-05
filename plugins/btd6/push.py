@@ -314,6 +314,8 @@ async def _btd6_warm_on_connect(bot=None) -> None:
     # 连接后全类补检：停机超过 misfire 宽限(1h)跨过刷新点时不漏推（此前只补 CT，
     # daily/coop 最长漏 24h）。各类有 last_pushed 去重，重复调用幂等。
     for _kind in _BTD6_PUSH_KINDS:
+        if _kind == "coop":
+            continue  # Co-op 三面板已并入每日推送卡，不再独立推送（2026-10-04）
         try:
             await _btd6_push_kind(_kind)
         except Exception:
@@ -605,7 +607,7 @@ async def _render_kind_payload(kind: str, ev: dict, label: str,
                 return None
             return {"overview": path, "announce": text, "label": label, "details": details}
         if kind == "daily":
-            # 标准+高级合并为一张 bdual 风格卡（参考 Boss 双面板版式）
+            # 标准+高级+Co-op 三面板合卡（Co-op 已无独立采样推送，见调度表注释）
             col = await collect._safe(collect.collect_daily_dual(), "daily_push")
             if not col or col.get("empty"):
                 return None
@@ -999,14 +1001,10 @@ async def btd6_push_daily_5(): await _btd6_push_kind("daily")
 @scheduler.scheduled_job("cron", hour=16, minute=10, id="btd6_push_daily_10", timezone="Asia/Shanghai")
 async def btd6_push_daily_10(): await _btd6_push_kind("daily")
 
-# Co-op 挑战与每日挑战同一 16:00 CST 刷新点（每 3~4 天一期），错峰 30 秒采样；
-# 独立推送标记（last_pushed.coop），coop 变期而每日未变时也能准点推送
-@scheduler.scheduled_job("cron", hour=16, minute=0, second=30, id="btd6_push_coop_0", timezone="Asia/Shanghai")
-async def btd6_push_coop_0(): await _btd6_push_kind("coop")
-@scheduler.scheduled_job("cron", hour=16, minute=5, second=30, id="btd6_push_coop_5", timezone="Asia/Shanghai")
-async def btd6_push_coop_5(): await _btd6_push_kind("coop")
-@scheduler.scheduled_job("cron", hour=16, minute=10, second=30, id="btd6_push_coop_10", timezone="Asia/Shanghai")
-async def btd6_push_coop_10(): await _btd6_push_kind("coop")
+# Co-op 挑战：2026-10-04 起不再独立采样推送——标准/高级/Co-op 三面板已并入
+# 每日推送卡（_render_kind_payload "daily"），换期信息随每日卡到达。
+# 手动补推仍可用 _btd6_push_single("coop", ...)；_BTD6_PUSH_KINDS 保留 coop
+# 仅为 last_pushed 过滤/批量排序兼容，连接补检处显式跳过。
 
 # 社交赛季：刷新点不固定（NK 未公布固定周常），每小时 :15 采样一次；
 # 只取进行中，id 与 last_pushed 不同即推送（无 12 分钟窗口，避免漏检）

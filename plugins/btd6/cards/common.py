@@ -563,8 +563,13 @@ html, body {{ width: {ODYSSEY_CARD_W}px; height: {h}px; color: {text_color};
   box-sizing: border-box;
 }}
 .ody-ring-hard {{ border: 4px solid #1a1a1a; padding: 0; }}
-/* 英雄：一行两个；仅「困难可用」加贴身黑边（#1a1a1a，与地图困难圈同色）。猴子不标注。 */
+/* 英雄：一行两个；三难度均可不标；中等起红框（#d63a14，与地图中等圈同色）；
+   仅困难黑框（#1a1a1a，与地图困难圈同色）。猴子不标注。 */
 .ody-hero-grid {{ padding: 4px 2px 2px; }}
+.ody-hero-grid .ody-unit-card.is-medium {{
+    border: 3px solid #d63a14;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.65), 0 2px 0 rgba(0,0,0,.25);
+}}
 .ody-hero-grid .ody-unit-card.is-hard {{
     border: 3px solid #1a1a1a;
     box-shadow: inset 0 1px 0 rgba(255,255,255,.65), 0 2px 0 rgba(0,0,0,.25);

@@ -147,7 +147,9 @@ def test_select_push_list_single_or_all_new_unchanged():
 
 
 def test_target_months_rollover():
-    assert ow._target_months(datetime(2026, 9, 9)) == [(2026, 9)]
+    """本月+上月都查：上月页会追加热修；新月份页可能滞后发布
+    （2026-10-04 时 10 月页 404 曾致 0 节误报"官网已改版"）。"""
+    assert ow._target_months(datetime(2026, 9, 9)) == [(2026, 9), (2026, 8)]
     assert ow._target_months(datetime(2026, 9, 2)) == [(2026, 9), (2026, 8)]
     assert ow._target_months(datetime(2026, 1, 1)) == [(2026, 1), (2025, 12)]
 

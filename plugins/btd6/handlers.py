@@ -142,20 +142,7 @@ prewarm_cmd = on_command("预热", priority=5, block=True)
 
 @help_cmd.handle()
 async def handle_help(event: MessageEvent):
-    await nkapi._enforce_cooldown(help_cmd, event, "help")
-    # 兼容 ".btd6 CT" / ".btd CT" / "btd6 ct"（含空格）直接查看争夺领土/活动总览
-    _plain = event.get_plaintext().strip().lower()
-    _m = re.match(r"^\.?\s*btd6?\s+(.*)$", _plain, re.DOTALL)
-    _arg = _m.group(1).strip() if _m else ""
-    if _arg in {"ct", "领土", "争夺", "争夺领土"}:
-        try:
-            data = await collect.collect_overview()
-        except Exception:
-            _logger.exception("BTD6 CT 总览获取失败")
-            nkapi._release_cooldown(event, "help")
-            await help_cmd.finish("⚠️ 获取 BTD6 活动信息失败，请稍后再试")
-        await cards_mod._send_card(help_cmd, "btd6ov", lambda: cards_mod.overview_html(data), lambda: textfmt.overview_text(data))
-        return
+    # CT 查询请直接用 .ct（2026-10-06 移除 .btd6 ct / .btd ct 快捷跳转，避免与 .ct 重复）
     await cards_mod._send_card(help_cmd, "btd6help", cards_mod.help_html, lambda: i18n.HELP_TEXT)
 
 
@@ -641,9 +628,10 @@ async def handle_prewarm(event: MessageEvent):
         from nonebot.exception import FinishedException
         if isinstance(e, FinishedException):
             raise
+        nkapi._release_cooldown(event, "prewarm")
         _logger.exception("手动预热失败")
-        # 异常信息含外部输入内容（防 CQ 码注入）：经 MessageSegment.text 发送
-        await prewarm_cmd.finish(MessageSegment.text(f"⚠️ 预热失败: {e}"))
+        # 异常细节（路径/URL）只进日志不下发：与其他 handler 失败路径一致回滚冷却
+        await prewarm_cmd.finish("⚠️ 手动预热失败，请稍后再试（详情见服务日志）")
         return
     if not ran:
         # 发起瞬间恰逢定时预热先置位：如实告知，不回假成功

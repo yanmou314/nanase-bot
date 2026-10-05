@@ -10,6 +10,11 @@ load_dotenv(os.path.join(_BOT_ROOT, ".env"))
 
 _logger = logging.getLogger("qqbot.bot")
 
+# httpx 的 INFO 请求行日志含完整 URL（BTD6 玩家 OAK 查询等同账号凭证，绝不落日志）；
+# 当前仅因 root logger 无 handler 才碰巧丢弃，这里显式压到 WARNING 固化该行为
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 import nonebot  # noqa: E402  # 需先 chdir 并加载 .env
 from nonebot.adapters.onebot.v11 import Adapter as OneBotV11Adapter  # noqa: E402
 
