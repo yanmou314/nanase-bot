@@ -123,7 +123,7 @@ _EXT_BY_TYPE = {
 
 
 def save_image(data: bytes, content_type: str, prefix: str, cache_dir: str) -> str:
-    """保存图片到缓存目录并返回路径。【同步阻塞】事件循环内请用 save_image_async。"""
+    """保存图片到缓存目录并返回路径。【同步阻塞】事件循环内请经 asyncio.to_thread 调用。"""
     base = (content_type or "").split(";")[0].strip().lower()
     ext = _EXT_BY_TYPE.get(base, ".png")
     _cleanup_cache_throttled(cache_dir, max_age=24 * 60 * 60)

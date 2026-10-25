@@ -17,7 +17,7 @@ import time
 from collections import OrderedDict
 
 from nonebot import on_command
-from nonebot.adapters.onebot.v11 import MessageEvent, MessageSegment
+from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageEvent, MessageSegment
 
 from common import get_http_client, is_owner, load_json_state, save_json_state
 
@@ -268,6 +268,9 @@ async def handle_ai(event: MessageEvent):
 async def handle_aikey(event: MessageEvent):
     if not is_owner(event):
         await aikey_cmd.finish("❌ 仅机器人主人可管理 AI 供应商 key")
+    if isinstance(event, GroupMessageEvent):
+        # key 会随消息留在群聊记录里：与 .新闻key 同款策略，只允许私聊设置
+        await aikey_cmd.finish("⚠️ 请私聊我发送 .aikey openrouter <key> 设置，避免 key 泄露")
     tokens = event.get_plaintext().split()
     args = [t for t in tokens if "aikey" not in t.lower()]
     if not args:

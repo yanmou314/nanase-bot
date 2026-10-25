@@ -18,6 +18,7 @@ from nonebot_plugin_apscheduler import scheduler
 
 from common import (
     RENDER_SEM,
+    RENDER_TOTAL_TIMEOUT,
     cleanup_cache,
     get_member_name,
     is_owner,
@@ -114,10 +115,19 @@ def _phrase_from_sentence(s: str, counter: Counter, max_len: int = 8) -> str:
     # 中文/英文标点均视为子句边界；表情、符号不是边界但会在 token 过滤时剔除
     clauses = [c.strip() for c in re.split(r"[，。！？；、,.!?;:：…\s]+", s.strip()) if c.strip()]
 
+    # 未命中 token 的高频词子串匹配表（惰性构建）：jieba 复合词（如「吃火锅」）
+    # 需要靠子串匹配锚定全局词「火锅」。只扫 most_common(500)：活跃大群词表
+    # 上万条，全表 O(词表×未命中token) 子串扫描是分钟级；锚点语义上只该由
+    # 高频词主导，500 名以外的冷词计分对锚点排序无实质影响
+    _top_words: list | None = None
+
     def _score(w: str) -> int:
+        nonlocal _top_words
         if w in counter:
             return counter[w]
-        return max((v for k, v in counter.items() if len(k) >= 2 and k in w), default=0)
+        if _top_words is None:
+            _top_words = [(k, v) for k, v in counter.most_common(500) if len(k) >= 2]
+        return max((v for k, v in _top_words if k in w), default=0)
 
     best = ""
     best_score = -1
@@ -169,9 +179,17 @@ def _sh_today() -> date:
 
 async def _purge_old_records() -> None:
     cutoff = (_sh_today() - timedelta(days=RETENTION_DAYS)).isoformat()
-    await exec("DELETE FROM messages WHERE day < %s", (cutoff,))
-    # 指令使用记录与消息同保留期清理，否则 command_usages 会无限增长
-    await exec("DELETE FROM command_usages WHERE day < %s", (cutoff,))
+    # 按主键分批删：DB 长时间断连恢复后会一次性补删数天数据，无上限 DELETE
+    # 是长事务 + WAL 尖峰，会拖垮 2 核小机上的其他查询；RETURNING 用于数删除量
+    for table in ("messages", "command_usages"):
+        while True:
+            deleted = await exec(
+                f"DELETE FROM {table} WHERE id IN "  # noqa: S608 — 表名为本函数内常量
+                f"(SELECT id FROM {table} WHERE day < %s LIMIT 5000) RETURNING id",
+                (cutoff,),
+            )
+            if len(deleted) < 5000:
+                break
 
 
 @scheduler.scheduled_job("cron", hour=3, minute=0, id="purge_old_stats", timezone="Asia/Shanghai")
@@ -245,10 +263,15 @@ async def _build_word_image(group_id: int, n: int) -> str | None:
     phrases = [(q, c) for q, c in phrase_counter.most_common(3) if c >= 2]
     await asyncio.to_thread(cleanup_cache, WORD_CACHE)  # 同步磁盘扫描不阻塞事件循环
     from .wordcloud_card import _render as render_cloud
-    # PIL 渲染经全局渲染信号量串行化，避免小机器上并发渲染打爆内存
+    # PIL 渲染经全局渲染信号量串行化，避免小机器上并发渲染打爆内存；
+    # wait_for 看门狗与全站契约一致：挂死渲染只占渲染槽 180s，不会永久堵死
+    # 龙王/帮助/BTD6 等所有其他渲染（词云是全站唯一漏配看门狗的渲染点）
     async with RENDER_SEM:
-        return await run_in_render_executor(
-            render_cloud, counter, min(n, len(counter)), normal_message_count, phrases
+        return await asyncio.wait_for(
+            run_in_render_executor(
+                render_cloud, counter, min(n, len(counter)), normal_message_count, phrases
+            ),
+            timeout=RENDER_TOTAL_TIMEOUT,
         )
 
 
@@ -300,13 +323,18 @@ async def dragon(bot: Bot, event: GroupMessageEvent):
 # ---------------- 词频推送状态 ----------------
 
 async def _words_groups() -> list[str]:
-    data = load_json_state(WORDS_STATE, _state_lock)
-    # 旧格式 {"group_id": "xxx"} 自动迁移到多群格式（迁移写走线程池）
-    if "groups" not in data and data.get("group_id"):
-        data["groups"] = [str(data["group_id"])]
-        data.pop("group_id", None)
-        await asyncio.to_thread(save_json_state, WORDS_STATE, data, _state_lock)
-    return [str(g) for g in (data.get("groups") or []) if str(g)]
+    def _load() -> list[str]:
+        with _state_lock:
+            data = load_json_state(WORDS_STATE, _state_lock)
+            # 旧格式 {"group_id": "xxx"} 在同一把锁内迁移到多群格式，
+            # 避免「锁内改、锁外存」与并发开关竞争时丢配置
+            if "groups" not in data and data.get("group_id"):
+                data["groups"] = [str(data["group_id"])]
+                data.pop("group_id", None)
+                save_json_state(WORDS_STATE, data, _state_lock)
+            return [str(g) for g in (data.get("groups") or []) if str(g)]
+
+    return await asyncio.to_thread(_load)
 
 
 async def _add_words_group(gid: str) -> None:
@@ -396,11 +424,13 @@ async def daily_words_job():
         return
     if _last_push_date() >= _sh_today().isoformat():
         return  # 今日已推送（如启动补发已执行过），防重复
-    groups = await _words_groups()
-    if not groups:
-        return
+    # 运行标记必须在任何 await 之前置位：_words_groups 里旧格式迁移已改为
+    # 线程内执行会让出事件循环，cron 与启动补发并发时可能同时通过检查双推
     _words_push_running = True
     try:
+        groups = await _words_groups()
+        if not groups:
+            return
         # 写路径有 0.5 秒批量 flush 窗口，先等队列清空再统计，避免漏掉临界消息；
         # 30 秒超时兜底防止数据库异常时任务卡死
         await wait_writes_drained(30)
@@ -412,7 +442,9 @@ async def daily_words_job():
         sent = 0
         for gid in groups:
             try:
-                path = await _build_word_image(int(gid), 40)
+                # 单群取数+分词+渲染整体限时：一个异常群不得级联拖住后续群
+                # 与 00:05 的 cmd_stats 日报（多群串行推送链）
+                path = await asyncio.wait_for(_build_word_image(int(gid), 40), 180)
                 if not path:
                     continue
                 # NapCat 不回包时适配器默认无限等：60s 超时转成普通发送失败，
@@ -451,9 +483,10 @@ async def words(event: GroupMessageEvent, arg: Message = CommandArg()):
     if not is_owner(event):
         await words_cmd.finish("❌ 你没有权限使用此功能")
     try:
-        n = max(1, min(int(arg.extract_plain_text().strip() or 40), 60))
+        # N 实际生效区间 30~60（渲染层下限 30 保证铺满面板），默认 40
+        n = max(30, min(int(arg.extract_plain_text().strip() or 40), 60))
     except ValueError:
-        n = 20
+        n = 40
     try:
         path = await _build_word_image(event.group_id, n)
     except Exception:

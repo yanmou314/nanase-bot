@@ -310,9 +310,11 @@ async def _challenge_map_img(meta: dict, tag: str) -> str:
     if not map_img:
         fallback_map = str(meta.get("map") or "").strip()
         if fallback_map:
-            map_img = await _safe(assets._game_asset_data_url(f"MapSelect{fallback_map}Button.webp"), tag + "_fallback") or ""
-            if not map_img:
-                map_img = await _safe(assets._asset_data_url(f"MapSelect{fallback_map}Button.png"), tag + "_fallback2") or ""
+            # _game_asset_data_url 是同步函数（本地读盘）：经 to_thread 直接调用。
+            # 旧写法把它传给 _safe，await 一个 str 必抛 TypeError——本地回退恒失败；
+            # 旧二级回退给 _asset_data_url 传的是文件名而非 URL，校验恒 ValueError
+            map_img = await asyncio.to_thread(
+                assets._game_asset_data_url, f"MapSelect{fallback_map}Button.webp") or ""
     return map_img or ""
 
 

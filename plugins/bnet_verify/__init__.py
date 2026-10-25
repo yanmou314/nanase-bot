@@ -212,7 +212,7 @@ async def _notify_owner(bot: Bot, text: str) -> None:
         logger.warning("[bnet_verify] 通知主人失败", exc_info=True)
 
 
-def _auto_bind(uid: int, tag: str) -> bool:
+async def _auto_bind(uid: int, tag: str) -> bool:
     """把 QQ 与战网ID写入 owstats 绑定表（.绑定 同款存储），进群即可直接查询。"""
     try:
         from plugins.owstats import _bind  # 延迟导入，避免插件加载顺序耦合
@@ -220,7 +220,8 @@ def _auto_bind(uid: int, tag: str) -> bool:
         logger.warning("[bnet_verify] owstats 不可用，跳过自动绑定", exc_info=True)
         return False
     try:
-        _bind(str(uid), tag)
+        # 绑定写盘含 fsync，放线程执行不阻塞事件循环（与 .绑定 命令同姿势）
+        await asyncio.to_thread(_bind, str(uid), tag)
         return True
     except Exception:
         logger.warning(f"[bnet_verify] 自动绑定失败 uid={uid} tag={tag}", exc_info=True)
@@ -297,7 +298,7 @@ async def _handle_group_join(bot: Bot, event: GroupRequestEvent) -> None:
             )
             return
         logger.info(f"[bnet_verify] 群 {gid} 自动通过 {event.user_id}（战网ID {tag}）")
-        bound = _auto_bind(event.user_id, tag)
+        bound = await _auto_bind(event.user_id, tag)
         _schedule_card(bot, gid, event.user_id, tag)
         bind_note = "已自动绑定ID" if bound else "自动绑定失败（owstats 不可用）"
         # tag 为申请人可控内容：必须经 MessageSegment.text 包裹转义，防 CQ 码注入
@@ -374,7 +375,7 @@ async def approve_verify_by_qq(bot, target_qq: str):
     if not uid_int:
         return (True,
                 f"✅ 已通过 群{gid} QQ{target}（{tag}），但记录缺少 QQ 号，请手工改名片与绑定")
-    bound = _auto_bind(uid_int, tag)
+    bound = await _auto_bind(uid_int, tag)
     try:
         _schedule_card(bot, gid, uid_int, tag)
     except Exception:

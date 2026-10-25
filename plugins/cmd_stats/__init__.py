@@ -79,8 +79,9 @@ async def _record_successful_command(matcher, event, state, exception=None):
 
 
 def _load_config() -> dict:
+    """只读配置（含旧格式内存兼容）；旧格式的落盘迁移由 _migrate_config_once 在启动时线程内完成。"""
     data = load_json_state(CONFIG_FILE, _config_lock)
-    # 旧格式 {"group_id": 123} 自动迁移到多群格式
+    # 旧格式 {"group_id": 123} 兼容读取为多群格式
     if "groups" not in data and data.get("group_id"):
         try:
             old_gid = int(data["group_id"])
@@ -88,10 +89,34 @@ def _load_config() -> dict:
             old_gid = 0
         data["groups"] = [old_gid] if old_gid > 0 else []
         data.pop("group_id", None)
-        save_json_state(CONFIG_FILE, data, _config_lock)
     if not isinstance(data.get("groups"), list):
         data["groups"] = []
     return data
+
+
+_config_migrated = False
+
+
+async def _migrate_config_once() -> None:
+    """一次性把旧格式配置落盘迁移；fsync 写盘移出事件循环（与 chat_stats 同姿势）。"""
+    global _config_migrated
+    if _config_migrated:
+        return
+    _config_migrated = True
+
+    def _rmw() -> None:
+        with _config_lock:
+            data = load_json_state(CONFIG_FILE, _config_lock)
+            if "groups" not in data and data.get("group_id"):
+                try:
+                    old_gid = int(data["group_id"])
+                except (TypeError, ValueError):
+                    old_gid = 0
+                data["groups"] = [old_gid] if old_gid > 0 else []
+                data.pop("group_id", None)
+                save_json_state(CONFIG_FILE, data, _config_lock)
+
+    await asyncio.to_thread(_rmw)
 
 
 def _target_groups() -> list[int]:
@@ -391,6 +416,9 @@ async def daily_cmd_stats_job():
 # 过触发点（00:05，上海时区）且今日未生成则补跑一次；对齐 news 模式。
 # 优先 on_bot_connect（此时 get_bot 可用）；无该钩子的环境回退 on_startup。
 _register_catchup = getattr(get_driver(), "on_bot_connect", get_driver().on_startup)
+
+# 旧格式配置的落盘迁移在启动时线程内完成（fsync 不占事件循环）
+get_driver().on_startup(_migrate_config_once)
 
 
 @_register_catchup

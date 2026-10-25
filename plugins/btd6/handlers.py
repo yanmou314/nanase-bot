@@ -17,7 +17,8 @@ _logger = logging.getLogger(__name__)
 
 # ---------------- 参数解析 ----------------
 
-RUSH_WORDS = {"rush", "冲刺", "bossrush", "bossRush", "冲刺赛"}
+# 词表统一小写：parse_kind 会先把输入 lower 再与词表比较，混大写词条永远匹配不到
+RUSH_WORDS = {"rush", "冲刺", "bossrush", "冲刺赛"}
 RACE_WORDS = {"race", "races", "竞速", "竞赛"}
 BOSS_WORDS = {"boss", "bosses", "首领", "boss战", "魔王"}
 CT_WORDS = {"ct", "领土", "争夺", "争夺领土"}
@@ -258,6 +259,8 @@ async def handle_leaderboard(event: MessageEvent):
     tokens = event.get_plaintext().split()[1:]
     kind = parse_kind(tokens)
     if kind is None:
+        # 用法提示不算有效查询：回滚冷却，纠正重试不必再等 10 秒
+        nkapi._release_cooldown(event, "leaderboard")
         await lb_cmd.finish(i18n.LB_USAGE)
     page = parse_lb_page(tokens)
     rank = parse_lb_rank(tokens) if page is None else None
@@ -484,8 +487,8 @@ async def handle_odyssey(event: MessageEvent):
     # 一张合卡：三难度 + 可用单位 + 岛屿规则
     try:
         t0 = time.monotonic()
+        # 底部空白裁剪已由 _render_card_sync 对 btd6ody 前缀统一完成，勿再重复裁
         path = await cards_mod._render_card("btd6ody", lambda: cards_mod.odyssey_html(col))
-        path = await asyncio.to_thread(cards_mod.trim_odyssey_png, path)
         _logger.info("BTD6 远征合卡渲染 %.2fs -> %s", time.monotonic() - t0, path)
     except Exception:
         _logger.warning("BTD6 远征卡片渲染失败，回退文本消息", exc_info=True)
@@ -510,6 +513,8 @@ async def handle_player(event: MessageEvent):
         return
     pid = collect._extract_player_id(arg)
     if not pid:
+        # 用法提示不算有效查询：回滚 heavy 冷却，纠正后可立即重试
+        nkapi._release_cooldown(event, "player")
         await player_cmd.finish("用法：.玩家 <OAK>\nOAK 在游戏设置→账号中生成（以 oak_ 开头），可查完整档案与存档数据；也可用排行榜玩家链接末尾的 ID（仅公开档案）\n⚠️ OAK 等同账号凭证，请私聊使用，不要发到群里")
     try:
         col = await collect.collect_player(pid)
@@ -596,11 +601,13 @@ async def handle_history(event: MessageEvent):
         if not items:
             continue
         any_data = True
-        items.sort(key=lambda x: int(x.get("start") or 0), reverse=True)
+        # 归档为自写数据但历史版本可能有脏值：int() 直转会在排序时炸出 handler，
+        # 与全插件"脏数据回退 0"的口径一致走 util._num0
+        items.sort(key=lambda x: util._num0(x.get("start")), reverse=True)
         lines.append(f"【{push.HISTORY_KIND_CN[k]}】共 {len(items)} 期")
         for ev in items[:rows]:
-            s = int(ev.get("start") or 0)
-            e = int(ev.get("end") or 0)
+            s = util._num0(ev.get("start"))
+            e = util._num0(ev.get("end"))
             name = str(ev.get("name") or "").strip() or str(ev.get("id") or "?")
             if s and e:
                 state = "进行中" if s <= now < e else ("未开始" if now < s else "已结束")

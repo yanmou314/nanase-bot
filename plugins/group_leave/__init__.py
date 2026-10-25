@@ -142,7 +142,8 @@ async def _import_group_members(bot: Bot, gid: int) -> bool:
     if gid in _imported_groups:
         return False
     try:
-        members = await bot.get_group_member_list(group_id=gid)
+        # 60s 超时：NapCat 卡死时裸 await 会挂住 on_bot_connect 导入流程
+        members = await asyncio.wait_for(bot.get_group_member_list(group_id=gid), 60)
     except Exception:
         return False
     _imported_groups.add(gid)
@@ -187,7 +188,8 @@ async def _import_existing_members(bot: Bot):
 
 async def _get_name(bot: Bot, user_id: int) -> str:
     try:
-        info = await bot.get_stranger_info(user_id=user_id)
+        # 10s 超时：NapCat 卡死时裸 await 会挂住退群/欢迎 handler（与 common 封装同口径）
+        info = await asyncio.wait_for(bot.get_stranger_info(user_id=user_id), 10)
         return info.get("nickname") or str(user_id)
     except Exception:
         return str(user_id)
@@ -225,7 +227,9 @@ async def handle(bot: Bot, event: GroupDecreaseNoticeEvent):
     else:
         op = "群管理员"
         try:
-            info = await bot.get_group_member_info(group_id=gid, user_id=event.operator_id)
+            info = await asyncio.wait_for(
+                bot.get_group_member_info(group_id=gid, user_id=event.operator_id), 10
+            )
             op = info.get("card") or info.get("nickname") or str(event.operator_id)
         except Exception:
             pass

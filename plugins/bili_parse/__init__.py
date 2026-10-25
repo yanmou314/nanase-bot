@@ -21,7 +21,7 @@ import httpx
 from nonebot import on_message
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
 
-from common import FONTS, RENDER_SEM, get_http_client, save_image
+from common import FONTS, RENDER_SEM, RENDER_TOTAL_TIMEOUT, get_http_client, save_image
 
 _logger = logging.getLogger(__name__)
 _SH = ZoneInfo("Asia/Shanghai")
@@ -616,7 +616,11 @@ async def build_card_image(info: dict) -> str | None:
     cover_bytes = await _fetch_cover_bytes(info.get("pic", ""))
     try:
         async with RENDER_SEM:  # 与其他 PIL/weasyprint 卡片渲染全局串行化
-            path = await asyncio.to_thread(_render_and_save, info, cover_bytes)
+            # wait_for 看门狗与全站渲染契约一致：挂死渲染不得永久占住唯一渲染槽
+            path = await asyncio.wait_for(
+                asyncio.to_thread(_render_and_save, info, cover_bytes),
+                timeout=RENDER_TOTAL_TIMEOUT,
+            )
     except Exception:
         _logger.warning("B站卡片渲染失败 bvid=%s", bvid, exc_info=True)
         return None

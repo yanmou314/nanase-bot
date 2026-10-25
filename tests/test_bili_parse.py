@@ -531,7 +531,6 @@ def test_bangumi_render_uses_episode_badge_without_duration():
 
 def test_bili_get_412_retries_with_buvid(monkeypatch):
     """412 风控回归：裸请求被 412 后必须取指纹带 Cookie 重试一次并成功。"""
-    import types
 
     calls = []
 

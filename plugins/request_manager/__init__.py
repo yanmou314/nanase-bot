@@ -57,6 +57,9 @@ async def _owner_decision_rule(event: MessageEvent) -> bool:
         return False
     if event.get_plaintext().strip() not in {"同意", "拒绝"}:
         return False
+    # 群内引用路由依赖 _notify_index/_pending：重启后首个事件若不是申请本体，
+    # 两者尚未从磁盘恢复，群内引用回复会被静默忽略——这里先补一次惰性加载
+    _load_pending_once()
     if isinstance(event, GroupMessageEvent):
         reply_id = _reply_message_id(event)
         return bool(reply_id) and _notify_index.get(reply_id) in _pending
@@ -1134,9 +1137,12 @@ async def forward_private(bot: Bot, event: MessageEvent):
     uid = str(event.user_id)
     now = time.time()
     if len(_pm_throttle) > 512:
-        # 有界：批量清理窗口已过期的记录（历史私聊用户不再永久留痕）
-        for k in [k for k, r in _pm_throttle.items() if now - r.get("window", 0) > 60]:
+        # 有界：只清理 5 分钟窗口已整体过期的记录（活跃窗口仍在限流中，不得提前
+        # 丢计数变相放开限额），历史私聊用户不再永久留痕
+        for k in [k for k, r in _pm_throttle.items() if now - r.get("window", 0) > 300]:
             _pm_throttle.pop(k, None)
+        while len(_pm_throttle) > 512:
+            _pm_throttle.pop(next(iter(_pm_throttle)))
     rec = _pm_throttle.setdefault(uid, {"window": now, "n": 0})
     if now - rec["window"] > 300:
         rec["window"] = now
@@ -1147,7 +1153,8 @@ async def forward_private(bot: Bot, event: MessageEvent):
     text = event.get_plaintext().strip() or "（非文字消息）"
     name = str(event.user_id)
     try:
-        info = await bot.get_stranger_info(user_id=event.user_id)
+        # 10s 超时：NapCat 卡死时裸 await 会挂住转发 handler（与 common.get_member_name 同口径）
+        info = await asyncio.wait_for(bot.get_stranger_info(user_id=event.user_id), 10)
         name = info.get("nickname") or name
     except Exception:
         pass

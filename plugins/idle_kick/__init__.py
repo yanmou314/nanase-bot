@@ -273,7 +273,9 @@ def _protect_set(cfg: dict) -> set[str]:
 
 
 async def _fetch_members(bot: Bot, gid: int) -> list[dict]:
-    members = await bot.get_group_member_list(group_id=gid)
+    # NapCat 卡死时裸 await 会永久挂住 _run_lock（此后所有 .清人执行 只会提示
+    # 「已有清人任务在执行」）；大群成员列表拉取也偏慢，给 60s 超时
+    members = await asyncio.wait_for(bot.get_group_member_list(group_id=gid), 60)
     return [m for m in members if isinstance(m, dict)]
 
 
@@ -286,9 +288,9 @@ def _bot_role(members: list[dict], bot_id: str) -> str:
 
 async def _bot_in_group(bot: Bot, gid: int) -> bool:
     try:
-        groups = await bot.get_group_list()
+        groups = await asyncio.wait_for(bot.get_group_list(), 15)
     except Exception:
-        return True  # 拉不到列表时不挡，交给成员接口报错
+        return True  # 拉不到列表（含超时）时不挡，交给成员接口报错
     return any(int(g.get("group_id") or 0) == gid for g in groups if isinstance(g, dict))
 
 
@@ -572,15 +574,20 @@ async def _run_inner(bot: Bot, event: MessageEvent, arg=CommandArg()):
             continue
         label = f"{member_name(m)}（{uid}）"
         try:
-            await bot.set_group_kick(
-                group_id=int(gid), user_id=uid, reject_add_request=False
+            # 单次踢人 15s 超时：NapCat 卡死不得拖住 _run_lock 与整轮清理
+            await asyncio.wait_for(
+                bot.set_group_kick(
+                    group_id=int(gid), user_id=uid, reject_add_request=False
+                ),
+                15,
             )
             ok.append(label)
             _logger.info("清人踢出 gid=%s uid=%s", gid, uid)
         except Exception:
             fail.append(label)
             _logger.warning("清人踢出失败 gid=%s uid=%s", gid, uid, exc_info=True)
-        await asyncio.sleep(_KICK_INTERVAL_SEC)
+        if m is not batch[-1]:
+            await asyncio.sleep(_KICK_INTERVAL_SEC)
     stamp = datetime.now(_SH).strftime("%Y-%m-%d %H:%M:%S")
 
     def _mark(data: dict) -> None:

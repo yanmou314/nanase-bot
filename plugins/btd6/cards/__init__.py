@@ -11,7 +11,7 @@ from pathlib import Path
 
 # 注意：此处 `common` 是顶层 opt/bot/common.py（渲染管线/信号量），
 # `.common`（cards/common.py）是本渲染层的 HTML 外壳模块，二者重名勿混
-from common import RENDER_SEM, RENDER_TOTAL_TIMEOUT, render_html_to_png
+from common import RENDER_SEM, RENDER_TOTAL_TIMEOUT, render_html_to_png, run_in_render_executor
 from nonebot.adapters.onebot.v11 import MessageSegment
 
 from . import common, collectevent, ctmap, leaderboard, odyssey, overview, rules, rush
@@ -191,18 +191,21 @@ def _render_card_sync(prefix: str, html: str) -> str:
 
 
 async def _render_card(prefix: str, html_fn) -> str:
-    """构建 HTML 与渲染全程放在 worker 线程，经全局信号量串行化，避免阻塞事件循环。
+    """构建 HTML 与渲染全程放在渲染专用线程池，经全局信号量串行化，避免阻塞事件循环。
 
     wait_for 总超时保护与顶层 render_html_to_png_async 一致：weasyprint 挂死时
     释放 RENDER_SEM（全站唯一渲染槽），避免所有插件渲染永久冻结（无法强杀线程，
-    但僵死线程只占 executor 槽位）。不可改用 render_html_to_png_async——它内部
+    但僵死线程只占 executor 槽位）。执行必须走 run_in_render_executor（专用池
+    max_workers=2）而非 asyncio.to_thread（默认池）：btd6 渲染是全站最重任务，
+    挂死残留线程若落在默认池，几次即可耗尽它，把全 bot 的 to_thread
+    （JSON 落盘等）一起拖死。不可改用 render_html_to_png_async——它内部
     会再次获取 RENDER_SEM，直接死锁。"""
 
     def _job() -> str:
         return _render_card_sync(prefix, html_fn())
 
     async with RENDER_SEM:
-        return await asyncio.wait_for(asyncio.to_thread(_job), timeout=RENDER_TOTAL_TIMEOUT)
+        return await asyncio.wait_for(run_in_render_executor(_job), timeout=RENDER_TOTAL_TIMEOUT)
 
 
 async def _send_card(matcher, prefix: str, html_fn, text_fn) -> None:

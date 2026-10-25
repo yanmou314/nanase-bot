@@ -94,7 +94,6 @@ async def get_pool() -> AsyncConnectionPool:
                         )
                         await conn.execute("CREATE INDEX IF NOT EXISTS idx_day ON messages(day)")
                         await conn.execute("CREATE INDEX IF NOT EXISTS idx_gday ON messages(group_id, day)")
-                        await conn.execute("CREATE INDEX IF NOT EXISTS idx_guday ON messages(group_id, user_id, day)")
                         await conn.execute(
                             """CREATE TABLE IF NOT EXISTS command_usages (
                                 id BIGSERIAL PRIMARY KEY,
@@ -106,12 +105,6 @@ async def get_pool() -> AsyncConnectionPool:
                             )"""
                         )
                         await conn.execute("CREATE INDEX IF NOT EXISTS idx_cmd_day ON command_usages(day)")
-                        await conn.execute(
-                            "CREATE INDEX IF NOT EXISTS idx_cmd_gday ON command_usages(group_id, day)"
-                        )
-                        await conn.execute(
-                            "CREATE INDEX IF NOT EXISTS idx_cmd_uday ON command_usages(user_id, day)"
-                        )
                         await conn.commit()
                 except Exception:
                     try:

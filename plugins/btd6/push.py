@@ -205,31 +205,29 @@ async def _lb_prewarm_jobs(data: dict, *, ongoing_only: bool = False) -> list:
 
 
 async def _prewarm_daily_cards() -> int:
-    """渲染标准+高级每日卡各一张，返回成功张数。
+    """预热每日挑战三面板合卡（与 .每日 命令、每日推送同 key 同内容），返回成功张数。
 
     每日挑战北京时间每天 16:00 切换（与游戏内正式刷新点一致，勿改：见 collect.py
     每日选期注释），新一期首查原本必然冷渲染
     （跨境取数 + 地图大图 + 每张卡约 40 个塔立绘的重渲染，10 秒级）。
     卡片按内容哈希缓存：内容不变时重复预热近零成本，因此挂进每小时 :10
     的任务即可在重置后最迟 10 分钟自动暖好，用户查询命中缓存。
+    注意必须渲 daily_dual_html（key btd6daily）：此前预热渲的是旧版单面板
+    rules_html 卡，与查询/推送消费的合卡 HTML 不同、缓存键永不互命中，预热落空。
     """
-    done = 0
-    for i, (adv, key) in enumerate(((False, "btd6daily"), (True, "btd6dailya"))):
-        try:
-            col = await collect.collect_daily(adv)
-        except Exception:
-            _logger.warning("BTD6 每日预热取数失败 adv=%s", adv, exc_info=True)
-            continue
-        if col.get("empty"):
-            continue
-        try:
-            await cards._render_card(key, lambda c=col: cards.rules_html(c))
-            done += 1
-        except Exception:
-            _logger.warning("BTD6 每日预热渲染失败 adv=%s", adv, exc_info=True)
-        if i == 0:
-            await asyncio.sleep(1.0)
-    return done
+    try:
+        col = await collect.collect_daily_dual()
+    except Exception:
+        _logger.warning("BTD6 每日预热取数失败", exc_info=True)
+        return 0
+    if not col or col.get("empty"):
+        return 0
+    try:
+        await cards._render_card("btd6daily", lambda c=col: cards.daily_dual_html(c))
+        return 1
+    except Exception:
+        _logger.warning("BTD6 每日预热渲染失败", exc_info=True)
+        return 0
 
 
 async def _prewarm_coop_card() -> bool:
@@ -610,8 +608,8 @@ async def _render_kind_payload(kind: str, ev: dict, label: str,
                 # 无有效远征数据：不能只靠总览把本期标成已推
                 return None
             try:
+                # 裁剪已由 _render_card_sync 对 btd6ody 前缀统一完成，勿再重复裁
                 p = await cards._render_card("btd6ody", lambda: cards.odyssey_html(col))
-                p = await asyncio.to_thread(cards.trim_odyssey_png, p)
                 details = [("远征", p)]
             except Exception:
                 _logger.warning("BTD6 远征合卡渲染失败", exc_info=True)
@@ -864,6 +862,12 @@ async def _flush_push_batch() -> None:
         if len(_detail_delivered) > 256:
             for k in list(_detail_delivered)[: len(_detail_delivered) - 256]:
                 _detail_delivered.pop(k, None)
+                # 对应期次的重试预算一并出队：换期残留的 (kind, old_ev_id) 无人清理
+                _batch_retries.pop(k, None)
+        # 重试计数同样有界：仅 give_up/成功路径清理，跨期残留不至无限累积
+        if len(_batch_retries) > 256:
+            for k in list(_batch_retries)[: len(_batch_retries) - 256]:
+                _batch_retries.pop(k, None)
         to_mark: list[tuple[str, str]] = []
         to_give_up: list[str] = []
         to_retry: list[str] = []

@@ -138,7 +138,7 @@ async def _generate_reply(gid: int) -> str:
             _rnd_usage["date"] = today
             _rnd_usage["count"] = 0
         if _rnd_usage["count"] >= _rnd_limit:
-            return  # 超额静默，不发言
+            return ""  # 超额静默，不发言
         _rnd_usage["count"] += 1
     reply = await mod.chat_completion(messages, max_tokens=120)
     if not reply or reply.strip() == "[SKIP]":

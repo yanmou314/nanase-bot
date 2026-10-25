@@ -863,8 +863,11 @@ async def _send_images(bot: Bot, groups: list[str], paths: list[str],
     async def _one(gid: str) -> str | None:
         try:
             for i, path in enumerate(paths):
-                await bot.send_group_msg(
-                    group_id=int(gid), message=MessageSegment.image("file://" + path))
+                # 60s 超时：NapCat 不回包时裸 await 会永久挂住 _push_running，
+                # 此后每小时轮询只会 skipped-running，直到重启进程
+                await asyncio.wait_for(
+                    bot.send_group_msg(
+                        group_id=int(gid), message=MessageSegment.image("file://" + path)), 60)
                 if i < len(paths) - 1:
                     await asyncio.sleep(1)
             return gid
@@ -935,8 +938,9 @@ async def _push_patch(bot: Bot, groups: list[str], patch: dict, attempts: int,
         # 官网直链：QQ 会展开成官方链接卡片（标题+摘要+头图），算“官方搬运”的一部分
         for gid in sent:
             try:
-                await bot.send_group_msg(
-                    group_id=int(gid), message=MessageSegment.text(patch["source"]))
+                await asyncio.wait_for(
+                    bot.send_group_msg(
+                        group_id=int(gid), message=MessageSegment.text(patch["source"])), 30)
             except Exception:
                 _logger.warning("ow补丁原文链接发送到群 %s 失败", gid, exc_info=True)
     return True
@@ -961,8 +965,8 @@ async def _notify_owner(text: str) -> None:
         return
     try:
         bot = get_bot()
-        await bot.send_private_msg(
-            user_id=int(OWNER), message=MessageSegment.text(text))
+        await asyncio.wait_for(
+            bot.send_private_msg(user_id=int(OWNER), message=MessageSegment.text(text)), 30)
     except Exception:
         _logger.warning("ow补丁主人通知发送失败", exc_info=True)
 

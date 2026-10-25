@@ -1913,13 +1913,13 @@ def test_prewarm_lb_hourly_only_ongoing(monkeypatch):
     monkeypatch.setattr(btd6.collect, "collect_overview", fake_collect)
     monkeypatch.setattr(btd6.collect, "collect_leaderboard", fake_lb)
 
-    async def fake_daily(adv):
+    async def fake_daily_dual():
         return {"empty": "暂无每日挑战数据"}  # 每日卡预热：empty 时跳过，不渲染
 
     async def fake_coop():
         return {"empty": "暂无 Co-op 挑战数据"}
 
-    monkeypatch.setattr(btd6.collect, "collect_daily", fake_daily)
+    monkeypatch.setattr(btd6.collect, "collect_daily_dual", fake_daily_dual)
     monkeypatch.setattr(btd6.collect, "collect_daily_coop", fake_coop)
 
     asyncio.run(btd6.push.btd6_prewarm_lb_hourly_job())
@@ -1927,29 +1927,33 @@ def test_prewarm_lb_hourly_only_ongoing(monkeypatch):
 
 
 def test_prewarm_daily_cards_renders_both(monkeypatch):
-    """每小时预热含每日卡：标准+高级各渲一张；empty 的跳过；渲染失败不抛。"""
+    """每小时预热渲每日三面板合卡（与 .每日/推送同 key btd6daily）；empty/异常跳过不抛。"""
     rendered = []
 
-    async def fake_collect(adv):
-        if adv:
-            return {"empty": "暂无每日挑战数据"}
-        return {"prefix": "Standard 2936", "meta": {}, "map_img": "",
+    async def fake_collect_dual():
+        return {"prefix": "Daily 2936", "meta": {}, "map_img": "",
                 "side_img": "", "stale_note": ""}
 
     async def fake_render(prefix, html_fn):
         rendered.append(prefix)
         return f"/tmp/{prefix}.png"
 
-    monkeypatch.setattr(btd6.collect, "collect_daily", fake_collect)
+    monkeypatch.setattr(btd6.collect, "collect_daily_dual", fake_collect_dual)
     monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
     done = asyncio.run(btd6.push._prewarm_daily_cards())
     assert rendered == ["btd6daily"]
     assert done == 1
 
-    def boom(adv):
+    async def empty_dual():
+        return {"empty": "暂无每日挑战数据"}
+
+    monkeypatch.setattr(btd6.collect, "collect_daily_dual", empty_dual)
+    assert asyncio.run(btd6.push._prewarm_daily_cards()) == 0  # empty 跳过
+
+    async def boom():
         raise RuntimeError("fetch failed")
 
-    monkeypatch.setattr(btd6.collect, "collect_daily", boom)
+    monkeypatch.setattr(btd6.collect, "collect_daily_dual", boom)
     assert asyncio.run(btd6.push._prewarm_daily_cards()) == 0  # 异常吞掉不抛
 
 

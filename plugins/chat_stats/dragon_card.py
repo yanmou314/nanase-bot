@@ -20,7 +20,9 @@ ACCENT = "#D9A94E"
 async def _fetch_avatar(user_id: int) -> bytes | None:
     url = f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
     try:
-        r = await get_http_client(timeout=6).get(url, follow_redirects=True)
+        # 不跟随重定向（与 common.get_http_client 的全局 SSRF 约定一致）：
+        # 302 场景走无头像 fallback（序号占位），不允许 qlogo CDN 引到任意地址
+        r = await get_http_client(timeout=6).get(url)
         if r.status_code == 200 and r.content:
             return r.content
     except Exception:

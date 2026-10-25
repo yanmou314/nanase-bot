@@ -276,7 +276,8 @@ async def _sender_name_by_id(bot: Bot, uid: int, gid: int) -> str:
         if gid:
             # NapCat 卡死时裸 await 会永久挂住 handler：走 common 封装（10s 超时 + 共享缓存）
             return (await get_member_name(bot, gid, uid))[:20]
-        info = await bot.get_stranger_info(user_id=uid)
+        # 私聊路径同样 10s 超时，与 common.get_member_name 口径一致
+        info = await asyncio.wait_for(bot.get_stranger_info(user_id=uid), 10)
         name = ((info.get("card") or info.get("nickname") or "") if isinstance(info, dict) else "").strip()
         return (name or str(uid))[:20]
     except Exception:

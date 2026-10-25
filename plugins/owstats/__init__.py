@@ -185,9 +185,14 @@ async def _dispatch_next() -> None:
             return
         text = task.get("text") or (" {} {}".format(TASK_CMD_TEXT.get(task["kind"], ""), task["tag"]))
         try:
-            ret = await bot.send_group_msg(
-                group_id=RELAY_GROUP_ID,
-                message=MessageSegment.at(RELAY_BOT_QQ) + MessageSegment.text(text),
+            # 60s 超时：NapCat 卡死时裸 await 会永久占住 _dispatch_lock 与
+            # _task_current，整条中继查询管线停摆到重启
+            ret = await asyncio.wait_for(
+                bot.send_group_msg(
+                    group_id=RELAY_GROUP_ID,
+                    message=MessageSegment.at(RELAY_BOT_QQ) + MessageSegment.text(text),
+                ),
+                60,
             )
             task["task_msg_id"] = (ret or {}).get("message_id") if isinstance(ret, dict) else None
         except Exception:
@@ -326,10 +331,13 @@ async def _send_to_requester(bot: Bot, task: dict, body) -> None:
             target_at = MessageSegment.at(int(task["user_id"]))
         else:
             target_at = MessageSegment.text("")
+        # 60s 超时：挂死会卡住 _complete_task_* 里的 _dispatch_next，管线停摆
         if task.get("group_id"):
-            await bot.send_group_msg(group_id=int(task["group_id"]), message=target_at + body)
+            await asyncio.wait_for(
+                bot.send_group_msg(group_id=int(task["group_id"]), message=target_at + body), 60)
         else:
-            await bot.send_private_msg(user_id=int(task["user_id"]), message=body)
+            await asyncio.wait_for(
+                bot.send_private_msg(user_id=int(task["user_id"]), message=body), 60)
     except Exception:
         logger.warning("owstats 结果转发失败", exc_info=True)
 
@@ -435,9 +443,12 @@ async def _send_claim_at(bot: Bot | None = None) -> bool:
     if overwritten:
         _open_discard_window()
     try:
-        await bot.send_group_msg(
-            group_id=RELAY_GROUP_ID,
-            message=MessageSegment.at(RELAY_BOT_QQ),
+        await asyncio.wait_for(
+            bot.send_group_msg(
+                group_id=RELAY_GROUP_ID,
+                message=MessageSegment.at(RELAY_BOT_QQ),
+            ),
+            60,
         )
     except Exception:
         logger.warning("owstats 发送领取 @ 失败", exc_info=True)
@@ -780,9 +791,11 @@ if scheduler is not None:
             else:
                 msg = MessageSegment.text("查询超时（超过3分钟），请稍后再试～")
             if task.get("group_id"):
-                await bot.send_group_msg(group_id=int(task["group_id"]), message=msg)
+                await asyncio.wait_for(
+                    bot.send_group_msg(group_id=int(task["group_id"]), message=msg), 60)
             else:
-                await bot.send_private_msg(user_id=int(task["user_id"]), message=msg)
+                await asyncio.wait_for(
+                    bot.send_private_msg(user_id=int(task["user_id"]), message=msg), 60)
         except Exception:
             pass
 
@@ -823,14 +836,15 @@ async def bind(event: MessageEvent, arg: Message = CommandArg()):
     tag = parse_tag(arg.extract_plain_text().strip())
     if not tag:
         await bind_cmd.finish(at_prefix(event) + "用法：.绑定 名字#数字\n例如：.绑定 Yanmou#51293")
-    _bind(str(event.user_id), tag)
+    # 绑定写盘含 fsync，放线程执行不阻塞事件循环
+    await asyncio.to_thread(_bind, str(event.user_id), tag)
     # tag 为用户自由输入（防 CQ 码注入）：回显一律 MessageSegment.text 包裹
     await bind_cmd.finish(at_prefix(event) + MessageSegment.text(f"✅ 绑定成功：{tag}") + "\n之后直接发 .战报、.段位、.强度、.总结 即可查询；加 ID 可查别人，如 .战报 其他人#1234")
 
 
 @unbind_cmd.handle()
 async def unbind(event: MessageEvent):
-    if _unbind(str(event.user_id)):
+    if await asyncio.to_thread(_unbind, str(event.user_id)):
         await unbind_cmd.finish(at_prefix(event) + "✅ 已解除绑定")
     await unbind_cmd.finish(at_prefix(event) + "你还没有绑定过 ID")
 

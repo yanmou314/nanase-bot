@@ -163,8 +163,9 @@ def _render(counter: Counter, n: int, msg_count: int, phrases: list[tuple[str, i
     img = Image.new("RGB", (W, H), (255, 255, 255))
     draw = ImageDraw.Draw(img)
 
-    # 至少取 60 个词参与排版，宁可用小字号填满面板也不留大片空白
-    words = counter.most_common(max(n, 60))
+    # 至少取 30 个词参与排版，宁可用小字号填满面板也不留大片空白；
+    # 下限 30 而非 60：让 .词云 N 的 N 在 30~60 区间真实生效（60 时参数形同虚设）
+    words = counter.most_common(max(n, 30))
     maxc = max(c for _, c in words) if words else 1
     # 语录片段作为高优先级词条混排：字号排，
     # 保证面板尽量铺满而不是缩在中间一小块（词够多时系数为 1，原样不动）

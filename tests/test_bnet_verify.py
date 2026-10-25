@@ -101,9 +101,11 @@ def test_join_found_approves_binds_and_schedules_card(monkeypatch):
     _enable(888)
     seen = _patch_relay(monkeypatch, True)
     binds, cards = [], []
-    monkeypatch.setattr(
-        bnet_verify, "_auto_bind", lambda uid, tag: binds.append((uid, tag)) or True
-    )
+    async def _fake_bind(uid, tag):
+        binds.append((uid, tag))
+        return True
+
+    monkeypatch.setattr(bnet_verify, "_auto_bind", _fake_bind)
     monkeypatch.setattr(
         bnet_verify, "_schedule_card",
         lambda bot, gid, uid, tag: cards.append((gid, uid, tag)),
@@ -151,9 +153,11 @@ def test_join_approve_api_failure_is_swallowed(monkeypatch):
     _enable(888)
     _patch_relay(monkeypatch, True)
     binds, cards = [], []
-    monkeypatch.setattr(
-        bnet_verify, "_auto_bind", lambda uid, tag: binds.append((uid, tag))
-    )
+    async def _fake_bind(uid, tag):
+        binds.append((uid, tag))
+        return False
+
+    monkeypatch.setattr(bnet_verify, "_auto_bind", _fake_bind)
     monkeypatch.setattr(
         bnet_verify, "_schedule_card", lambda *a: cards.append(a)
     )
@@ -177,7 +181,7 @@ def test_auto_bind_uses_owstats(monkeypatch):
     fake = types.ModuleType("plugins.owstats")
     fake._bind = lambda uid, tag: calls.append((uid, tag))
     monkeypatch.setitem(sys.modules, "plugins.owstats", fake)
-    assert bnet_verify._auto_bind(222, "Player#12345") is True
+    assert asyncio.run(bnet_verify._auto_bind(222, "Player#12345")) is True
     assert calls == [("222", "Player#12345")]
 
 
@@ -185,7 +189,7 @@ def test_auto_bind_missing_owstats(monkeypatch):
     import sys
 
     monkeypatch.setitem(sys.modules, "plugins.owstats", None)  # import → ImportError
-    assert bnet_verify._auto_bind(222, "Player#12345") is False
+    assert asyncio.run(bnet_verify._auto_bind(222, "Player#12345")) is False
 
 
 def test_set_card_with_retry(monkeypatch):
@@ -283,9 +287,11 @@ def test_relay_verify_profile_swallows_missing_owstats(monkeypatch):
 
 def test_approve_verify_by_qq_approves_and_clears(monkeypatch):
     binds, cards = [], []
-    monkeypatch.setattr(
-        bnet_verify, "_auto_bind", lambda uid, tag: binds.append((uid, tag)) or True
-    )
+    async def _fake_bind(uid, tag):
+        binds.append((uid, tag))
+        return True
+
+    monkeypatch.setattr(bnet_verify, "_auto_bind", _fake_bind)
     monkeypatch.setattr(
         bnet_verify, "_schedule_card", lambda bot, gid, uid, tag: cards.append((gid, uid, tag))
     )
@@ -306,9 +312,11 @@ def test_approve_verify_by_qq_approves_and_clears(monkeypatch):
 def test_approve_verify_by_qq_legacy_record_without_user_id(monkeypatch):
     """旧格式记录（缺 user_id）：QQ 回退用记录键，绑定与改名片照常。"""
     binds, cards = [], []
-    monkeypatch.setattr(
-        bnet_verify, "_auto_bind", lambda uid, tag: binds.append((uid, tag)) or True
-    )
+    async def _fake_bind(uid, tag):
+        binds.append((uid, tag))
+        return True
+
+    monkeypatch.setattr(bnet_verify, "_auto_bind", _fake_bind)
     monkeypatch.setattr(
         bnet_verify, "_schedule_card", lambda bot, gid, uid, tag: cards.append((gid, uid, tag))
     )
