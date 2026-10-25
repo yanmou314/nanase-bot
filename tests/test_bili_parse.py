@@ -527,3 +527,41 @@ def test_bangumi_render_uses_episode_badge_without_duration():
     info = dict(_INFO, kind="bangumi", videos=3, duration=0)
     image = bili._render_card(info, None)
     assert isinstance(image, Image.Image) and image.width == 900
+
+
+def test_bili_get_412_retries_with_buvid(monkeypatch):
+    """412 风控回归：裸请求被 412 后必须取指纹带 Cookie 重试一次并成功。"""
+    import types
+
+    calls = []
+
+    class _Resp:
+        def __init__(self, status, payload):
+            self.status_code = status
+            self._payload = payload
+            self.url = "https://api.bilibili.com/x/web-interface/view"
+
+        def json(self):
+            return self._payload
+
+    view_ok = {"code": 0, "data": {"bvid": "BV1W5ne6WEfJ", "title": "风控重试", "pic": "https://i0.hdslb.com/x.jpg",
+                                   "owner": {"name": "up"}, "tname": "游戏", "videos": 1, "desc": "",
+                                   "duration": 60, "pubdate": 0, "stat": {}}}
+    spi = {"code": 0, "data": {"b_3": "buvid3-test", "b_4": "buvid4-test"}}
+
+    class _Client:
+        async def get(self, url, **kw):
+            calls.append((url, kw.get("headers", {}).get("Cookie", "")))
+            if "finger/spi" in url:
+                return _Resp(200, spi)
+            # 首次（无 Cookie）412，带 Cookie 后成功
+            return _Resp(412, {}) if not kw["headers"].get("Cookie") else _Resp(200, view_ok)
+
+    monkeypatch.setattr(bili, "get_http_client", lambda t: _Client())
+    monkeypatch.setattr(bili, "_bili_cookies", {})
+    monkeypatch.setattr(bili, "_buvid_ts", 0.0)
+    info = asyncio.run(bili._fetch_video_info("BV1W5ne6WEfJ"))
+    assert info is not None and info["title"] == "风控重试"
+    # 首请求裸发 → spi 指纹 → 带 Cookie 重试，共 3 次
+    assert [u.split("/")[-1] for u, _c in calls] == ["view", "spi", "view"]
+    assert calls[2][1] and "buvid3=buvid3-test" in calls[2][1]

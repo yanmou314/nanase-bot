@@ -769,7 +769,7 @@ def test_rules_html_grid_and_escape(monkeypatch, tmp_path):
     assert "科沃斯·皮肤" in html
     assert "&lt;x&gt;" in html and "<x>" not in html  # 无立绘的塔退化为文字并转义
     assert "初始资金" in html and "最快用时" in html and "气球强化" in html
-    assert "已结束" in html and "2026/8/" in html  # 活动时间与状态徽章（样例活动相对真实时钟已过期）
+    assert "已结束" in html and "2026/08/" in html  # 活动时间与状态徽章（样例活动相对真实时钟已过期）
 
 
 def test_path_max_txt():
@@ -2011,7 +2011,7 @@ def test_collectevent_collect_and_text(monkeypatch):
     text = btd6.collectevent_text(col)
     assert "Featured Insta" in text and "更换于" in text
     assert "猴村、狙击猴、飞机猴、驯兽师" in text  # 当前轮（第 2 轮，含 MonkeyAce 译名）
-    assert "2026/9/1 - 2026/9/15" in text
+    assert "2026/09/01 06:00 - 2026/09/15 06:00" in text  # 起止含时刻（北京时间）
 
 
 def test_collectevent_empty(monkeypatch):
@@ -2027,7 +2027,7 @@ def test_collectevent_card_html(monkeypatch):
     col = asyncio.run(btd6.collect_collectevent(_CE_START + btd6.ROTATION_MS * 2))
     html = btd6.collectevent_html(col)
     assert "收集活动 · Featured Insta 计划表" in html
-    assert "2026/9/1 - 2026/9/15" in html
+    assert "2026/09/01 06:00 - 2026/09/15 06:00" in html
     assert "更换于" in html  # 当前轮倒计时行
     assert "结束于" in html
     assert "instagen" in html  # 数据来源脚注
@@ -2990,3 +2990,25 @@ def test_http_get_proxy_disabled_by_env(monkeypatch):
     monkeypatch.setenv("BTD6_PROXY", "")
     asyncio.run(btd6._http_get(btd6.URL_RACES, 20))
     assert calls == [("direct", btd6.URL_RACES)]
+
+
+def test_boss_dual_ended_badge_and_source_hint():
+    """回退展示已结束活动时：标题带「已结束」徽章 + NK 数据源滞后提示。"""
+    col = {"ev": {"bossType": "Bloonarius", "name": "Bloonarius 300", "id": "boss123_0926",
+                  "start": int(time.time() * 1000) - 5 * 86_400_000,
+                  "end": int(time.time() * 1000) - 86_400_000},
+           "variants": [], "meta": {}, "side_img": "", "map_img": ""}
+    html = btd6.boss_dual_html(col)
+    assert "bdual-badge-off" in html and "已结束" in html
+    assert "NK 数据源尚未收录" in html
+
+
+def test_boss_dual_ongoing_badge_no_hint():
+    """进行中活动：带「进行中」徽章，不出现数据源提示。"""
+    now_ms = int(time.time() * 1000)
+    col = {"ev": {"bossType": "Bloonarius", "name": "Bloonarius 300", "id": "boss123_0926",
+                  "start": now_ms - 86_400_000, "end": now_ms + 4 * 86_400_000},
+           "variants": [], "meta": {}, "side_img": "", "map_img": ""}
+    html = btd6.boss_dual_html(col)
+    assert "bdual-badge-on" in html and "进行中" in html
+    assert "NK 数据源尚未收录" not in html

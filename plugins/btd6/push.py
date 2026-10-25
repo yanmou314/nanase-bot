@@ -425,10 +425,11 @@ async def _fetch_push_event(kind: str, now: int, real_now: int):
 
 
 async def _btd6_push_kind(kind: str) -> None:
-    """精准采样：仅检查单类活动是否刚刷新；命中则入队，由防抖批量统一渲染后发送。
+    """精准采样：仅检查单类活动是否有新一期；命中则入队，由防抖批量统一渲染后发送。
 
-    原每 5 分钟全量检查 288 次/日 → 现仅刷新点后 3 次/类。同小时多类（如每日+Coop）
-    错峰采样时先进队列，等防抖窗口结束后一起处理，避免总览卡重复发送。
+    除每日 16:00 外全部集中在每日 00:0x 档（0/5/10 分各一次），采样晚于开始
+    6~18 小时、落在 12 分钟窗口外，由「未推过且进行中」分支兜底推送。
+    同档多类错峰采样先进队列，等防抖窗口结束后一起处理，避免总览卡重复发送。
     """
     groups = await asyncio.to_thread(_push_groups)
     if not groups:
@@ -584,6 +585,16 @@ async def _render_kind_payload(kind: str, ev: dict, label: str,
                         "btd6ctd", lambda c=col: cards.ctmap_html(c))
                     vt = f"争夺领土地图：{label}" if label else "争夺领土地图"
                     details.append((vt, p2))
+            if kind == "rush":
+                col = await collect._safe(collect.collect_rush(), "rush_push")
+                if col and not col.get("empty"):
+                    try:
+                        p2 = await cards._render_card(
+                            "btd6rush", lambda c=col: cards._rush_diff_html(c))
+                        vt = f"Boss Rush：{label}" if label else "Boss Rush"
+                        details.append((vt, p2))
+                    except Exception:
+                        _logger.warning("BTD6 Rush 卡渲染失败", exc_info=True)
             return {"overview": path, "announce": text, "label": label, "details": details}
         if kind == "odyssey":
             if overview_path == "":
@@ -743,8 +754,8 @@ async def _send_push_batch(payloads: list[tuple[str, str, dict]], groups: set[in
 def _kind_push_ok(kind: str, payload: dict, result: dict) -> bool:
     """该 kind 是否算「完整推送成功」——只有全部目标群成功才允许写 last_pushed。
 
-    - 有详情（Boss 规则 / 远征分图 / 每日 / Co-op / 社季）：每个目标群都至少发出一条详情
-    - 纯总览（竞速 / CT / Rush）：每个目标群都发出总览
+    - 有详情（Boss 规则 / 领土地图 / Rush 卡 / 远征分图 / 每日 / Co-op / 社季）：每个目标群都至少发出一条详情
+    - 纯总览（竞速）：每个目标群都发出总览
     - 总览已发但详情全失败：不算成功，重试时跳过总览只补详情
     """
     details = payload.get("details") or []
@@ -869,7 +880,7 @@ async def _flush_push_batch() -> None:
                 else:
                     to_retry.append(kind)
                 # 总览已发出且本类还有详情可补：标记 skip，重试只补详情。
-                # 纯总览类（race/rush）无详情，重试必须重发总览——否则重试轮
+                # 纯总览类（race）无详情，重试必须重发总览——否则重试轮
                 # messages 为空恒判失败直至 give-up，且标记滞留会让后续期次永久静默。
                 # 注意必须看当前 kind 自己的 p，不能用渲染循环残留的 payload 变量：
                 # 同批最后渲染的若是带详情类（如 coop），残留 payload 有 details，
@@ -943,53 +954,48 @@ async def _btd6_push_single(kind: str, ev: dict, ev_id: str, label: str, groups:
                  kind, ev_id, len(groups), ok, mark_global and ok)
 
 
-# 精准采样：已知刷新点后 0/5/10 分钟各一次（3 次容错，覆盖 API 延迟）
-# 竞速 周四10:00 持续97h（second 偏移错峰：同小时 race/boss/odyssey 依次 0/20/40 秒触发，
-# 避免三个采样任务整点并发冷启动拉取全量 API + 渲染）
-@scheduler.scheduled_job("cron", hour=10, minute=0, second=0, id="btd6_push_race_0", timezone="Asia/Shanghai")
+# 精准采样：每日凌晨 00:00 档统一采样（0/5/10 分各一次，3 次容错；TTL 15 分钟内
+# 后两次采样命中缓存，不新增请求）。各活动游戏内开始时间（北京时间）为 NK API
+# 历史实测值，与 btd6apiexplorer.github.io 展示同源一致：
+#   竞速 周五10:00（97h，偶有休刊周）· Boss 周六10:00（121h，偶有 11:30 特殊场）
+#   领土 周三06:00 双周（168h，偶有 08:00 特殊场）· 远征 周四10:00（144h）
+#   Boss Rush 隔周四06:00（120h，与领土一替一周）
+# 采样时刻晚于开始 6~18 小时，落在 12 分钟窗口外，由「未推过该 id 且进行中」
+# 的兜底分支推送；原 CT 周三 08:00 专项与每小时 :12 兜底并入本档后删除。
+# second 偏移错峰（0/10/20/30/40/50 秒，间距 ≤70s 防抖窗口），避免整点并发冷启动拉取 API + 渲染。
+@scheduler.scheduled_job("cron", hour=0, minute=0, second=0, id="btd6_push_race_0", timezone="Asia/Shanghai")
 async def btd6_push_race_0(): await _btd6_push_kind("race")
-@scheduler.scheduled_job("cron", hour=10, minute=5, second=0, id="btd6_push_race_5", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=0, minute=5, second=0, id="btd6_push_race_5", timezone="Asia/Shanghai")
 async def btd6_push_race_5(): await _btd6_push_kind("race")
-@scheduler.scheduled_job("cron", hour=10, minute=10, second=0, id="btd6_push_race_10", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=0, minute=10, second=0, id="btd6_push_race_10", timezone="Asia/Shanghai")
 async def btd6_push_race_10(): await _btd6_push_kind("race")
-# Boss 周五10:00 持续121h
-@scheduler.scheduled_job("cron", hour=10, minute=0, second=20, id="btd6_push_boss_0", timezone="Asia/Shanghai")
+# Boss
+@scheduler.scheduled_job("cron", hour=0, minute=0, second=20, id="btd6_push_boss_0", timezone="Asia/Shanghai")
 async def btd6_push_boss_0(): await _btd6_push_kind("boss")
-@scheduler.scheduled_job("cron", hour=10, minute=5, second=20, id="btd6_push_boss_5", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=0, minute=5, second=20, id="btd6_push_boss_5", timezone="Asia/Shanghai")
 async def btd6_push_boss_5(): await _btd6_push_kind("boss")
-@scheduler.scheduled_job("cron", hour=10, minute=10, second=20, id="btd6_push_boss_10", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=0, minute=10, second=20, id="btd6_push_boss_10", timezone="Asia/Shanghai")
 async def btd6_push_boss_10(): await _btd6_push_kind("boss")
-# CT 周二06:00 持续168h（双周刷新，样本含周三08:00 特殊场，兼顾）+ 周三08:00 兜底
-@scheduler.scheduled_job("cron", hour=6, minute=0, second=0, id="btd6_push_ct_0", timezone="Asia/Shanghai")
+# 争夺领土
+@scheduler.scheduled_job("cron", hour=0, minute=0, second=10, id="btd6_push_ct_0", timezone="Asia/Shanghai")
 async def btd6_push_ct_0(): await _btd6_push_kind("ct")
-@scheduler.scheduled_job("cron", hour=6, minute=5, second=0, id="btd6_push_ct_5", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=0, minute=5, second=10, id="btd6_push_ct_5", timezone="Asia/Shanghai")
 async def btd6_push_ct_5(): await _btd6_push_kind("ct")
-@scheduler.scheduled_job("cron", hour=6, minute=10, second=0, id="btd6_push_ct_10", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=0, minute=10, second=10, id="btd6_push_ct_10", timezone="Asia/Shanghai")
 async def btd6_push_ct_10(): await _btd6_push_kind("ct")
-@scheduler.scheduled_job("cron", hour=8, minute=0, id="btd6_push_ct_w0", timezone="Asia/Shanghai")
-async def btd6_push_ct_w0(): await _btd6_push_kind("ct")
-@scheduler.scheduled_job("cron", hour=8, minute=5, id="btd6_push_ct_w5", timezone="Asia/Shanghai")
-async def btd6_push_ct_w5(): await _btd6_push_kind("ct")
-@scheduler.scheduled_job("cron", hour=8, minute=10, id="btd6_push_ct_w10", timezone="Asia/Shanghai")
-async def btd6_push_ct_w10(): await _btd6_push_kind("ct")
-# CT 兜底：每小时 :12 采样。窗口外仅在「未推过该 id 且进行中」时入队，成功后由 last_pushed 去重。
-@scheduler.scheduled_job("cron", minute=12, second=0, id="btd6_push_ct_hourly", timezone="Asia/Shanghai")
-async def btd6_push_ct_hourly(): await _btd6_push_kind("ct")
-# 远征 周三10:00 持续144h
-@scheduler.scheduled_job("cron", hour=10, minute=0, second=40, id="btd6_push_ody_0", timezone="Asia/Shanghai")
+# 远征
+@scheduler.scheduled_job("cron", hour=0, minute=0, second=30, id="btd6_push_ody_0", timezone="Asia/Shanghai")
 async def btd6_push_ody_0(): await _btd6_push_kind("odyssey")
-@scheduler.scheduled_job("cron", hour=10, minute=5, second=40, id="btd6_push_ody_5", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=0, minute=5, second=30, id="btd6_push_ody_5", timezone="Asia/Shanghai")
 async def btd6_push_ody_5(): await _btd6_push_kind("odyssey")
-@scheduler.scheduled_job("cron", hour=10, minute=10, second=40, id="btd6_push_ody_10", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=0, minute=10, second=30, id="btd6_push_ody_10", timezone="Asia/Shanghai")
 async def btd6_push_ody_10(): await _btd6_push_kind("odyssey")
-
-# Boss Rush 隔周三 22:00 UTC -> 周四 06:00 CST，与 CT 交替，改为每天 06:00 定点检测
-# （hour=6 与 ct 同小时：ct=0 秒 / rush=20 秒 错峰）
-@scheduler.scheduled_job("cron", hour=6, minute=0, second=20, id="btd6_push_rush_0", timezone="Asia/Shanghai")
+# Boss Rush
+@scheduler.scheduled_job("cron", hour=0, minute=0, second=40, id="btd6_push_rush_0", timezone="Asia/Shanghai")
 async def btd6_push_rush_0(): await _btd6_push_kind("rush")
-@scheduler.scheduled_job("cron", hour=6, minute=5, second=20, id="btd6_push_rush_5", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=0, minute=5, second=40, id="btd6_push_rush_5", timezone="Asia/Shanghai")
 async def btd6_push_rush_5(): await _btd6_push_kind("rush")
-@scheduler.scheduled_job("cron", hour=6, minute=10, second=20, id="btd6_push_rush_10", timezone="Asia/Shanghai")
+@scheduler.scheduled_job("cron", hour=0, minute=10, second=40, id="btd6_push_rush_10", timezone="Asia/Shanghai")
 async def btd6_push_rush_10(): await _btd6_push_kind("rush")
 
 # 每日 16:00（北京时间，与游戏内正式刷新点一致；普通+高级双版本）。勿改：见 collect.py 每日选期模块注释
@@ -1006,9 +1012,9 @@ async def btd6_push_daily_10(): await _btd6_push_kind("daily")
 # 手动补推仍可用 _btd6_push_single("coop", ...)；_BTD6_PUSH_KINDS 保留 coop
 # 仅为 last_pushed 过滤/批量排序兼容，连接补检处显式跳过。
 
-# 社交赛季：刷新点不固定（NK 未公布固定周常），每小时 :15 采样一次；
-# 只取进行中，id 与 last_pushed 不同即推送（无 12 分钟窗口，避免漏检）
-@scheduler.scheduled_job("cron", minute=15, second=45, id="btd6_push_social", timezone="Asia/Shanghai")
+# 社交赛季：刷新点不固定（NK 未公布固定周常），每日 00:00:50 随统一档采样一次；
+# 社季持续约两周不怕漏检；只取进行中，id 与 last_pushed 不同即推送（无 12 分钟窗口）
+@scheduler.scheduled_job("cron", hour=0, minute=0, second=50, id="btd6_push_social", timezone="Asia/Shanghai")
 async def btd6_push_social_job(): await _btd6_push_kind("social")
 
 

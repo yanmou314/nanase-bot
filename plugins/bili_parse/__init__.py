@@ -86,6 +86,64 @@ def _font(key: str, size: int):
     return font
 
 
+# B站自 2024 起对数据中心 IP 收紧风控：无设备指纹的裸请求会间歇性 412（时好时坏，
+# 与请求频率/IP 信誉相关）。解法：先调指纹接口 spi 取 buvid3/buvid4 随请求携带；
+# 仍遭 412 时强制刷新指纹重试一次。指纹懒加载（首次 412 才取，24h 缓存），
+# 保持 IP 信誉良好时的零额外请求，也让测试桩的首请求仍是业务 URL。
+_SPI_URL = "https://api.bilibili.com/x/frontend/finger/spi"
+_bili_cookies: dict[str, str] = {}
+_buvid_ts: float = 0.0
+
+
+async def _buvid_cookie(force: bool = False) -> str:
+    """取 buvid 指纹 Cookie 头值（24h 缓存）；获取失败返回空串按裸请求继续。
+
+    force=False 且缓存为空时不发起请求（返回空串）——首请求保持无 Cookie 裸发，
+    由 412 触发后才真正取指纹。
+    """
+    global _bili_cookies, _buvid_ts
+    now = time.time()
+    if not force and _bili_cookies and now - _buvid_ts < 24 * 3600.0:
+        return "; ".join(f"{k}={v}" for k, v in _bili_cookies.items())
+    try:
+        client = get_http_client(10.0)
+        resp = await client.get(_SPI_URL, headers=_HEADERS)
+        data = resp.json().get("data") or {}
+        b3, b4 = str(data.get("b_3") or "").strip(), str(data.get("b_4") or "").strip()
+        if b3:
+            _bili_cookies = {"buvid3": b3, "buvid4": b4}
+            _buvid_ts = now
+    except Exception:
+        _logger.warning("B站指纹获取失败，按无 Cookie 继续", exc_info=True)
+    return "; ".join(f"{k}={v}" for k, v in _bili_cookies.items())
+
+
+def _cached_buvid_cookie() -> str:
+    """只读缓存，绝不发起网络请求。"""
+    now = time.time()
+    if _bili_cookies and now - _buvid_ts < 24 * 3600.0:
+        return "; ".join(f"{k}={v}" for k, v in _bili_cookies.items())
+    return ""
+
+
+async def _bili_get(url: str, params: dict) -> httpx.Response:
+    """带指纹 Cookie 的 B站 API GET；遭 412 风控时取/刷新指纹重试一次。
+
+    首请求恒为业务 URL 本身（不带 Cookie 裸发）：IP 信誉良好时零额外请求；
+    412 才拉指纹重试，之后 24h 内的请求主动携带 Cookie 预防再犯。
+    """
+    client = get_http_client(10.0)
+    cookie = _cached_buvid_cookie()
+    headers = {**_HEADERS, "Cookie": cookie} if cookie else dict(_HEADERS)
+    resp = await client.get(url, params=params, headers=headers)
+    if getattr(resp, "status_code", 200) == 412:
+        _logger.warning("B站风控 412，获取/刷新设备指纹重试 url=%s", url)
+        cookie = await _buvid_cookie(force=True)
+        headers = {**_HEADERS, "Cookie": cookie} if cookie else dict(_HEADERS)
+        resp = await client.get(url, params=params, headers=headers)
+    return resp
+
+
 def extract_ids(*texts: str) -> list[str]:
     """提取视频/番剧 ID；ep/ss 仅在 B站链接上下文中识别。"""
     found: list[str] = []
@@ -201,11 +259,7 @@ def _check_api_status(resp: httpx.Response, vid: str, label: str) -> bool:
 async def _fetch_video_info(vid: str) -> dict | None:
     params = {"bvid": vid[2:]} if vid.startswith("BV") else {"aid": vid[2:]}
     try:
-        client = get_http_client(10.0)
-        resp = await client.get(
-            "https://api.bilibili.com/x/web-interface/view",
-            params=params, headers=_HEADERS,
-        )
+        resp = await _bili_get("https://api.bilibili.com/x/web-interface/view", params=params)
         if not _check_api_status(resp, vid, "视频"):
             return None
         data = resp.json()
@@ -245,11 +299,7 @@ async def _fetch_bangumi_info(vid: str) -> dict | None:
     """番剧/影视（ep/ss 链接）：查 pgc season 接口，定位到具体一集。"""
     params = {"ep_id": vid[2:]} if vid.startswith("ep") else {"season_id": vid[2:]}
     try:
-        client = get_http_client(10.0)
-        resp = await client.get(
-            "https://api.bilibili.com/pgc/view/web/season",
-            params=params, headers=_HEADERS,
-        )
+        resp = await _bili_get("https://api.bilibili.com/pgc/view/web/season", params=params)
         if not _check_api_status(resp, vid, "番剧"):
             return None
         data = resp.json()

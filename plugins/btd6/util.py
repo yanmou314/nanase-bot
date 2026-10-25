@@ -24,7 +24,7 @@ def fmt_date(ms: float | None) -> str:
     if not ms:
         return "未知日期"
     dt = datetime.fromtimestamp(ms / 1000, tz=_SH)
-    return f"{dt.year}-{dt.month:02d}-{dt.day:02d}"
+    return f"{dt.year}-{dt.month:02d}-{dt.day:02d} {dt:%H:%M}"
 
 
 def fmt_remaining(delta_ms: int) -> str:
@@ -268,7 +268,7 @@ def _pick_section(items: list, now_ms: int):
 def _fmt_range(ev: dict) -> str:
     s = datetime.fromtimestamp(int(ev.get("start") or 0) / 1000, tz=_SH)
     e = datetime.fromtimestamp(int(ev.get("end") or 0) / 1000, tz=_SH)
-    return f"{s.year}/{s.month}/{s.day} - {e.year}/{e.month}/{e.day}"
+    return f"{s.year}/{s.month:02d}/{s.day:02d} {s:%H:%M} - {e.year}/{e.month:02d}/{e.day:02d} {e:%H:%M}"
 
 
 _STATE_TXT = {"on": "进行中", "up": "未开始", "off": "已结束"}

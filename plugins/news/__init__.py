@@ -27,7 +27,14 @@ _SH = ZoneInfo("Asia/Shanghai")
 STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
 _LOCK = threading.RLock()  # 必须可重入：_load_state 持锁迁移旧格式时会再调 _save_state
 
-NEWS_API = "https://60s.viki.moe/v2/60s"
+# 新闻源：60s 官方主站 + 两个官方镜像（响应结构一致）。07:00 是各家晨报机器人
+# 的拉取高峰，单一源瞬时限流/超时/返回空列表时有发生，按序故障转移。
+NEWS_APIS = (
+    "https://60s.viki.moe/v2/60s",
+    "https://60s-api.viki.moe/v2/60s",
+    "https://60s.b23.run/v2/60s",
+)
+NEWS_API = NEWS_APIS[0]  # 兼容旧引用
 HITOKOTO_API = "https://v1.hitokoto.cn/"
 AI_API = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 AI_CFG_FILE = os.path.join(os.path.dirname(__file__), "ai_config.json")
@@ -253,15 +260,29 @@ def _build_greeting(day: date, quote: str = "", festival: str = "", legal: bool 
 
 
 async def _fetch_news(day: date) -> list[str]:
-    """取指定日期的「每天60秒读懂世界」新闻列表。"""
+    """取指定日期的「每天60秒读懂世界」新闻列表：按序尝试各源，全部失败抛最后一个异常。
+
+    空列表视为失败（早高峰上游更新窗口/限流时可能返回 200 + 空 data），
+    换下一个源重试；每个源的失败都留警告日志，不再静默。
+    """
     client = _get_http_client()
-    r = await client.get(NEWS_API, params={"date": day.isoformat()}, timeout=20)
-    r.raise_for_status()
-    data = r.json()
-    if data.get("code") != 200:
-        raise RuntimeError(data.get("message", "unknown"))
-    news = (data.get("data") or {}).get("news") or []
-    return [str(x).strip() for x in news if str(x).strip()]
+    last_exc: Exception | None = None
+    for api in NEWS_APIS:
+        try:
+            r = await client.get(api, params={"date": day.isoformat()}, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+            if data.get("code") != 200:
+                raise RuntimeError(data.get("message", "unknown"))
+            news = (data.get("data") or {}).get("news") or []
+            items = [str(x).strip() for x in news if str(x).strip()]
+            if not items:
+                raise RuntimeError("接口返回空新闻列表")
+            return items
+        except Exception as exc:
+            last_exc = exc
+            _logger.warning("新闻源 %s 获取失败（%s）: %s", api, day, exc)
+    raise last_exc or RuntimeError("所有新闻源均不可用")
 
 
 def _parse_hitokoto(data: dict) -> str:
@@ -424,19 +445,32 @@ async def _build_greeting_part(day: date, lunar_line: str, festival: str, legal:
 
 
 async def _build_news_section(day: date) -> list[str]:
-    """新闻取昨日（60s 每天早上更新的是前一天的内容）；昨日取不到时回退当日。"""
+    """新闻取昨日（60s 每天早上更新的是前一天的内容）；昨日取不到时回退当日。
+
+    07:00 正值各家晨报机器人拉取高峰，源站瞬时限流/超时/空列表常见：
+    每个日期最多两轮（轮间隔 30 秒，跨源故障转移后仍失败才进入下一轮）；
+    仍拿不到时显式告警并在晨报里标注缺失，不再静默吞掉新闻段。
+    """
     for news_day in (day - timedelta(days=1), day):
-        try:
-            items = (await _fetch_news(news_day))[:10]
+        for attempt in range(2):
+            try:
+                items = (await _fetch_news(news_day))[:10]
+            except Exception as exc:
+                _logger.warning("新闻获取失败（%s 第 %d 轮）: %s", news_day, attempt + 1, exc)
+                items = []
             if items:
                 return [
                     "",
                     f"📰 昨日新闻（{news_day.month}月{news_day.day}日）：",
                     *(f"· {x}" for x in items),
                 ]
-        except Exception as exc:
-            _logger.warning("新闻获取失败（%s）: %s", news_day, exc)
-    return []
+            if attempt == 0:
+                await asyncio.sleep(30)
+        _logger.warning("新闻源 %s 两轮重试后仍无数据", news_day)
+    return [
+        "",
+        "📰 新闻源暂时不可用，今日新闻缺失（稍后可在群里发「新闻测试」验证恢复）",
+    ]
 
 
 async def _build_message(day: date) -> str:

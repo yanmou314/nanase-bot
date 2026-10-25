@@ -774,6 +774,15 @@ body {{ width: {BOSS_DUAL_CARD_W}px; height: {h}px; color: #ffffff;
 .bdual-empty {{ padding: 36px 16px; text-align: center; color: #dceafc; font-size: 18px; font-weight: 800;
                background: #213753; border: 1px solid #3d648c; border-radius: 12px; }}
 .bdual-note {{ margin-top: 8px; color: #b8d0e8; font-size: 12px; text-align: right; }}
+.bdual-statebadge {{ display: inline-block; margin-left: 12px; padding: 1px 14px 2px;
+                     border-radius: 999px; font-size: 16px; line-height: 24px; font-weight: 900;
+                     vertical-align: 3px; letter-spacing: 2px; }}
+.bdual-badge-on {{ background: #1f7a46; color: #d9ffe8; box-shadow: inset 0 1px 0 rgba(255,255,255,.35); }}
+.bdual-badge-up {{ background: #9a7b1a; color: #fff3c4; box-shadow: inset 0 1px 0 rgba(255,255,255,.35); }}
+.bdual-badge-off {{ background: #8b2f36; color: #ffd9dc; box-shadow: inset 0 1px 0 rgba(255,255,255,.3); }}
+.bdual-srchint {{ margin: -2px 2px 10px; padding: 7px 14px; border-radius: 10px;
+                  background: rgba(139,47,54,.35); border: 1px solid rgba(255,138,138,.4);
+                  color: #ffd9dc; font-size: 15px; line-height: 20px; font-weight: 700; text-align: center; }}
 </style></head>
 <body><div class="bdual-page"><div class="bdual-frame">
 {body}

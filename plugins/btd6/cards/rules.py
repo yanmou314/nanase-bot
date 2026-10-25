@@ -658,11 +658,24 @@ def boss_dual_html(col: dict) -> str:
     if not eli_html:
         eli_html = "<div class='bdual-col eli'><div class='bdual-empty'>暂无精英规则</div></div>"
 
+    # 状态徽章 + 数据源滞后提示：本卡是「取进行中→无则回退最近一期」的兜底展示，
+    # 回退到已结束活动时（游戏内可能已刷新新一期、NK 开放数据尚未收录）必须醒目标注
+    state_key = util._state_of(ev, util.bucket_now()) if util._num0(ev.get("start")) else ""
+    badge = ""
+    if state_key:
+        badge = (f"<span class='bdual-statebadge bdual-badge-{state_key}'>"
+                 f"{util._STATE_TXT[state_key]}</span>")
+    source_hint = ""
+    if state_key == "off":
+        source_hint = ("<div class='bdual-srchint'>⚠️ 该期已结束——游戏内可能已刷新新一期，"
+                       "NK 数据源尚未收录，请稍后重试</div>")
+
     body = (
         "<div class='bdual-titlebar'>"
-        f"<div class='bdual-title'>{util._esc(title)}</div>"
+        f"<div class='bdual-title'>{util._esc(title)}{badge}</div>"
         f"<div class='bdual-subtitle'>{subtitle}</div>"
         "</div>"
+        f"{source_hint}"
         f"{banner}{mapbar}"
         f"<div class='bdual-cols'>{std_html}{eli_html}</div>"
     )
@@ -673,7 +686,7 @@ def boss_dual_html(col: dict) -> str:
     # 画布高度：轻量计数，避免为估高二次生成猴子网格 HTML
     extras_h = 22  # 可能的自定义回合/禁用行
     col_h = max((_boss_dual_panel_h(v) + extras_h for v in variants), default=420)
-    frame_h = 10 + 62 + 8 + 268 + 8 + 104 + 8 + col_h + 8
+    frame_h = 10 + 62 + 8 + 268 + 8 + 104 + 8 + col_h + 8 + (44 if source_hint else 0)
     return common._boss_dual_shell(body, frame_h)
 
 
