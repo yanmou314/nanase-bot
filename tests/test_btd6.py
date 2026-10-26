@@ -1926,29 +1926,27 @@ def test_prewarm_lb_hourly_only_ongoing(monkeypatch):
     assert rendered == ["btd6lb", "btd6lb"]
 
 
-def test_prewarm_daily_cards_renders_both(monkeypatch):
-    """每小时预热渲每日三面板合卡（与 .每日/推送同 key btd6daily）；empty/异常跳过不抛。"""
+def test_prewarm_daily_cards_renders_both(monkeypatch, tmp_path):
+    """每小时预热含每日合卡：dual 正常时渲一张；empty 跳过；取数异常吞掉不抛。"""
     rendered = []
 
-    async def fake_collect_dual():
-        return {"prefix": "Daily 2936", "meta": {}, "map_img": "",
-                "side_img": "", "stale_note": ""}
+    async def fake_dual():
+        return {"variants": [{"variant": "standard", "label": "标准", "issue": "标准·第1期",
+                              "meta": {"name": "d1"}, "ev": {"id": "rot1", "metadata": "m1"},
+                              "map_img": ""}],
+                "ev": {"id": "rot1", "metadata": "m1"}, "meta": {"name": "d1"}, "map_img": "",
+                "side_img": "", "prefix": "每日挑战", "announce": "标准·第1期", "stale_note": ""}
 
     async def fake_render(prefix, html_fn):
         rendered.append(prefix)
         return f"/tmp/{prefix}.png"
 
-    monkeypatch.setattr(btd6.collect, "collect_daily_dual", fake_collect_dual)
+    monkeypatch.setattr(btd6.collect, "_COOP_META_CACHE_FILE", str(tmp_path / "coop_meta.json"))
+    monkeypatch.setattr(btd6.collect, "collect_daily_dual", fake_dual)
     monkeypatch.setattr(btd6.cards, "_render_card", fake_render)
     done = asyncio.run(btd6.push._prewarm_daily_cards())
     assert rendered == ["btd6daily"]
     assert done == 1
-
-    async def empty_dual():
-        return {"empty": "暂无每日挑战数据"}
-
-    monkeypatch.setattr(btd6.collect, "collect_daily_dual", empty_dual)
-    assert asyncio.run(btd6.push._prewarm_daily_cards()) == 0  # empty 跳过
 
     async def boom():
         raise RuntimeError("fetch failed")
@@ -3016,3 +3014,32 @@ def test_boss_dual_ongoing_badge_no_hint():
     html = btd6.boss_dual_html(col)
     assert "bdual-badge-on" in html and "进行中" in html
     assert "NK 数据源尚未收录" not in html
+
+
+def test_coop_meta_cache_reuse_within_period(monkeypatch, tmp_path):
+    """Co-op 期内复用：元数据 404 时同 id 命中缓存继续展示；id 换新且无缓存才报未开放。"""
+    monkeypatch.setattr(btd6.collect, "_COOP_META_CACHE_FILE", str(tmp_path / "coop_meta.json"))
+    meta_url = "https://data.ninjakiwi.com/btd6/challenges/challenge/coopmul35fnc"
+    ev = {"name": "coop - X", "id": "coopmul35fnc", "createdAt": 1, "metadata": meta_url}
+
+    async def fail_meta(url):
+        if url == meta_url:
+            raise RuntimeError("NK API 返回异常: No challenge with that ID exists")
+        return [ev]
+
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", fail_meta)
+    ok = {"name": "X coop", "map": "Resort"}
+    btd6.collect._save_coop_meta_cache("coopmul35fnc", ok)
+    col = asyncio.run(btd6.collect.collect_daily_coop())
+    assert col.get("prefix") == "Co-op 挑战" and col.get("meta") == ok
+    assert "期内缓存" in str(col.get("stale_note"))
+
+    # 新一期 id：缓存 id 不匹配 → 不复用，明确提示未开放
+    ev_new = {**ev, "id": "coopnew001"}
+    async def fake_list_new(url):
+        return [ev_new]
+
+    monkeypatch.setattr(btd6.nkapi, "fetch_body", fake_list_new)
+    col2 = asyncio.run(btd6.collect.collect_daily_coop())
+    assert "尚未开放" in str(col2.get("empty"))
+

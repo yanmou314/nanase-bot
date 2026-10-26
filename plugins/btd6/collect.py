@@ -318,6 +318,24 @@ async def _challenge_map_img(meta: dict, tag: str) -> str:
     return map_img or ""
 
 
+async def _fetch_challenge_meta(meta_url: str | None) -> dict:
+    """拉挑战元数据；NK 对部分期目（Co-op 常见）间歇性返回
+    「No challenge with that ID exists」（同一 URL 稍后重试可能成功），
+    失败先重试一次，仍失败按缺失降级为 {}，
+    不让单路 404 炸掉整个每日采集（曾致 .每日 与 16:00 推送持续失败）。"""
+    if not meta_url:
+        return {}
+    for attempt in range(2):
+        try:
+            meta = await nkapi.fetch_body(meta_url)
+            return meta if isinstance(meta, dict) else {}
+        except Exception as exc:
+            _logger.warning("挑战元数据拉取失败（第 %d 次）%s: %s", attempt + 1, meta_url, exc)
+            if attempt == 0:
+                await asyncio.sleep(1.5)
+    return {}
+
+
 async def collect_daily(advanced: bool, now_ms: int | None = None) -> dict:
     items = await nkapi.fetch_body(nkapi.URL_DAILY)
     if not isinstance(items, list):  # 非 list 响应按空数据处理，走既有失败文案
@@ -327,9 +345,7 @@ async def collect_daily(advanced: bool, now_ms: int | None = None) -> dict:
     ev = _daily_pick(items, want, now_ms if now_ms is not None else int(time.time() * 1000))
     if not ev:
         return {"empty": "暂无每日挑战数据"}
-    meta_url = ev.get("metadata")
-    meta = await nkapi.fetch_body(meta_url) if meta_url else None
-    meta = meta if isinstance(meta, dict) else {}  # metadata 缺失/异常时降级，不炸取图
+    meta = await _fetch_challenge_meta(ev.get("metadata"))  # metadata 缺失/异常时降级，不炸取图
     return {
         "prefix": _daily_prefix(str(ev.get("name") or ""), advanced),
         "meta": meta, "map_img": await _challenge_map_img(meta, "daily_map"),
@@ -349,6 +365,36 @@ def _coop_pick(items: list, now_ms: int) -> dict | None:
     return max(created, key=lambda x: _int0(x.get("createdAt")))
 
 
+# Co-op 元数据期内缓存：coop 一期持续约 3~4 天（16:00 切换，NK 不公布起止时间），
+# 期内挑战内容不变。持久化最近一次成功拉取的元数据连同期 id，元数据接口间歇 404 时
+# 只要选中的 id 未变（仍在同一期内）就复用缓存；id 变了（新一期）才视为拿不到。
+_COOP_META_CACHE_FILE = os.path.join(os.path.dirname(__file__), "coop_meta.json")
+
+
+def _load_coop_meta_cache(ev_id: str) -> dict:
+    """读取上次成功的 coop 元数据；仅当期 id 与当前选中完全一致（仍在期内）时返回。"""
+    try:
+        with open(_COOP_META_CACHE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    if not isinstance(data, dict) or str(data.get("id") or "") != str(ev_id):
+        return {}
+    meta = data.get("meta")
+    return meta if isinstance(meta, dict) and meta else {}
+
+
+def _save_coop_meta_cache(ev_id: str, meta: dict) -> None:
+    try:
+        tmp = _COOP_META_CACHE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"id": ev_id, "saved_at": int(time.time() * 1000), "meta": meta},
+                      f, ensure_ascii=False)
+        os.replace(tmp, _COOP_META_CACHE_FILE)
+    except Exception:
+        _logger.warning("coop 元数据缓存写入失败", exc_info=True)
+
+
 async def collect_daily_dual(now_ms: int | None = None) -> dict:
     """每日挑战 标准+高级+Co-op 三面板合卡数据（bdual 模板）；选期口径与 collect_daily 一致。
 
@@ -366,9 +412,11 @@ async def collect_daily_dual(now_ms: int | None = None) -> dict:
     async def _daily_variant(ev: dict | None, variant: str, adv: bool) -> dict | None:
         if not ev:
             return None
-        meta_url = ev.get("metadata")
-        meta = await nkapi.fetch_body(meta_url) if meta_url else None
-        meta = meta if isinstance(meta, dict) else {}
+        meta = await _fetch_challenge_meta(ev.get("metadata"))
+        if not meta:
+            # 元数据未开放/已失效：没有地图与规则的面板没有展示价值，丢弃该面板
+            _logger.warning("每日 %s 面板元数据缺失，本卡丢弃该面板（%s）", variant, ev.get("metadata"))
+            return None
         issue = _daily_prefix(str(ev.get("name") or ""), adv).replace("每日", "", 1)
         return {
             "variant": variant,
@@ -382,9 +430,20 @@ async def collect_daily_dual(now_ms: int | None = None) -> dict:
     async def _coop_variant(ev: dict | None) -> dict | None:
         if not ev:
             return None
-        meta_url = ev.get("metadata")
-        meta = await nkapi.fetch_body(meta_url) if meta_url else None
-        meta = meta if isinstance(meta, dict) else {}
+        meta = await _fetch_challenge_meta(ev.get("metadata"))
+        stale_used = False
+        if meta:
+            _save_coop_meta_cache(str(ev.get("id") or ""), meta)
+        else:
+            # 元数据拉不到（NK 间歇 404）：只要选中的仍是同一期（id 未变 = 还在持续时间内），
+            # 复用上一期缓存的规则数据继续展示；id 已换（新一期从未拉到）才丢弃面板
+            meta = _load_coop_meta_cache(str(ev.get("id") or ""))
+            stale_used = bool(meta)
+            if stale_used:
+                _logger.warning("每日 coop 面板使用期内缓存元数据（%s）", ev.get("metadata"))
+        if not meta:
+            _logger.warning("每日 coop 面板元数据缺失，本卡丢弃该面板（%s）", ev.get("metadata"))
+            return None
         return {
             "variant": "coop",
             "label": "Co-op",
@@ -392,6 +451,7 @@ async def collect_daily_dual(now_ms: int | None = None) -> dict:
             "meta": meta,
             "ev": ev,
             "map_img": await _challenge_map_img(meta, "daily_map_coop"),
+            "_stale_used": stale_used,
         }
 
     # 标准/高级/Co-op 三路 metadata 与地图图并发拉取（冷缓存时省 2 次串行 RTT）；
@@ -404,6 +464,13 @@ async def collect_daily_dual(now_ms: int | None = None) -> dict:
     variants = [v for v in (std_v, adv_v, coop_v) if v]
     if not variants:
         return {"empty": "暂无每日挑战数据"}
+    coop_stale = any(v.get("_stale_used") for v in variants)
+    stale_note = nkapi._stale_warn(nkapi.URL_DAILY, str(variants[0]["ev"].get("metadata") or ""))
+    if coop_stale:
+        stale_note = (
+            "Co-op 面板为期内缓存数据（NK 数据源暂未开放该期元数据）"
+            + ("；" + stale_note if stale_note else "")
+        )
     return {
         "variants": variants,
         "ev": variants[0]["ev"],
@@ -412,7 +479,7 @@ async def collect_daily_dual(now_ms: int | None = None) -> dict:
         "side_img": "",
         "prefix": "每日挑战",
         "announce": " / ".join(v["issue"] for v in variants),
-        "stale_note": nkapi._stale_warn(nkapi.URL_DAILY, str(variants[0]["ev"].get("metadata") or "")),
+        "stale_note": stale_note,
     }
 
 
@@ -429,14 +496,25 @@ async def collect_daily_coop() -> dict:
     ev = _coop_pick(items, int(time.time() * 1000))
     if not ev:
         return {"empty": "暂无 Co-op 挑战数据"}
-    meta_url = ev.get("metadata")
-    meta = await nkapi.fetch_body(meta_url) if meta_url else None
-    meta = meta if isinstance(meta, dict) else {}
+    meta = await _fetch_challenge_meta(ev.get("metadata"))
+    stale_used = False
+    if meta:
+        _save_coop_meta_cache(str(ev.get("id") or ""), meta)
+    else:
+        # 期内复用：同一 id 仍在持续时间内时，沿用上次成功的元数据
+        meta = _load_coop_meta_cache(str(ev.get("id") or ""))
+        stale_used = bool(meta)
+    if not meta:
+        # 新一期从未拉到过元数据（NK 未开放）：无规则数据的规则卡没有展示价值
+        return {"empty": "Co-op 挑战规则数据尚未开放（NK 数据源未收录该期），请稍后再试"}
     return {
         "prefix": "Co-op 挑战", "meta": meta,
         "map_img": await _challenge_map_img(meta, "coop_map"),
         "side_img": "", "scoring_cn": "固定种子", "kind_label": "Co-op 挑战",
-        "stale_note": nkapi._stale_warn(nkapi.URL_DAILY, ev.get("metadata") or ""),
+        "stale_note": (
+            "Co-op 规则为期内缓存（NK 数据源暂未开放该期元数据）"
+            if stale_used else nkapi._stale_warn(nkapi.URL_DAILY, ev.get("metadata") or "")
+        ),
     }
 
 
