@@ -307,9 +307,10 @@ _TOWER_CATEGORY = {
     "Desperado": "primary",
     "SniperMonkey": "military", "MonkeySub": "military", "MonkeyBuccaneer": "military",
     "HeliPilot": "military", "MonkeyAce": "military", "MortarMonkey": "military",
-    "DartlingGunner": "military", "Skywarden": "military",
+    "DartlingGunner": "military",
     "WizardMonkey": "magic", "SuperMonkey": "magic", "NinjaMonkey": "magic",
-    "Druid": "magic", "Alchemist": "magic", "Mermonkey": "magic",
+    "Alchemist": "magic", "Druid": "magic", "Mermonkey": "magic",
+    "Skywarden": "magic",  # v56 官方分类为 Magic（rushdata towersInOrder）
     "MonkeyVillage": "support", "BananaFarm": "support", "SpikeFactory": "support",
     "EngineerMonkey": "support", "BeastHandler": "support",
 }
@@ -323,8 +324,8 @@ _RACE_TOWER_ORDER = [
     "DartMonkey", "BoomerangMonkey", "BombShooter", "TackShooter", "IceMonkey",
     "GlueGunner", "Desperado",
     "SniperMonkey", "MonkeySub", "MonkeyBuccaneer", "MonkeyAce", "HeliPilot", "MortarMonkey",
-    "DartlingGunner", "Skywarden",
-    "WizardMonkey", "SuperMonkey", "NinjaMonkey", "Druid", "Alchemist", "Mermonkey",
+    "DartlingGunner",
+    "WizardMonkey", "SuperMonkey", "NinjaMonkey", "Alchemist", "Druid", "Mermonkey", "Skywarden",
     "BananaFarm", "SpikeFactory", "MonkeyVillage", "EngineerMonkey", "BeastHandler",
 ]
 _RACE_TOWER_ORDER_INDEX = {name: index for index, name in enumerate(_RACE_TOWER_ORDER)}

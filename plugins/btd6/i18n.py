@@ -160,7 +160,7 @@ TOWER_CN = {
     "Alchemist": "炼金术士", "Druid": "德鲁伊", "BananaFarm": "香蕉农场",
     "EngineerMonkey": "工程师猴", "SpikeFactory": "尖刺工厂", "MonkeyVillage": "猴村",
     "BeastHandler": "驯兽师", "Mermonkey": "人鱼猴", "Desperado": "亡命徒猴",
-    "Skywarden": "天空守卫",
+    "Skywarden": "天穹守望者",
 }
 HERO_CN = {
     "Quincy": "昆西", "Gwendolin": "格温多林", "StrikerJones": "琼斯",
@@ -343,4 +343,10 @@ _RELIC_CN = {
     "CamoTrap": "隐形陷阱", "Thrive": "繁茂", "SuperMonkeyStorm": "超级猴风暴",
     "MonkeyBoost": "猴子增压", "RoadSpikes": "路钉", "MoabMine": "MOAB地雷",
     "GlueTrap": "胶水陷阱", "Techbot": "科技猴",
+    # 战队商店专属遗物：只作为 CT 活动遗物池（event_relics）出现，不会出现在
+    # Boss Rush 的 relicsInOrder 里，早期语料表因此漏收。MonkeyTycoon 采用官方
+    # 简体中文名，其余四个按游戏内分类名（初级/军事/魔法/支援）直译。
+    "MonkeyTycoon": "猴子大亨", "PrimaryPrimates": "初级猴群",
+    "MilitaryMonkeys": "军事猴群", "MagicMonkeys": "魔法猴群",
+    "SupportSimians": "支援猴群",
 }

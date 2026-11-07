@@ -1662,7 +1662,7 @@ def test_translation_tables_unified():
     """两套中文翻译表已合并：驼峰与带空格键归一化命中，译名以总览主路径为准。"""
     assert btd6.tower_cn("MonkeyVillage") == "猴村" == btd6.tower_cn("Monkey Village")
     assert btd6.tower_cn("DartMonkey") == "飞镖猴" == btd6.tower_cn("Dart Monkey")
-    assert btd6.tower_cn("Skywarden") == "天空守卫"
+    assert btd6.tower_cn("Skywarden") == "天穹守望者"  # v56 官方简体中文名
     assert btd6.tower_cn("GlueGunner") == "胶水枪手" == btd6.tower_cn("Glue Gunner")
     assert btd6.hero_cn("StrikerJones") == "琼斯"
     assert btd6.hero_cn("DanDMonke") == "丹迪猴"

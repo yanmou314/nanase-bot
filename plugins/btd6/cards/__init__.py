@@ -116,7 +116,7 @@ from .rules import (  # noqa: F401
     _stat,
     _boss_dual_meta_chips,
     _boss_dual_monkey_grid,
-    _boss_dual_panel,
+    _boss_dual_panel_parts,
     _boss_dual_rule_chips,
     _fmt_range_full,
     boss_dual_html,
@@ -182,6 +182,13 @@ def _render_card_sync(prefix: str, html: str) -> str:
             odyssey.trim_odyssey_png(tmp)
         except Exception:
             _logger.warning("BTD6 远征卡裁剪失败，保留完整画布", exc_info=True)
+    elif prefix.startswith("btd6rule_dual"):
+        # Boss 规则卡：画布按当期猴塔数量留了自适应余量，落盘前裁掉底部
+        # 空白，让卡片高度完全跟随实际格子数（预热与首查共用裁剪后的缓存）
+        try:
+            rules.trim_boss_dual_png(tmp)
+        except Exception:
+            _logger.warning("BTD6 Boss 规则卡裁剪失败，保留完整画布", exc_info=True)
     os.replace(tmp, path)
     if persistent:
         assets._prune_cache_files(card_dir, ".png", PERSISTENT_CARD_FILES, PERSISTENT_CARD_BYTES, {path})

@@ -474,10 +474,12 @@ def _bdual_grid_table(cells: list[str], cols: int = 5) -> str:
     rows_html = []
     for start in range(0, len(cells), cols):
         chunk = cells[start:start + cols]
-        while len(chunk) < cols:
-            chunk.append("<td class='bdual-mk-empty'></td>")
-        # _race_monkey_cell 返回的是 wrap div；塞进 td 时保留结构
-        rows_html.append("<tr>" + "".join(f"<td class='bdual-mk-cell'>{cell}</td>" for cell in chunk) + "</tr>")
+        # _race_monkey_cell 返回的是 wrap div；塞进 td 时保留结构。
+        # 补位空单元必须是独立 td，不能塞进 bdual-mk-cell 里形成 td 嵌套——
+        # WeasyPrint 会把嵌套 td 拆成额外单元格，挤歪最后一行的格子。
+        row = "".join(f"<td class='bdual-mk-cell'>{cell}</td>" for cell in chunk)
+        row += "<td class='bdual-mk-empty'></td>" * (cols - len(chunk))
+        rows_html.append(f"<tr>{row}</tr>")
     return "<table class='bdual-mk-grid'>" + "".join(rows_html) + "</table>"
 
 
@@ -546,21 +548,37 @@ def _boss_dual_rule_chip_count(meta: dict) -> int:
     return n
 
 
-def _boss_dual_panel_h(v: dict) -> int:
+def _boss_dual_section_hs(v: dict) -> tuple[int, int, int]:
+    """单栏三区块的估算高度：(表头+元信息, 规则调节, 可用猴子)。
+
+    与 _boss_dual_panel_parts 的共享行结构一一对应，供画布高度按
+    「逐区块取两栏最大再求和」计算，见 boss_dual_html。
+    """
     meta_v = v.get("meta") or {}
-    grid_rows = _boss_dual_tile_count(meta_v)
     chips = _boss_dual_rule_chip_count(meta_v)
-    # head + meta 两行 + 规则标题/chips（按每行约 3 个估换行）+ 可用猴子标题 + 网格
+    # head + meta 两行；规则标题/chips（按每行约 3 个估换行）；可用猴子标题 + 网格
     chip_rows = max(1, -(-chips // 3))
-    return 50 + 78 + 40 + 34 + chip_rows * 44 + 10 + grid_rows * 122 + 30
+    return (50 + 78, 40 + 34 + chip_rows * 44, 10 + _boss_dual_tile_count(meta_v) * 122 + 30)
 
 
-def _boss_dual_panel(variant_col: dict) -> str:
+# 每期 Boss 可用猴塔数量都不同：grid_rows 已随格子数自动增长，但 CSS 的
+# chip 换行 / 标题 / 内边距仍有估算偏差。宁可留出一整行以上的余量，渲染后
+# 再由 trim_boss_dual_png 按内容自动裁掉底边，也不要估矮——估矮会让最后一行
+# 塔被挤进 PDF 第 2 页，而 -singlefile 只导第 1 页（表现为「猴塔种类不全」）。
+_BDUAL_AUTO_HEIGHT_MARGIN = 260
+
+
+def _boss_dual_panel_parts(variant_col: dict) -> dict[str, str]:
+    """把一栏拆成 3 个共享行区块。
+
+    标准/精英的对应区块会放进同一个 <tr>，由浏览器按两栏最大高度自动撑行，
+    「规则调节」「可用猴子」两个标题因此天然齐平：不估算高度、不补白、
+    不依赖当期 chip 数量，规则再怎么变都保持一致。
+    """
     variant = variant_col["variant"]
     label = variant_col["label"]
     meta = variant_col["meta"]
     head_cls = "elite" if variant == "elite" else "standard"
-    grid_html = _boss_dual_monkey_grid(meta)
     extras = []
     if _custom_round_sets(meta):
         extras.append("自定义回合")
@@ -570,18 +588,23 @@ def _boss_dual_panel(variant_col: dict) -> str:
     extras_html = (
         f"<div class='bdual-extras'>{util._esc('；'.join(extras))}</div>" if extras else ""
     )
-    return (
-        "<div class='bdual-panel'>"
-        f"<div class='bdual-panel-head {head_cls}'>{util._esc(label)}模式</div>"
-        "<div class='bdual-panel-body'>"
-        f"{_boss_dual_meta_chips(variant_col)}"
-        "<div class='bdual-sec-label'>规则调节</div>"
-        f"{_boss_dual_rule_chips(meta)}"
-        f"{extras_html}"
-        "<div class='bdual-sec-label'>可用猴子</div>"
-        f"{grid_html}"
-        "</div></div>"
-    )
+    return {
+        "top": (
+            f"<div class='bdual-panel-head {head_cls}'>{util._esc(label)}模式</div>"
+            f"<div class='bdual-seg-body top'>{_boss_dual_meta_chips(variant_col)}</div>"
+        ),
+        "rule": (
+            "<div class='bdual-seg-body mid'>"
+            "<div class='bdual-sec-label'>规则调节</div>"
+            f"{_boss_dual_rule_chips(meta)}"
+            f"{extras_html}</div>"
+        ),
+        "monkeys": (
+            "<div class='bdual-seg-body last'>"
+            "<div class='bdual-sec-label'>可用猴子</div>"
+            f"{_boss_dual_monkey_grid(meta)}</div>"
+        ),
+    }
 
 
 def boss_dual_html(col: dict) -> str:
@@ -645,18 +668,26 @@ def boss_dual_html(col: dict) -> str:
         "</div></div>"
     )
 
-    std_html = ""
-    eli_html = ""
-    for v in variants:
-        panel = _boss_dual_panel(v)
-        if v.get("variant") == "standard":
-            std_html = f"<div class='bdual-col std'>{panel}</div>"
-        else:
-            eli_html = f"<div class='bdual-col eli'>{panel}</div>"
-    if not std_html:
-        std_html = "<div class='bdual-col std'><div class='bdual-empty'>暂无标准规则</div></div>"
-    if not eli_html:
-        eli_html = "<div class='bdual-col eli'><div class='bdual-empty'>暂无精英规则</div></div>"
+    # 共享表格行：同一 <tr> 的左右单元格由浏览器自动等高，标准/精英的
+    # 「规则调节」「可用猴子」标题始终落在同一水平线上，无需任何高度计算。
+    parts = {str(v.get("variant")): _boss_dual_panel_parts(v) for v in variants}
+    std_p, eli_p = parts.get("standard") or {}, parts.get("elite") or {}
+    rows_html = []
+    for idx, key in enumerate(("top", "rule", "monkeys")):
+        row_cls = "first" if idx == 0 else "last" if idx == 2 else "mid"
+
+        def seg(p: dict) -> str:
+            return p.get(key) or "<div class='bdual-empty'>暂无规则</div>"
+
+        # td 自身就是面板：table-cell 天然撑满整行，短的一侧不会露出页面背景
+        rows_html.append(
+            f"<tr class='bdual-row-{row_cls}'>"
+            f"<td class='bdual-col std'>{seg(std_p)}</td>"
+            "<td class='bdual-gap'></td>"
+            f"<td class='bdual-col eli'>{seg(eli_p)}</td>"
+            "</tr>"
+        )
+    cols_html = "<table class='bdual-cols'>" + "".join(rows_html) + "</table>"
 
     # 状态徽章 + 数据源滞后提示：本卡是「取进行中→无则回退最近一期」的兜底展示，
     # 回退到已结束活动时（游戏内可能已刷新新一期、NK 开放数据尚未收录）必须醒目标注
@@ -677,17 +708,72 @@ def boss_dual_html(col: dict) -> str:
         "</div>"
         f"{source_hint}"
         f"{banner}{mapbar}"
-        f"<div class='bdual-cols'>{std_html}{eli_html}</div>"
+        f"{cols_html}"
     )
     stale_note = col.get("stale_note") or ""
     if stale_note:
         body += f"<div class='bdual-note'>{util._esc(stale_note)}</div>"
 
     # 画布高度：轻量计数，避免为估高二次生成猴子网格 HTML
-    extras_h = 22  # 可能的自定义回合/禁用行
-    col_h = max((_boss_dual_panel_h(v) + extras_h for v in variants), default=420)
+    extras_h = 22  # 可能的自定义回合/禁用行（归属规则区块）
+    # 共享表格行布局下，栏高 = 逐区块取两栏最大再求和；不能取「两栏总高的
+    # 最大值」——当一栏猴塔行多、另一栏规则 chip 行多时，总高最大值会估矮，
+    # 差值可超过一整行网格（122px），导致分页裁塔。
+    sec_max = [0, 0, 0]
+    for v in variants:
+        for i, hs in enumerate(_boss_dual_section_hs(v)):
+            sec_max[i] = max(sec_max[i], hs)
+    col_h = sum(sec_max) + extras_h if variants else 420
     frame_h = 10 + 62 + 8 + 268 + 8 + 104 + 8 + col_h + 8 + (44 if source_hint else 0)
+    # 画布自适应：留足余量保证任意塔数量都不分页，落盘前按实际内容裁边，
+    # 最终卡片高度完全由当期猴塔格子数决定，不写死任何一期数量。
+    frame_h += _BDUAL_AUTO_HEIGHT_MARGIN
     return common._boss_dual_shell(body, frame_h)
+
+
+def trim_boss_dual_png(path: str, pad: int = 24) -> str:
+    """按像素裁掉 Boss 规则卡底部空白，让画布高度随当期猴塔数量自动收紧。
+
+    页面底色是垂直蓝色渐变，水平方向每行都是纯色：取该行最左像素作背景
+    参考，行内出现足够多异色像素即为内容行。不依赖固定高度或固定塔数量，
+    与远征卡的 trim_odyssey_png 同一思路。
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return path
+    try:
+        im = Image.open(path).convert("RGB")
+    except OSError:
+        return path
+    w, h = im.size
+    if h < 40 or w < 40:
+        return path
+
+    def _row_empty(y: int) -> bool:
+        bg = im.getpixel((4, y))
+        n = 0
+        for x in range(10, w - 10, 6):
+            c = im.getpixel((x, y))
+            if c[0] >= 250 and c[1] >= 250 and c[2] >= 250:
+                continue  # pdftoppm 页底可能留未上色白行
+            if abs(c[0] - bg[0]) + abs(c[1] - bg[1]) + abs(c[2] - bg[2]) > 36:
+                n += 1
+                if n >= 3:
+                    return False
+        return True
+
+    last = h - 1
+    step = max(1, h // 400)  # 步长足够细，不会跳过窄边框/小字
+    for y in range(h - 1, -1, -step):
+        if not _row_empty(y):
+            last = y
+            break
+    new_h = min(h, last + pad)
+    if new_h < h * 0.45 or h - new_h < 12:
+        return path  # 异常过矮 / 几乎无空白时放弃裁剪，避免误伤正文
+    im.crop((0, 0, w, new_h)).save(path, format="PNG")
+    return path
 
 
 def _daily_meta_chip_html(variant_col: dict) -> str:

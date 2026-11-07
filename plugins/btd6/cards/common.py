@@ -695,10 +695,19 @@ body {{ width: {BOSS_DUAL_CARD_W}px; height: {h}px; color: #ffffff;
 .bdual-headcell.elite {{ background: linear-gradient(180deg, #e07070 0%, #b83232 100%);
                         border-bottom: 2px solid #7a1e1e; }}
 
-.bdual-cols {{ display: table; width: 100%; table-layout: fixed; }}
-.bdual-col {{ display: table-cell; width: 50%; vertical-align: top; }}
-.bdual-col.std {{ padding: 0 6px 0 0; }}
-.bdual-col.eli {{ padding: 0 0 0 6px; }}
+.bdual-cols {{ display: table; width: 100%; table-layout: fixed; border-spacing: 0; }}
+/* 单元格本身就是面板：table-cell 天然撑满整行，短的一侧也用面板底色补齐，
+   不会出现背景断层；对应区块共享同一 <tr>，两个标题自动齐平。 */
+.bdual-col {{ display: table-cell; width: 49.4%; vertical-align: top; padding: 0;
+              background: #213753; border: 1px solid #3d648c; box-sizing: border-box; }}
+.bdual-gap {{ display: table-cell; width: 1.2%; }}
+.bdual-row-first .bdual-col {{ border-radius: 12px 12px 0 0; border-bottom: none; }}
+.bdual-row-mid .bdual-col {{ border-top: none; border-bottom: none; }}
+.bdual-row-last .bdual-col {{ border-radius: 0 0 12px 12px; border-top: none;
+                              box-shadow: 0 2px 0 rgba(4,16,30,.28); }}
+.bdual-seg-body {{ padding: 0 10px; }}
+.bdual-seg-body.top {{ padding-top: 10px; }}
+.bdual-seg-body.last {{ padding-bottom: 12px; }}
 
 .bdual-panel {{ background: #213753; border: 1px solid #3d648c; border-radius: 12px;
                overflow: hidden; box-shadow: 0 2px 0 rgba(4,16,30,.28); }}
